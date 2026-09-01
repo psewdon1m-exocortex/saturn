@@ -1,0 +1,228 @@
+import { randomBytes } from "node:crypto";
+import { spawnSync } from "node:child_process";
+import fs from "node:fs/promises";
+import path from "node:path";
+import process from "node:process";
+import { fileURLToPath } from "node:url";
+
+const vaultRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const secretDirectory = path.join(vaultRoot, ".secrets");
+const temporaryDirectory = path.join(vaultRoot, ".tmp");
+const sftpDirectory = path.join(temporaryDirectory, "sftp");
+const sftpDataDirectory = path.join(vaultRoot, "data", "sftp");
+const postgresPasswordFile = path.join(secretDirectory, "dev-postgres-password");
+const ownerTokenFile = path.join(secretDirectory, "dev-owner-bootstrap-token");
+const authPepperFile = path.join(secretDirectory, "dev-auth-pepper");
+const dropPepperFile = path.join(secretDirectory, "dev-drop-pepper");
+const sharePepperFile = path.join(secretDirectory, "dev-share-pepper");
+const devicePepperFile = path.join(secretDirectory, "dev-device-pepper");
+const backupPepperFile = path.join(secretDirectory, "dev-backup-pepper");
+const laboratoryPepperFile = path.join(secretDirectory, "dev-laboratory-pepper");
+const telegramBotTokenFile = path.join(secretDirectory, "dev-telegram-bot-token");
+const telegramWebhookSecretFile = path.join(secretDirectory, "dev-telegram-webhook-secret");
+const hostKeyFile = path.join(sftpDirectory, "ssh_host_ed25519_key");
+const clientKeyFile = path.join(sftpDirectory, "dev_client_ed25519");
+const usersFile = path.join(sftpDirectory, "users.conf");
+const runtimeEnvironmentFile = path.join(temporaryDirectory, "dev-runtime.env");
+
+function run(command, args, options = {}) {
+  const result = spawnSync(command, args, {
+    cwd: vaultRoot,
+    encoding: "utf8",
+    windowsHide: true,
+    ...options,
+  });
+  if (result.status !== 0) {
+    throw new Error(`${command} failed: ${(result.stderr || result.stdout || "unknown error").trim()}`);
+  }
+  return result.stdout.trim();
+}
+
+async function ensureSecret(filePath) {
+  try {
+    const existing = (await fs.readFile(filePath, "utf8")).trim();
+    if (existing) return existing;
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
+  const value = randomBytes(32).toString("base64url");
+  await fs.writeFile(filePath, `${value}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
+  return value;
+}
+
+function restrictWindowsAcl(filePath) {
+  if (process.platform !== "win32") return;
+  const identity = `${process.env.USERDOMAIN ?? ""}\\${process.env.USERNAME ?? ""}`;
+  if (identity === "\\") return;
+  run("icacls.exe", [
+    filePath,
+    "/inheritance:r",
+    "/grant:r",
+    `${identity}:(F)`,
+    "NT AUTHORITY\\SYSTEM:(F)",
+    "BUILTIN\\Administrators:(F)",
+  ]);
+}
+
+function environmentLine(key, value) {
+  if (/[\r\n]/.test(value)) throw new Error(`Environment value for ${key} contains a newline`);
+  return `${key}=${value}`;
+}
+
+export async function prepareDevelopmentEnvironment() {
+  await Promise.all([
+    fs.mkdir(secretDirectory, { recursive: true }),
+    fs.mkdir(sftpDirectory, { recursive: true }),
+    fs.mkdir(sftpDataDirectory, { recursive: true }),
+  ]);
+  const postgresPassword = await ensureSecret(postgresPasswordFile);
+  await ensureSecret(ownerTokenFile);
+  await ensureSecret(authPepperFile);
+  await ensureSecret(dropPepperFile);
+  await ensureSecret(sharePepperFile);
+  await ensureSecret(devicePepperFile);
+  await ensureSecret(backupPepperFile);
+  await ensureSecret(laboratoryPepperFile);
+  try {
+    await fs.access(telegramBotTokenFile);
+  } catch {
+    await fs.writeFile(telegramBotTokenFile, `100000:${randomBytes(32).toString("base64url")}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
+  }
+  await ensureSecret(telegramWebhookSecretFile);
+
+  try {
+    await fs.access(hostKeyFile);
+  } catch {
+    run("ssh-keygen.exe", ["-q", "-t", "ed25519", "-N", "", "-C", "vault-dev-only", "-f", hostKeyFile]);
+  }
+  try {
+    await fs.access(clientKeyFile);
+  } catch {
+    run("ssh-keygen.exe", ["-q", "-t", "ed25519", "-N", "", "-C", "vault-dev-client", "-f", clientKeyFile]);
+  }
+  const fingerprintOutput = run("ssh-keygen.exe", ["-l", "-E", "sha256", "-f", `${hostKeyFile}.pub`]);
+  const hostFingerprint = fingerprintOutput.split(/\s+/)[1];
+  if (!/^SHA256:[A-Za-z0-9+/]{43}=?$/.test(hostFingerprint ?? "")) {
+    throw new Error("Could not derive the local SFTP host fingerprint");
+  }
+
+  await fs.writeFile(usersFile, "vault::1001:1001:gateway\n", { encoding: "utf8", mode: 0o600 });
+  const databaseUrl = `postgres://vault:${encodeURIComponent(postgresPassword)}@127.0.0.1:55432/vault`;
+  const environment = {
+    NODE_ENV: "development",
+    PUBLIC_ORIGIN: "http://127.0.0.1:5173",
+    API_HOST: "127.0.0.1",
+    API_PORT: "3000",
+    WORKER_HOST: "127.0.0.1",
+    WORKER_PORT: "3001",
+    DATABASE_URL: databaseUrl,
+    OWNER_BOOTSTRAP_TOKEN_FILE: ownerTokenFile,
+    AUTH_PEPPER_FILE: authPepperFile,
+    AUTH_SESSION_IDLE_TTL_MS: "900000",
+    AUTH_SESSION_ABSOLUTE_TTL_MS: "43200000",
+    AUTH_REAUTH_TTL_MS: "300000",
+    AUTH_FAILURE_LIMIT: "5",
+    AUTH_FAILURE_WINDOW_MS: "900000",
+    DROP_PEPPER_FILE: dropPepperFile,
+    DROP_CODE_TTL_MS: "300000",
+    DROP_LINK_CODE_TTL_MS: "300000",
+    DROP_SESSION_TTL_MS: "900000",
+    DROP_MAX_FILES: "20",
+    DROP_MAX_BYTES: "21474836480",
+    DROP_FAILURE_LIMIT: "5",
+    DROP_GLOBAL_FAILURE_LIMIT: "100",
+    DROP_FAILURE_WINDOW_MS: "900000",
+    SHARE_PEPPER_FILE: sharePepperFile,
+    SHARE_ENABLED: "true",
+    SHARE_DEFAULT_EXPIRY_MS: "604800000",
+    SHARE_MAX_EXPIRY_MS: "31536000000",
+    SHARE_SESSION_TTL_MS: "1800000",
+    SHARE_PASSWORD_FAILURE_LIMIT: "5",
+    SHARE_PASSWORD_FAILURE_WINDOW_MS: "900000",
+    SHARE_PACKAGE_MAX_FILES: "5000",
+    SHARE_PACKAGE_MAX_BYTES: "5368709120",
+    SHARE_PACKAGE_MAX_DURATION_MS: "600000",
+    SHARE_STREAM_REVALIDATE_BYTES: "1048576",
+    DEVICE_PEPPER_FILE: devicePepperFile,
+    WEBDAV_ENABLED: "true",
+    WEBDAV_PROPFIND_MAX_ITEMS: "1000",
+    DEVICE_DELETE_MAX_ITEMS: "1000",
+    DEVICE_DELETE_WINDOW_MS: "900000",
+    BACKUP_PEPPER_FILE: backupPepperFile,
+    LABORATORY_PEPPER_FILE: laboratoryPepperFile,
+    BACKUP_INGEST_ENABLED: "true",
+    BACKUP_TRUST_CLIENT_CERT_HEADER: "false",
+    BACKUP_TOKEN_ROTATION_GRACE_MS: "3600000",
+    BACKUP_REQUIRE_ENCRYPTION: "true",
+    BACKUP_MAX_RUN_BYTES: "21474836480",
+    BACKUP_DAILY_QUOTA_BYTES: "42949672960",
+    BACKUP_STORED_QUOTA_BYTES: "536870912000",
+    BACKUP_MAX_CONCURRENT_RUNS: "1",
+    BACKUP_FRESHNESS_SLA_MS: "86400000",
+    BACKUP_RETENTION_DAILY: "7",
+    BACKUP_RETENTION_WEEKLY: "4",
+    BACKUP_RETENTION_MONTHLY: "12",
+    BACKUP_RETENTION_YEARLY: "3",
+    LABORATORY_ENABLED: "true",
+    LABORATORY_PUBLIC_ENABLED: "false",
+    LABORATORY_TOKEN_ROTATION_GRACE_MS: "3600000",
+    LABORATORY_MAX_CONCURRENT_PUBLIC_STREAMS: "16",
+    TELEGRAM_ENABLED: "false",
+    TELEGRAM_BOT_TOKEN_FILE: telegramBotTokenFile,
+    TELEGRAM_WEBHOOK_SECRET_FILE: telegramWebhookSecretFile,
+    TELEGRAM_API_BASE_URL: "https://api.telegram.org/",
+    TELEGRAM_PROVIDER_TIMEOUT_MS: "10000",
+    TELEGRAM_WEBHOOK_MAX_BYTES: "65536",
+    TELEGRAM_WEBHOOK_MAX_CONNECTIONS: "8",
+    STORAGE_HOST: "127.0.0.1",
+    STORAGE_PORT: "2222",
+    STORAGE_USER: "vault",
+    STORAGE_ROOT: "gateway",
+    STORAGE_HOST_FINGERPRINT: hostFingerprint,
+    STORAGE_AUTH_MODE: "private_key_file",
+    STORAGE_PASSWORD_FILE: "",
+    STORAGE_PRIVATE_KEY_FILE: clientKeyFile,
+    STORAGE_OPERATION_TIMEOUT_MS: "60000",
+    STORAGE_MAX_CONNECTIONS: "8",
+    UPLOAD_MAX_BYTES: "21474836480",
+    UPLOAD_CHUNK_MAX_BYTES: "8388608",
+    UPLOAD_INCOMPLETE_TTL_MS: "86400000",
+    TRASH_RETENTION_MS: "7776000000",
+    PURGE_ENABLED: "false",
+    READINESS_REQUIRE_STORAGE: "true",
+    LOG_LEVEL: "info",
+    WORKER_HEARTBEAT_INTERVAL_MS: "5000",
+    WORKER_STALE_AFTER_MS: "20000",
+    RECONCILIATION_INTERVAL_MS: "21600000",
+    RECOVERY_SPOOL_DIR: "spool/recovery",
+    RECOVERY_ARCHIVE_DIR: "data/recovery",
+    RECOVERY_MAX_ARCHIVE_BYTES: "10737418240",
+    RECOVERY_MAX_MEMBER_BYTES: "8589934592",
+    RECOVERY_MAX_EXTRACTED_BYTES: "12884901888",
+    RECOVERY_MAX_ENTRIES: "512",
+    RECOVERY_MAX_COMPRESSION_RATIO: "200",
+    RECOVERY_MAX_MANIFEST_BYTES: "1048576",
+    RECOVERY_BACKUP_INTERVAL_MS: "21600000",
+    PG_DUMP_BIN: "pg_dump",
+    PG_RESTORE_BIN: "pg_restore",
+  };
+  await fs.writeFile(
+    runtimeEnvironmentFile,
+    `${Object.entries(environment).map(([key, value]) => environmentLine(key, value)).join("\n")}\n`,
+    { encoding: "utf8", mode: 0o600 },
+  );
+  for (const filePath of [postgresPasswordFile, ownerTokenFile, authPepperFile, dropPepperFile, sharePepperFile, devicePepperFile, backupPepperFile, laboratoryPepperFile, telegramBotTokenFile, telegramWebhookSecretFile, hostKeyFile, clientKeyFile, usersFile, runtimeEnvironmentFile]) {
+    restrictWindowsAcl(filePath);
+  }
+  return { environment, hostFingerprint, runtimeEnvironmentFile };
+}
+
+if (path.resolve(process.argv[1] ?? "") === fileURLToPath(import.meta.url)) {
+  const prepared = await prepareDevelopmentEnvironment();
+  process.stdout.write(`${JSON.stringify({
+    result: "ready",
+    runtimeEnvironmentFile: path.relative(vaultRoot, prepared.runtimeEnvironmentFile),
+    hostFingerprint: prepared.hostFingerprint,
+    secrets: "generated-and-protected",
+  })}\n`);
+}

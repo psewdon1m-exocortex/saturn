@@ -1,0 +1,73 @@
+name: vault-dev
+
+services:
+  postgres:
+    image: postgres:18.1-alpine@sha256:aa6eb304ddb6dd26df23d05db4e5cb05af8951cda3e0dc57731b771e0ef4ab29
+    environment:
+      POSTGRES_DB: vault
+      POSTGRES_USER: vault
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets:
+      - postgres_password
+    ports:
+      - "127.0.0.1:55432:5432"
+    tmpfs:
+      - /var/lib/postgresql:rw,noexec,nosuid,size=512m
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vault -d vault"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+    restart: "no"
+    pids_limit: 256
+    mem_limit: 768m
+    cpus: 2.0
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETGID
+      - SETUID
+
+  sftp:
+    image: atmoz/sftp:alpine@sha256:81fa92512bf8ead4849f33c1c153907b86d32d77704d1c62a9c70b4316ae9e50
+    entrypoint: ["/bin/sh", "/bootstrap/entrypoint.sh"]
+    ports:
+      - "127.0.0.1:2222:22"
+    volumes:
+      - ./.tmp/sftp/users.conf:/etc/sftp/users.conf:ro
+      - ./infra/dev/sftp-entrypoint.sh:/bootstrap/entrypoint.sh:ro
+      - ./.tmp/sftp/ssh_host_ed25519_key:/hostkeys/ssh_host_ed25519_key:ro
+      - ./.tmp/sftp/dev_client_ed25519.pub:/home/vault/.ssh/keys/dev_client_ed25519.pub:ro
+      - ./data/sftp:/home/vault/gateway
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep sshd >/dev/null"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 3s
+    restart: "no"
+    pids_limit: 128
+    mem_limit: 192m
+    cpus: 1.0
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    security_opt:
+      - no-new-privileges:true
+
+secrets:
+  postgres_password:
+    file: ./.secrets/dev-postgres-password

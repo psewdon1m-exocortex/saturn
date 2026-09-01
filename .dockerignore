@@ -1,0 +1,15 @@
+.git
+.env
+.env.*
+.secrets
+node_modules
+**/node_modules
+dist
+**/dist
+coverage
+artifacts
+.tmp
+data
+docs/server_password.txt
+*.key
+*.pem

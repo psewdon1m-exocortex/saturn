@@ -1,0 +1,17 @@
+{
+  "name": "@saturn/storage-spike",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "qualify": "node src/qualify.mjs",
+    "verify:large": "node src/verify-report.mjs"
+  },
+  "dependencies": {
+    "ssh2": "1.17.0"
+  }
+}

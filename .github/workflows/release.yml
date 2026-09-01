@@ -1,0 +1,138 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+  packages: write
+  id-token: write
+
+concurrency:
+  group: vault-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "24"
+      - name: Derive immutable release identity
+        id: identity
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          node -e 'if (!/^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/.test(process.argv[1])) process.exit(1)' "$version"
+          repository="${GITHUB_REPOSITORY,,}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "image_root=ghcr.io/$repository" >> "$GITHUB_OUTPUT"
+      - name: Install pinned pnpm
+        run: corepack enable && corepack prepare pnpm@11.24.0 --activate
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Install Chromium runtime
+        run: pnpm exec playwright install --with-deps chromium
+      - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+      - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build candidate application image once
+        id: app
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+        with:
+          context: .
+          file: infra/production/Dockerfile
+          target: app
+          push: true
+          tags: ${{ steps.identity.outputs.image_root }}/vault-app:candidate-${{ github.sha }}
+          build-args: |
+            VAULT_VERSION=${{ steps.identity.outputs.version }}
+            VAULT_SOURCE_REVISION=${{ github.sha }}
+          provenance: mode=max
+          sbom: true
+      - name: Build candidate web image once
+        id: web
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+        with:
+          context: .
+          file: infra/production/Dockerfile
+          target: web
+          push: true
+          tags: ${{ steps.identity.outputs.image_root }}/vault-web:candidate-${{ github.sha }}
+          build-args: |
+            VAULT_VERSION=${{ steps.identity.outputs.version }}
+            VAULT_SOURCE_REVISION=${{ github.sha }}
+          provenance: mode=max
+          sbom: true
+      - name: Test the exact candidate image digests
+        shell: bash
+        run: |
+          docker pull "${{ steps.identity.outputs.image_root }}/vault-app@${{ steps.app.outputs.digest }}"
+          docker pull "${{ steps.identity.outputs.image_root }}/vault-web@${{ steps.web.outputs.digest }}"
+          docker tag "${{ steps.identity.outputs.image_root }}/vault-app@${{ steps.app.outputs.digest }}" vault-app:stage13
+          docker tag "${{ steps.identity.outputs.image_root }}/vault-web@${{ steps.web.outputs.digest }}" vault-web:stage13
+          VAULT_STAGE13_PREBUILT=true pnpm verify:stage:13
+      - name: Build signed release bundle
+        env:
+          RELEASE_SIGNING_PRIVATE_KEY: ${{ secrets.VAULT_RELEASE_SIGNING_PRIVATE_KEY }}
+          VAULT_BUNDLE_URL: https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/vault-${{ steps.identity.outputs.version }}.zip
+        shell: bash
+        run: |
+          test -n "$RELEASE_SIGNING_PRIVATE_KEY"
+          install -m 0600 /dev/null "$RUNNER_TEMP/vault-release-key.pem"
+          printf '%s' "$RELEASE_SIGNING_PRIVATE_KEY" > "$RUNNER_TEMP/vault-release-key.pem"
+          node scripts/release-bundle.mjs build \
+            "${{ steps.identity.outputs.version }}" \
+            "${{ github.sha }}" \
+            "${{ steps.identity.outputs.image_root }}/vault-app@${{ steps.app.outputs.digest }}" \
+            "${{ steps.identity.outputs.image_root }}/vault-web@${{ steps.web.outputs.digest }}" \
+            "$RUNNER_TEMP/vault-release-key.pem" \
+            artifacts/release
+          rm -f "$RUNNER_TEMP/vault-release-key.pem"
+      - name: Promote tested digests to version tags
+        shell: bash
+        run: |
+          if docker buildx imagetools inspect "${{ steps.identity.outputs.image_root }}/vault-app:${{ steps.identity.outputs.version }}" >/dev/null 2>&1; then
+            echo "application version tag already exists; refusing replacement" >&2
+            exit 1
+          fi
+          if docker buildx imagetools inspect "${{ steps.identity.outputs.image_root }}/vault-web:${{ steps.identity.outputs.version }}" >/dev/null 2>&1; then
+            echo "web version tag already exists; refusing replacement" >&2
+            exit 1
+          fi
+          docker buildx imagetools create --tag "${{ steps.identity.outputs.image_root }}/vault-app:${{ steps.identity.outputs.version }}" "${{ steps.identity.outputs.image_root }}/vault-app@${{ steps.app.outputs.digest }}"
+          docker buildx imagetools create --tag "${{ steps.identity.outputs.image_root }}/vault-web:${{ steps.identity.outputs.version }}" "${{ steps.identity.outputs.image_root }}/vault-web@${{ steps.web.outputs.digest }}"
+      - name: Publish under the existing immutable tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "release already exists; refusing replacement" >&2
+            exit 1
+          fi
+          gh release create "$GITHUB_REF_NAME" \
+            --verify-tag \
+            --title "Saturn ${{ steps.identity.outputs.version }}" \
+            --generate-notes \
+            artifacts/release/*
+      - name: Preserve release evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: vault-release-${{ github.ref_name }}
+          path: |
+            artifacts/release/
+            artifacts/verification/stage-13-production-hardening.json
+          if-no-files-found: ignore
+          retention-days: 30

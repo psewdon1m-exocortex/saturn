@@ -1,0 +1,32 @@
+# Local secrets and runtime configuration
+.env
+.env.*
+!.env.example
+.secrets/
+docs/server_password.txt
+*.key
+*.pem
+
+# Dependencies and generated output
+node_modules/
+.pnpm-store/
+pnpm-debug.log*
+dist/
+coverage/
+*.tsbuildinfo
+.cache/
+.tmp/
+*.log
+
+# Test and runtime state
+artifacts/
+playwright-report/
+test-results/
+spool/
+data/
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

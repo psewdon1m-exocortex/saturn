@@ -1,0 +1,9 @@
+{
+  "name": "@saturn/pnpm-runner",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Workspace-local pnpm binary; not part of the product runtime.",
+  "dependencies": {
+    "pnpm": "11.24.0"
+  }
+}

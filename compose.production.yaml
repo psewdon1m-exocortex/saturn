@@ -1,0 +1,208 @@
+name: vault-prod
+
+x-vault-environment: &vault-environment
+  env_file:
+    - ./infra/production/.env.production
+  networks:
+    - backend
+  restart: unless-stopped
+  read_only: true
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,size=64m,mode=1777
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  pids_limit: 256
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "5"
+  secrets:
+    - source: database_password
+      target: database_password
+      uid: "1000"
+      gid: "1000"
+      mode: 0400
+    - source: owner_access_key
+      target: owner_access_key
+      uid: "1000"
+      gid: "1000"
+      mode: 0400
+    - source: auth_pepper
+      target: auth_pepper
+      uid: "1000"
+      gid: "1000"
+      mode: 0400
+    - source: drop_pepper
+      target: drop_pepper
+      uid: "1000"
+      gid: "1000"
+      mode: 0400
+    - source: share_pepper
+      target: share_pepper
+      uid: "1000"
+      gid: "1000"
+      mode: 0400
+    - source: device_pepper
+      target: device_pepper
+      uid: "1000"
+      gid: "1000"
+      mode: 0400
+    - source: backup_pepper
+      target: backup_pepper
+      uid: "1000"
+      gid: "1000"
+      mode: 0400
+    - source: laboratory_pepper
+      target: laboratory_pepper
+      uid: "1000"
+      gid: "1000"
+      mode: 0400
+    - source: storage_private_key
+      target: storage_private_key
+      uid: "1000"
+      gid: "1000"
+      mode: 0400
+
+services:
+  postgres:
+    image: postgres:18.1-alpine@sha256:aa6eb304ddb6dd26df23d05db4e5cb05af8951cda3e0dc57731b771e0ef4ab29
+    environment:
+      POSTGRES_DB: vault
+      POSTGRES_USER: vault
+      POSTGRES_PASSWORD_FILE: /run/secrets/database_password
+    secrets:
+      - database_password
+    volumes:
+      - postgres_data:/var/lib/postgresql
+    networks:
+      - backend
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=32m,mode=1777
+      - /run/postgresql:rw,noexec,nosuid,size=16m
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vault -d vault"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: ["ALL"]
+    cap_add: ["CHOWN", "DAC_OVERRIDE", "FOWNER", "SETGID", "SETUID"]
+    pids_limit: 256
+    mem_limit: 1g
+    cpus: 2.0
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "5" }
+
+  migrate:
+    <<: *vault-environment
+    image: ${VAULT_APP_IMAGE:?set VAULT_APP_IMAGE to an immutable digest}
+    command: ["node", "/app/scripts/migrate-runtime.mjs"]
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  worker:
+    <<: *vault-environment
+    image: ${VAULT_APP_IMAGE:?set VAULT_APP_IMAGE to an immutable digest}
+    command: ["node", "/app/worker/dist/main.js"]
+    volumes:
+      - recovery_spool:/var/lib/vault/spool
+      - recovery_archives:/var/lib/vault/recovery
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3001/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 18
+      start_period: 15s
+    mem_limit: 768m
+    cpus: 1.5
+
+  api:
+    <<: *vault-environment
+    image: ${VAULT_APP_IMAGE:?set VAULT_APP_IMAGE to an immutable digest}
+    command: ["node", "/app/api/dist/main.js"]
+    depends_on:
+      worker:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 18
+      start_period: 15s
+    mem_limit: 1g
+    cpus: 2.0
+
+  edge:
+    image: ${VAULT_WEB_IMAGE:?set VAULT_WEB_IMAGE to an immutable digest}
+    env_file:
+      - ./infra/production/.env.production
+    ports:
+      - "80:8080"
+      - "443:8443"
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - edge
+      - backend
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=32m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: ["ALL"]
+    pids_limit: 128
+    mem_limit: 256m
+    cpus: 1.0
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "5" }
+
+volumes:
+  postgres_data:
+  recovery_spool:
+  recovery_archives:
+  caddy_data:
+  caddy_config:
+
+networks:
+  edge:
+  backend:
+    internal: true
+
+secrets:
+  database_password:
+    file: ${VAULT_SECRET_ROOT:?set VAULT_SECRET_ROOT}/database_password
+  owner_access_key:
+    file: ${VAULT_SECRET_ROOT:?set VAULT_SECRET_ROOT}/owner_access_key
+  auth_pepper:
+    file: ${VAULT_SECRET_ROOT:?set VAULT_SECRET_ROOT}/auth_pepper
+  drop_pepper:
+    file: ${VAULT_SECRET_ROOT:?set VAULT_SECRET_ROOT}/drop_pepper
+  share_pepper:
+    file: ${VAULT_SECRET_ROOT:?set VAULT_SECRET_ROOT}/share_pepper
+  device_pepper:
+    file: ${VAULT_SECRET_ROOT:?set VAULT_SECRET_ROOT}/device_pepper
+  backup_pepper:
+    file: ${VAULT_SECRET_ROOT:?set VAULT_SECRET_ROOT}/backup_pepper
+  laboratory_pepper:
+    file: ${VAULT_SECRET_ROOT:?set VAULT_SECRET_ROOT}/laboratory_pepper
+  storage_private_key:
+    file: ${VAULT_SECRET_ROOT:?set VAULT_SECRET_ROOT}/storage_private_key

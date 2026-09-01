@@ -1,0 +1,32 @@
+{
+  "name": "@saturn/worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/main.ts",
+    "build": "tsup",
+    "start": "node dist/main.js",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@saturn/audit": "workspace:*",
+    "@saturn/config": "workspace:*",
+    "@saturn/contracts": "workspace:*",
+    "@saturn/database": "workspace:*",
+    "@saturn/protection": "workspace:*",
+    "@saturn/recovery": "workspace:*",
+    "@saturn/shares": "workspace:*",
+    "@saturn/storage": "workspace:*",
+    "@saturn/storage-health": "workspace:*",
+    "dotenv": "17.4.2",
+    "fastify": "5.12.1"
+  },
+  "devDependencies": {
+    "tsx": "4.23.12",
+    "tsup": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "environment": "DEV",
+  "host": "u657278-sub1.your-storagebox.de",
+  "port": 22,
+  "username": "u657278-sub1",
+  "root": ".",
+  "hostFingerprint": "SHA256:EMlfI8GsRIfpVkoW1H2u0zYVpFGKkIMKHFZIRkf2ioI",
+  "safeConnectionPool": 8,
+  "operationTimeoutMs": 60000,
+  "qualificationBytes": 67108864,
+  "downloadSegmentBytes": 67108864,
+  "chunkBytes": 1048576,
+  "requestBytes": 131072,
+  "requestConcurrency": 64,
+  "transferLanes": 4,
+  "laneRequestConcurrency": 32
+}

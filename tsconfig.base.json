@@ -1,0 +1,43 @@
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "lib": ["ES2023"],
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "useUnknownInCatchVariables": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "verbatimModuleSyntax": true,
+    "experimentalDecorators": true,
+    "emitDecoratorMetadata": true,
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+    "sourceMap": true,
+    "declaration": true,
+    "declarationMap": true,
+    "baseUrl": ".",
+    "paths": {
+      "@saturn/audit": ["packages/audit/src/index.ts"],
+      "@saturn/auth": ["packages/auth/src/index.ts"],
+      "@saturn/backup-ingest": ["packages/backup-ingest/src/index.ts"],
+      "@saturn/config": ["packages/config/src/index.ts"],
+      "@saturn/contracts": ["packages/contracts/src/index.ts"],
+      "@saturn/database": ["packages/database/src/index.ts"],
+      "@saturn/drop": ["packages/drop/src/index.ts"],
+      "@saturn/shares": ["packages/shares/src/index.ts"],
+      "@saturn/sync": ["packages/sync/src/index.ts"],
+      "@saturn/file-core": ["packages/file-core/src/index.ts"],
+      "@saturn/laboratory": ["packages/laboratory/src/index.ts"],
+      "@saturn/protection": ["packages/protection/src/index.ts"],
+      "@saturn/recovery": ["packages/recovery/src/index.ts"],
+      "@saturn/storage": ["packages/storage/src/index.ts"],
+      "@saturn/storage-health": ["packages/storage-health/src/index.ts"]
+    }
+  }
+}

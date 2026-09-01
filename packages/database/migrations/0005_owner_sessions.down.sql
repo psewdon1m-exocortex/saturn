@@ -1,0 +1,5 @@
+DELETE FROM resources
+WHERE id = '00000000-0000-7000-8000-000000000002';
+DROP TABLE IF EXISTS owner_preferences;
+DROP TABLE IF EXISTS auth_attempts;
+DROP TABLE IF EXISTS web_sessions;

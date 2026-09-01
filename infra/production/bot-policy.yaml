@@ -1,0 +1,20 @@
+version: "1"
+default: deny
+zones:
+  owner_api:
+    paths: ["/api/*", "/dav*"]
+    classification: private
+    discovery: deny
+  public_capabilities:
+    paths: ["/s/*", "/a/*", "/drop"]
+    classification: public_non_indexable
+    discovery: deny
+  internal:
+    paths: ["/internal/*"]
+    classification: concealed
+    discovery: deny
+purposes:
+  classic_search: deny
+  ai_search: deny
+  model_training: deny
+  unknown_automation: rate_limit_then_block

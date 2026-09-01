@@ -1,0 +1,67 @@
+{
+  admin off
+  https_port 8443
+}
+
+https://localhost:8443 {
+  tls internal
+  encode zstd gzip
+  header {
+    -Server
+    Strict-Transport-Security "max-age=31536000"
+    X-Content-Type-Options "nosniff"
+    X-Frame-Options "DENY"
+    X-Robots-Tag "noindex, nofollow, noarchive"
+    Referrer-Policy "no-referrer"
+    Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=(), usb=()"
+    Content-Security-Policy "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; frame-src 'self' blob:"
+  }
+  @blocked path /.git* /.env* /.secrets* /artifacts* /data* /spool* /docs* /*.map
+  respond @blocked 404
+  handle /api/* {
+    reverse_proxy vault-stage13-api:3000
+  }
+  handle /a/* {
+    reverse_proxy vault-stage13-api:3000
+  }
+  handle /dav* {
+    reverse_proxy vault-stage13-api:3000
+  }
+  handle /internal/telegram/* {
+    reverse_proxy vault-stage13-api:3000
+  }
+  handle /health/live {
+    reverse_proxy vault-stage13-api:3000
+  }
+  handle /health/ready {
+    reverse_proxy vault-stage13-api:3000
+  }
+  handle /assets/* {
+    root * /srv
+    header Cache-Control "public, max-age=31536000, immutable"
+    file_server
+  }
+  handle /robots.txt {
+    root * /srv
+    file_server
+  }
+  handle / {
+    root * /srv
+    rewrite * /index.html
+    header Cache-Control "private, no-store"
+    file_server
+  }
+  handle /drop {
+    root * /srv
+    rewrite * /index.html
+    header Cache-Control "private, no-store"
+    file_server
+  }
+  handle /s/* {
+    root * /srv
+    rewrite * /index.html
+    header Cache-Control "private, no-store"
+    file_server
+  }
+  respond 404
+}
