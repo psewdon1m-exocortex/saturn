@@ -631,7 +631,13 @@ describe("owner Saturn UI", () => {
 
     expect(await screen.findByRole("heading", { name: "settings" })).toBeTruthy();
     for (const title of ["Appearance", "Security", "Telegram bot connection", "Backup", "Updates", "Logs"]) expect(screen.getByRole("heading", { name: title })).toBeTruthy();
-    fireEvent.change(screen.getByLabelText("Accent color"), { target: { value: "#111111" } });
+    await waitFor(() => {
+      const request = fetchMock.mock.calls.find((call) => requestUrl(call[0]).endsWith("/auth/preferences") && call[1]?.method !== "PUT");
+      expect(request).toBeTruthy();
+    });
+    const accentField = screen.getByLabelText("Accent color");
+    fireEvent.change(accentField, { target: { value: "#111111" } });
+    expect(accentField).toHaveProperty("value", "#111111");
     fireEvent.click(screen.getByRole("button", { name: "Apply color" }));
     expect(await screen.findByText("Accent color applied.")).toBeTruthy();
     await waitFor(() => {
