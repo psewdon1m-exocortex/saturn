@@ -2,6 +2,7 @@
 .env
 .env.*
 !.env.example
+!infra/production/.env.production.example
 .secrets/
 docs/server_password.txt
 *.key
