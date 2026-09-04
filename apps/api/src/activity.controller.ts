@@ -1,7 +1,9 @@
 import { Readable } from "node:stream";
-import { Controller, Get, Headers, Inject, Query, Res, UseFilters, UseGuards } from "@nestjs/common";
+import { Controller, Get, Inject, Query, Res, UseFilters, UseGuards } from "@nestjs/common";
 import type { AuditService } from "@saturn/audit";
+import archiver from "archiver";
 import type { FastifyReply } from "fastify";
+import { v7 as uuidv7 } from "uuid";
 import { OwnerTokenGuard } from "./owner-token.guard.js";
 import { AUDIT_SERVICE } from "./tokens.js";
 import { SaturnApiExceptionFilter } from "./saturn-api-exception.filter.js";
@@ -25,17 +27,25 @@ export class ActivityController {
   }
 
   @Get("export")
-  export(
+  async export(
     @Query("limit") limit: string | undefined,
-    @Headers("accept") accept: string | undefined,
     @Res() reply: FastifyReply,
-  ): void {
-    if (accept !== undefined && !accept.includes("application/x-ndjson") && !accept.includes("*/*")) {
-      throw new Error("Audit export Accept header is invalid");
-    }
+  ): Promise<void> {
+    const maximum = optionalInteger(limit) ?? 10_000;
+    const createdAt = new Date();
+    await this.audit.write({ actorType: "owner", actorId: "owner", action: "logs.export", outcome: "success", correlationId: `logs-export:${uuidv7()}`, details: { maximumEvents: maximum } });
+    const archive = archiver("zip", { zlib: { level: 6 } });
+    const timestamp = createdAt.toISOString().replaceAll(":", "-");
     reply
-      .header("Content-Type", "application/x-ndjson")
-      .header("Content-Disposition", "attachment; filename=activity.jsonl")
-      .send(Readable.from(this.audit.exportJsonl(optionalInteger(limit) ?? 10_000)));
+      .header("Content-Type", "application/zip")
+      .header("Cache-Control", "no-store, private")
+      .header("Pragma", "no-cache")
+      .header("Content-Disposition", `attachment; filename=saturn-logs-${timestamp}.zip`)
+      .send(archive);
+    archive.append(JSON.stringify({ schema: "saturn.logs.v1", service: "saturn-gateway", createdAt: createdAt.toISOString(), maximumEvents: maximum, members: ["events.jsonl", "errors.json", "README.txt"] }, null, 2), { name: "manifest.json" });
+    archive.append(Readable.from(this.audit.exportJsonl(maximum)), { name: "events.jsonl" });
+    archive.append("[]\n", { name: "errors.json" });
+    archive.append("Saturn retained structured audit export. Secrets are recursively redacted before storage. Timestamps are UTC ISO-8601; correlate records by correlationId.\n", { name: "README.txt" });
+    await archive.finalize();
   }
 }

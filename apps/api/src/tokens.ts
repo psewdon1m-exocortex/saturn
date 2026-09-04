@@ -17,6 +17,7 @@ export const SHARE_REPOSITORY = Symbol("SHARE_REPOSITORY");
 export const SHARE_SERVICE = Symbol("SHARE_SERVICE");
 export const STORAGE_ADAPTER = Symbol("STORAGE_ADAPTER");
 export const STORAGE_HEALTH = Symbol("STORAGE_HEALTH");
+export const STORAGE_RUNTIME = Symbol("STORAGE_RUNTIME");
 export const TELEGRAM_PROVIDER = Symbol("TELEGRAM_PROVIDER");
 export const TELEGRAM_RUNTIME = Symbol("TELEGRAM_RUNTIME");
 export const TELEGRAM_SUPERVISOR = Symbol("TELEGRAM_SUPERVISOR");

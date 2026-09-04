@@ -382,9 +382,17 @@ try {
     throw new Error("Drop redemption cookie contract failed");
   }
   for (const value of first.jar.values()) knownSecrets.add(value);
-  const replay = await redeemDrop(firstCode, new Map());
-  if (replay.response.status !== 401) throw new Error("One-time Drop code replay was accepted");
-  pass("purpose-bound one-time Drop redemption", { codeInBody: true, linkSwap: 401, replay: 401, httpOnlySession: true, sameSite: "Strict" });
+  const peer = await redeemDrop(firstCode, new Map());
+  const firstSession = await responseJson(first.response.clone());
+  const peerSession = await responseJson(peer.response.clone());
+  if (peer.response.status !== 201
+    || firstSession.channelId !== peerSession.channelId
+    || firstSession.expiresAt !== peerSession.expiresAt
+    || first.jar.get("vault_drop_session_dev") === peer.jar.get("vault_drop_session_dev")) {
+    throw new Error("Shared multi-client Drop redemption failed");
+  }
+  for (const value of peer.jar.values()) knownSecrets.add(value);
+  pass("purpose-bound multi-client Drop redemption", { codeInBody: true, linkSwap: 401, sharedChannel: true, independentSessions: true, commonAbsoluteExpiry: true, httpOnlySession: true, sameSite: "Strict" });
 
   const payload = Buffer.from("stage-seven-resumable-payload", "utf8");
   const payloadSha256 = createHash("sha256").update(payload).digest("hex");

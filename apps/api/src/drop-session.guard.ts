@@ -17,6 +17,12 @@ export function dropCookieNames(config: SaturnConfig): { readonly session: strin
     : { session: "vault_drop_session_dev", csrf: "vault_drop_csrf_dev" };
 }
 
+function stringProperty(value: unknown, key: string): string {
+  if (typeof value !== "object" || value === null || !(key in value)) return "";
+  const candidate = (value as Record<string, unknown>)[key];
+  return typeof candidate === "string" ? candidate : "";
+}
+
 @Injectable()
 export class DropSessionGuard implements CanActivate {
   constructor(
@@ -33,15 +39,24 @@ export class DropSessionGuard implements CanActivate {
     const token = cookies[names.session];
     if (token === undefined) throw new UnauthorizedException();
     const method = request.method.toUpperCase();
+    const routeId = stringProperty(request.params, "id");
+    const bodyId = stringProperty(request.body, "uploadId");
+    const continuationId = routeId || bodyId;
+    const channelHint = typeof request.headers["x-saturn-drop-channel"] === "string"
+      ? request.headers["x-saturn-drop-channel"]
+      : stringProperty(request.query, "channelId");
     try {
-      request[DROP_SESSION] = await this.drop.validateSession({
+      const session = await this.drop.validateSession({
         token,
         userAgent: request.headers["user-agent"] ?? "",
         isMutation: !["GET", "HEAD", "OPTIONS"].includes(method),
         ...(request.headers.origin === undefined ? {} : { origin: request.headers.origin }),
         ...(cookies[names.csrf] === undefined ? {} : { csrfCookie: cookies[names.csrf] }),
         ...(request.headers["x-vault-csrf"] === undefined ? {} : { csrfHeader: String(request.headers["x-vault-csrf"]) }),
+        ...((method === "PATCH" || (method === "GET" && routeId !== "") || (method === "POST" && bodyId !== "")) && continuationId !== "" ? { allowExpiredUploadId: continuationId } : {}),
       });
+      if (channelHint !== "" && channelHint !== session.channelId) throw new DropServiceError("invalid_session");
+      request[DROP_SESSION] = session;
       return true;
     } catch (error) {
       if (error instanceof DropServiceError) throw new UnauthorizedException();

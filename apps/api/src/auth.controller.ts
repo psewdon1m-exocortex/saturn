@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, HttpException, HttpStatus, Inject, Post, Put, Req, Res, UnauthorizedException, UseGuards } from "@nestjs/common";
+import { BadRequestException, Body, Controller, Delete, Get, HttpException, HttpStatus, Inject, Post, Put, Req, Res, UnauthorizedException, UseGuards } from "@nestjs/common";
 import { OwnerAuthenticationError, type OwnerAuthService } from "@saturn/auth";
 import type { SaturnConfig } from "@saturn/config";
 import { fastifyCookie } from "@fastify/cookie";
@@ -14,10 +14,24 @@ import {
 import { APP_CONFIG, AUTH_SERVICE } from "./tokens.js";
 
 const accessKeySchema = z.object({ accessKey: z.string().min(1).max(512) }).strict();
+const accessKeyChangeSchema = z.object({
+  currentAccessKey: z.string().min(1).max(512),
+  newAccessKey: z.string().min(32).max(512),
+  confirmation: z.string().min(32).max(512),
+}).strict();
+
 const appearanceSchema = z.object({
-  darkColor: z.string().regex(/^#[0-9a-fA-F]{6}$/),
-  lightColor: z.string().regex(/^#[0-9a-fA-F]{6}$/),
   accentColor: z.string().regex(/^#[0-9a-fA-F]{6}$/),
+  sidebarMode: z.enum(["fixed", "auto-hide"]),
+  navigationOrder: z.array(z.enum(["dashboard", "files", "inbox", "shared", "trash", "settings"]))
+    .length(6)
+    .refine((value) => new Set(value).size === value.length, "Navigation destinations must be unique"),
+  dashboardOrder: z.array(z.enum(["cpu", "ram", "disk", "uptime", "storage", "drop", "reachability", "tasks"]))
+    .length(8)
+    .refine((value) => new Set(value).size === value.length, "Dashboard cards must be unique"),
+  settingsOrder: z.array(z.enum(["appearance", "security", "telegram", "backup", "updates", "logs"]))
+    .length(6)
+    .refine((value) => new Set(value).size === value.length, "Settings cards must be unique"),
 }).strict();
 
 function requestCookies(request: FastifyRequest): Record<string, string> {
@@ -124,6 +138,39 @@ export class AuthController {
     return { state: "anonymous" };
   }
 
+  @Post("access-key")
+  @UseGuards(OwnerTokenGuard)
+  @RequireRecentReauthentication()
+  async changeAccessKey(
+    @Body() body: unknown,
+    @Req() request: AuthenticatedOwnerRequest,
+    @Res({ passthrough: true }) reply: FastifyReply,
+  ) {
+    const previous = request[OWNER_SESSION];
+    if (previous === undefined) throw new UnauthorizedException();
+    const names = ownerCookieNames(this.#config);
+    const previousToken = requestCookies(request)[names.session];
+    if (previousToken === undefined) throw new UnauthorizedException();
+    const input = accessKeyChangeSchema.safeParse(body);
+    if (!input.success || input.data.newAccessKey !== input.data.confirmation) {
+      throw new BadRequestException({ code: "invalid_access_key_change" });
+    }
+    try {
+      const replacement = await this.#auth.changeAccessKey({
+        previous,
+        previousToken,
+        ...input.data,
+        sourceIp: request.ip,
+        userAgent: request.headers["user-agent"] ?? "",
+      });
+      this.#setCookies(reply, replacement);
+      return { state: "changed", revokedSessions: replacement.revokedSessions, expiresAt: replacement.session.expiresAt };
+    } catch (error) {
+      if (error instanceof OwnerAuthenticationError) throw new UnauthorizedException({ code: "authentication_failed" });
+      throw error;
+    }
+  }
+
   @Delete("sessions")
   @UseGuards(OwnerTokenGuard)
   @RequireRecentReauthentication()
@@ -142,6 +189,8 @@ export class AuthController {
   @Put("preferences")
   @UseGuards(OwnerTokenGuard)
   updatePreferences(@Body() body: unknown) {
-    return this.#auth.updatePreferences(appearanceSchema.parse(body));
+    const parsed = appearanceSchema.safeParse(body);
+    if (!parsed.success) throw new BadRequestException({ code: "invalid_preferences" });
+    return this.#auth.updatePreferences(parsed.data);
   }
 }

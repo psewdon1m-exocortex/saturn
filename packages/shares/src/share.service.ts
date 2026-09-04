@@ -82,6 +82,8 @@ function publicValue(share: ShareRecord, resource: Resource, locked: boolean): P
     ...(share.expiresAt === undefined ? {} : { expiresAt: share.expiresAt }),
     ...(share.maxDownloads === undefined ? {} : { maxDownloads: share.maxDownloads }),
     downloadCount: share.downloadCount,
+    createdAt: share.createdAt,
+    updatedAt: share.updatedAt,
   };
 }
 
@@ -129,8 +131,8 @@ export class ShareService {
     if (resource.status !== "active" || classificationRank[classification] > classificationRank.internal) throw new ShareServiceError("denied");
     const classificationCeiling: "public" | "internal" = classification === "public" ? "public" : "internal";
     this.#validateMode(resource, input.mode);
-    const expiresAt = input.expiresAt ?? new Date(now.getTime() + this.#options.defaultExpiryMs);
-    if (expiresAt <= now || expiresAt.getTime() - now.getTime() > this.#options.maxExpiryMs) throw new Error("Share expiry is invalid");
+    const expiresAt = input.expiresAt;
+    if (expiresAt !== undefined && (expiresAt <= now || expiresAt.getTime() - now.getTime() > this.#options.maxExpiryMs)) throw new Error("Share expiry is invalid");
     if (input.maxDownloads !== undefined && (!Number.isSafeInteger(input.maxDownloads) || input.maxDownloads < 1 || input.maxDownloads > 1_000_000)) throw new Error("Share download limit is invalid");
     const token = randomBytes(32).toString("base64url");
     const record = await this.#repository.createShare({
@@ -140,7 +142,7 @@ export class ShareService {
       resourceType: resource.type,
       mode: input.mode,
       ...(input.password === undefined ? {} : { passwordHash: await hashPassword(validatePassword(input.password)) }),
-      expiresAt,
+      ...(expiresAt === undefined ? {} : { expiresAt }),
       ...(input.maxDownloads === undefined ? {} : { maxDownloads: input.maxDownloads }),
       ...(input.allowedCidr === undefined || input.allowedCidr === "" ? {} : { allowedCidr: input.allowedCidr }),
       classificationCeiling,
@@ -225,7 +227,22 @@ export class ShareService {
     const children = await this.#allChildren(parent.id);
     const visible = children.filter((child) => child.status === "active" && classificationRank[child.securityClassification ?? "internal"] <= classificationRank[access.share.classificationCeiling]);
     await this.#access(access.share.id, input.sourceIp, "browse", "success", 200, now);
-    return visible.map((child) => ({ id: child.id, parentId: child.parentId, type: child.type, name: child.name, sizeBytes: child.sizeBytes, mimeType: child.mimeType }));
+    return visible.map((child) => ({ id: child.id, parentId: child.parentId, type: child.type, name: child.name, sizeBytes: child.sizeBytes, mimeType: child.mimeType, updatedAt: child.updatedAt }));
+  }
+
+  async childMetadata(token: string, resourceId: string, input: { readonly sourceIp: string; readonly userAgent: string; readonly sessionToken?: string }, now = new Date()) {
+    const access = await this.#authorize(token, input, now, false);
+    const resource = await this.#sharedChild(access.share, resourceId);
+    return { share: access.share, resource, session: access.newSession };
+  }
+
+  async openChildContent(token: string, resourceId: string, range: { readonly offset: number; readonly length?: number }, input: { readonly sourceIp: string; readonly userAgent: string; readonly sessionToken?: string }, now = new Date()) {
+    const access = await this.#authorize(token, input, now, false);
+    const resource = await this.#sharedChild(access.share, resourceId);
+    await this.#repository.claimDownload(access.share.id, access.session.id, now).catch(() => { throw new ShareServiceError("denied"); });
+    const opened = await this.#files.openDownload(resource.id, range.offset, range.length);
+    await this.#access(access.share.id, input.sourceIp, "content", "success", range.length === undefined && range.offset === 0 ? 200 : 206, now, range);
+    return { share: access.share, resource: opened.resource, stream: this.#guardStream(access.share.id, opened.stream), session: access.session };
   }
 
   async openContent(token: string, range: { readonly offset: number; readonly length?: number }, input: { readonly sourceIp: string; readonly userAgent: string; readonly sessionToken?: string }, now = new Date()) {
@@ -382,6 +399,15 @@ export class ShareService {
       if (page.length < 500) break;
     }
     return values;
+  }
+
+  async #sharedChild(share: ShareRecord, resourceId: string): Promise<Resource> {
+    if (share.resourceType !== "folder" || !["browse", "download_folder"].includes(share.mode)) throw new ShareServiceError("invalid_mode");
+    if (!(await this.#repository.isDescendant(share.resourceId, resourceId)) || resourceId === share.resourceId) throw new ShareServiceError("not_found");
+    const resource = await this.#files.getResource(resourceId).catch(() => undefined);
+    if (resource === undefined || resource.type !== "file" || resource.status !== "active"
+      || classificationRank[resource.securityClassification ?? "internal"] > classificationRank[share.classificationCeiling]) throw new ShareServiceError("not_found");
+    return resource;
   }
 
   async #packageEntries(share: ShareRecord, root: Resource, startedAt: Date): Promise<readonly { readonly resource: Resource; readonly path: string }[]> {

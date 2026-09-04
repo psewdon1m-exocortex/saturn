@@ -11,6 +11,7 @@ import { AppModule } from "./app.module.js";
 import type { DeviceService } from "@saturn/sync";
 import { DEVICE_SERVICE } from "./tokens.js";
 import { registerWebDav } from "./webdav.js";
+import { TransferMonitorService } from "./transfer-monitor.service.js";
 
 const config = loadEnvironment();
 const adapter = new FastifyAdapter({
@@ -20,7 +21,9 @@ const adapter = new FastifyAdapter({
       req(request: FastifyRequest) {
         return {
           method: request.method,
-          url: request.url.replace(/(\/public\/shares\/|\/s\/)[A-Za-z0-9_-]{20,}/g, "$1[redacted]"),
+          url: request.url
+            .replace(/(\/public\/shares\/|\/s\/)[A-Za-z0-9_-]{20,}/g, "$1[redacted]")
+            .replace(/(\/folders\/resolve)\?[^#]*/g, "$1?[redacted]"),
           hostname: request.hostname,
           remoteAddress: request.ip,
         };
@@ -60,7 +63,7 @@ adapter.getInstance().addHook("preParsing", (request, _reply, payload, done) => 
 const app = await NestFactory.create<NestFastifyApplication>(AppModule, adapter, { bufferLogs: true });
 app.enableShutdownHooks();
 app.setGlobalPrefix("api/v1", { exclude: ["health/live", "health/ready", "internal/telegram/webhook", { path: "a/:assetId/:filename", method: RequestMethod.ALL }] });
-registerWebDav(adapter.getInstance(), app.get<DeviceService>(DEVICE_SERVICE), config);
+registerWebDav(adapter.getInstance(), app.get<DeviceService>(DEVICE_SERVICE), config, app.get(TransferMonitorService));
 adapter.getInstance().addHook("onSend", (request, reply, payload, done) => {
   reply
     .header("X-Content-Type-Options", "nosniff")

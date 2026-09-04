@@ -18,7 +18,7 @@ The aggregate gate covers:
 - edge-only publication with internal API, worker and PostgreSQL networks;
 - tag-only pinned CI/release workflows, OCI SBOM/provenance and an Ed25519-signed
   canonical release manifest;
-- migration, canonical 21-directory bootstrap and exact temporary-object cleanup;
+- migration, canonical six business roots plus hidden `_system` bootstrap and exact temporary-object cleanup;
 - HTTPS owner login, upload, metadata, Range, checksum and trash workflow;
 - SFTP and PostgreSQL outage/recovery plus fail-closed candidate rejection before
   traffic switch;

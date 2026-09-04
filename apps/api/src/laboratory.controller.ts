@@ -6,6 +6,7 @@ import { z } from "zod";
 import { LaboratoryApiExceptionFilter } from "./laboratory-api-exception.filter.js";
 import { OwnerTokenGuard, RequireRecentReauthentication } from "./owner-token.guard.js";
 import { LABORATORY_SERVICE } from "./tokens.js";
+import { TransferMonitorService } from "./transfer-monitor.service.js";
 
 const mode=z.enum(["private","public_immutable","public_alias"]);const disposition=z.enum(["inline","attachment"]);
 const createAsset=z.object({resourceId:z.uuid(),mode,label:z.string().min(1).max(240).optional(),disposition:disposition.optional()}).strict();
@@ -35,12 +36,12 @@ export class LaboratoryAssetController {
 
 @Controller("a") @UseFilters(LaboratoryApiExceptionFilter)
 export class LaboratoryDeliveryController {
-  constructor(@Inject(LABORATORY_SERVICE)private readonly laboratory:LaboratoryService){}
+  constructor(@Inject(LABORATORY_SERVICE)private readonly laboratory:LaboratoryService,@Inject(TransferMonitorService)private readonly transfers:TransferMonitorService){}
   @Get(":assetId/:filename") content(@Param("assetId")assetId:string,@Param("filename")filename:string,@Headers("authorization")authorization:string|undefined,@Headers("range")range:string|undefined,@Headers("if-none-match")ifNoneMatch:string|undefined,@Req()request:FastifyRequest,@Res()reply:FastifyReply){return this.serve({assetId,filename,...(authorization===undefined?{}:{authorization}),...(range===undefined?{}:{range}),...(ifNoneMatch===undefined?{}:{ifNoneMatch}),head:request.method==="HEAD"},reply);}
   async serve(input:{readonly assetId:string;readonly filename:string;readonly authorization?:string;readonly range?:string;readonly ifNoneMatch?:string;readonly head:boolean},reply:FastifyReply):Promise<void>{
     const opened=await this.laboratory.deliver(input);reply.header("Accept-Ranges","bytes").header("Content-Type",opened.mimeType).header("Content-Disposition",contentDisposition(opened.asset.disposition,opened.asset.publicFilename)).header("ETag",opened.etag).header("Last-Modified",opened.lastModified.toUTCString()).header("Cache-Control",opened.cacheControl).header("X-Robots-Tag","noindex, nofollow, noarchive");
     if(opened.asset.mode==="private")reply.header("Vary","Authorization");else reply.header("Access-Control-Allow-Origin","*").header("Cross-Origin-Resource-Policy","cross-origin");
     if(opened.notModified){opened.release();reply.status(304).send();return;}reply.header("Content-Length",opened.length);if(opened.partial)reply.status(206).header("Content-Range",`bytes ${String(opened.offset)}-${String(opened.offset+opened.length-1)}/${String(opened.sizeBytes)}`);
-    if(input.head){opened.release();reply.hijack();reply.raw.writeHead(reply.statusCode,reply.getHeaders() as OutgoingHttpHeaders);reply.raw.end();return;}const stream=opened.stream;if(stream===undefined){opened.release();throw new Error("Laboratory content stream is missing");}for(const event of ["end","close","error"] as const)stream.once(event,opened.release);reply.send(stream);
+    if(input.head){opened.release();reply.hijack();reply.raw.writeHead(reply.statusCode,reply.getHeaders() as OutgoingHttpHeaders);reply.raw.end();return;}const stream=opened.stream;if(stream===undefined){opened.release();throw new Error("Laboratory content stream is missing");}for(const event of ["end","close","error"] as const)stream.once(event,opened.release);reply.send(this.transfers.trackDownload(stream,{filename:opened.asset.publicFilename,totalBytes:opened.length}));
   }
 }

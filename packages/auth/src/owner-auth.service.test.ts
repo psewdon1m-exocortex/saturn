@@ -1,16 +1,43 @@
 import { describe, expect, it } from "vitest";
 import { OwnerAuthenticationError, OwnerAuthService } from "./owner-auth.service.js";
-import type { OwnerAuthRepository, OwnerPreferences, OwnerSession } from "./types.js";
+import type { OwnerAuthRepository, OwnerCredentialVerifier, OwnerPreferences, OwnerSession } from "./types.js";
 
 class MemoryRepository implements OwnerAuthRepository {
   sessions = new Map<string, OwnerSession>();
+  credentialVerifier: OwnerCredentialVerifier | undefined;
   attempts: Array<{ source: string; outcome: "success" | "failure" | "rate_limited"; at: Date }> = [];
   preferences: OwnerPreferences = {
-    darkColor: "#000000",
-    lightColor: "#ffffff",
     accentColor: "#00a8ff",
+    sidebarMode: "fixed",
+    navigationOrder: ["dashboard", "files", "inbox", "shared", "trash", "settings"],
+    dashboardOrder: ["cpu", "ram", "disk", "uptime", "storage", "drop", "reachability", "tasks"],
+    settingsOrder: ["appearance", "security", "telegram", "backup", "updates", "logs"],
     updatedAt: new Date(0),
   };
+
+  getCredentialVerifier(): Promise<OwnerCredentialVerifier | undefined> {
+    return Promise.resolve(this.credentialVerifier);
+  }
+
+  initializeCredentialVerifier(verifier: Omit<OwnerCredentialVerifier, "revision">): Promise<OwnerCredentialVerifier> {
+    this.credentialVerifier ??= { ...verifier, revision: 1 };
+    return Promise.resolve(this.credentialVerifier);
+  }
+
+  replaceCredentialVerifier(input: {
+    readonly expectedRevision: number;
+    readonly verifier: Omit<OwnerCredentialVerifier, "revision">;
+    readonly previousTokenHash: string;
+    readonly replacementSession: OwnerSession;
+    readonly now: Date;
+  }): Promise<{ readonly verifier: OwnerCredentialVerifier; readonly revokedSessions: number }> {
+    if (this.credentialVerifier?.revision !== input.expectedRevision || this.sessions.get(input.previousTokenHash)?.state !== "active") return Promise.reject(new Error("concurrent"));
+    let revoked = 0;
+    for (const [key, value] of this.sessions) if (value.state === "active") { this.sessions.set(key, { ...value, state: "revoked" }); revoked += 1; }
+    this.sessions.set(input.replacementSession.tokenHash, input.replacementSession);
+    this.credentialVerifier = { ...input.verifier, revision: input.expectedRevision + 1 };
+    return Promise.resolve({ verifier: this.credentialVerifier, revokedSessions: Math.max(0, revoked - 1) });
+  }
 
   countRecentFailures(sourceIpHash: string, since: Date): Promise<number> {
     return Promise.resolve(this.attempts.filter((item) => item.source === sourceIpHash && item.outcome === "failure" && item.at >= since).length);
@@ -160,7 +187,50 @@ describe("OwnerAuthService", () => {
       requireRecentReauthentication: true,
       now: new Date(now.getTime() + 6 * 60_000),
     })).rejects.toMatchObject({ code: "reauth_required" });
-    await expect(service.updatePreferences({ darkColor: "#010101", lightColor: "#fefefe", accentColor: "#123abc" })).resolves.toMatchObject({ accentColor: "#123abc" });
+    await expect(service.updatePreferences({
+      accentColor: "#22bbff",
+      sidebarMode: "auto-hide",
+      navigationOrder: ["dashboard", "inbox", "files", "shared", "trash", "settings"],
+      dashboardOrder: ["ram", "cpu", "disk", "uptime", "storage", "drop", "reachability", "tasks"],
+      settingsOrder: ["security", "appearance", "telegram", "backup", "updates", "logs"],
+    })).resolves.toMatchObject({ accentColor: "#22bbff", sidebarMode: "auto-hide" });
+    await expect(service.updatePreferences({
+      accentColor: "#111111",
+      sidebarMode: "fixed",
+      navigationOrder: ["dashboard", "files", "inbox", "shared", "trash", "settings"],
+      dashboardOrder: ["cpu", "ram", "disk", "uptime", "storage", "drop", "reachability", "tasks"],
+      settingsOrder: ["appearance", "security", "telegram", "backup", "updates", "logs"],
+    })).resolves.toMatchObject({ accentColor: "#111111" });
+    expect(() => service.updatePreferences({
+      accentColor: "#11111",
+      sidebarMode: "fixed",
+      navigationOrder: ["dashboard", "files", "inbox", "shared", "trash", "settings"],
+      dashboardOrder: ["cpu", "ram", "disk", "uptime", "storage", "drop", "reachability", "tasks"],
+      settingsOrder: ["appearance", "security", "telegram", "backup", "updates", "logs"],
+    })).toThrow(/invalid/);
     expect(await service.revokeAll()).toBe(1);
+  });
+
+  it("atomically rotates the Access Key and revokes every other session", async () => {
+    const { service } = fixture();
+    await service.initialize();
+    const current = await service.authenticate("owner-access-key-that-is-at-least-32-characters-long", "127.0.0.1", "browser-a");
+    const other = await service.authenticate("owner-access-key-that-is-at-least-32-characters-long", "127.0.0.2", "browser-b");
+    const previous = await service.validateSession({ token: current.token, userAgent: "browser-a", isMutation: false });
+    const replacementKey = "replacement-owner-access-key-with-more-than-32-characters";
+    const changed = await service.changeAccessKey({
+      previous,
+      previousToken: current.token,
+      currentAccessKey: "owner-access-key-that-is-at-least-32-characters-long",
+      newAccessKey: replacementKey,
+      confirmation: replacementKey,
+      sourceIp: "127.0.0.1",
+      userAgent: "browser-a",
+    });
+    expect(changed.revokedSessions).toBe(1);
+    await expect(service.validateSession({ token: other.token, userAgent: "browser-b", isMutation: false })).rejects.toMatchObject({ code: "invalid_session" });
+    await expect(service.validateSession({ token: changed.token, userAgent: "browser-a", isMutation: false })).resolves.toMatchObject({ id: changed.session.id });
+    expect(await service.verifyBootstrap(replacementKey)).toBe(true);
+    expect(await service.verifyBootstrap("owner-access-key-that-is-at-least-32-characters-long")).toBe(false);
   });
 });

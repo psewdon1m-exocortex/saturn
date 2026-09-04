@@ -37,6 +37,7 @@ class MemoryRepository implements FileRepository {
   readonly operations = new Map<string, FileOperation>();
   readonly versions = new Map<string, FileVersion>();
   readonly locks = new Map<string, { operationId: string; expiresAt: Date }>();
+  purgeFailuresRemaining = 0;
 
   constructor() {
     const now = new Date();
@@ -92,6 +93,7 @@ class MemoryRepository implements FileRepository {
     const now = new Date();
     const resource: Resource = { ...record, type: "folder", sizeBytes: 0, status: "active", createdAt: now, updatedAt: now };
     this.resources.set(resource.id, resource);
+    this.#adjustAncestorSizes(record.parentId, 0);
     return resource;
   }
   async setSecurityClassification(id: string, classification: SecurityClassification) {
@@ -158,6 +160,7 @@ class MemoryRepository implements FileRepository {
     };
     this.resources.set(resource.id, resource);
     this.uploads.set(upload.id, upload);
+    this.#adjustAncestorSizes(record.parentId, record.sizeBytes);
     this.versions.set(record.versionId, {
       id: record.versionId,
       resourceId: resource.id,
@@ -205,6 +208,7 @@ class MemoryRepository implements FileRepository {
     const upload: UploadSession = { ...current, status: "active", resourceId: resource.id, actualSha256: record.sha256, updatedAt: now };
     this.resources.set(resource.id, resource);
     this.uploads.set(upload.id, upload);
+    if (existing.parentId !== undefined) this.#adjustAncestorSizes(existing.parentId, record.sizeBytes - existing.sizeBytes);
     return { upload, resource };
   }
   async getVersion(resourceId: string, versionId: string) {
@@ -251,6 +255,8 @@ class MemoryRepository implements FileRepository {
     readonly oldPath: string;
     readonly newPath: string;
   }) {
+    const original = this.resources.get(record.resourceId);
+    if (original === undefined || original.parentId === undefined) throw new Error("Moved resource missing");
     for (const [id, item] of this.resources) {
       if (item.storagePath === record.oldPath || item.storagePath.startsWith(`${record.oldPath}/`)) {
         const suffix = item.storagePath.slice(record.oldPath.length);
@@ -261,6 +267,11 @@ class MemoryRepository implements FileRepository {
           updatedAt: new Date(),
         });
       }
+    }
+    if (original.parentId === record.parentId) this.#adjustAncestorSizes(record.parentId, 0);
+    else {
+      this.#adjustAncestorSizes(original.parentId, -original.sizeBytes);
+      this.#adjustAncestorSizes(record.parentId, original.sizeBytes);
     }
     await this.setOperationState(record.operationId, "active");
     const result = this.resources.get(record.resourceId);
@@ -289,6 +300,9 @@ class MemoryRepository implements FileRepository {
         updatedAt: now,
       });
     }
+    const copiedRoot = record.resources.find((item) => item.id === record.rootResourceId);
+    if (copiedRoot === undefined) throw new Error("Copied root metadata missing");
+    this.#adjustAncestorSizes(copiedRoot.parentId, copiedRoot.sizeBytes);
     await this.setOperationState(record.operationId, "active", { resourceId: record.rootResourceId });
     const result = this.resources.get(record.rootResourceId);
     if (result === undefined) throw new Error("Copied resource missing");
@@ -316,8 +330,16 @@ class MemoryRepository implements FileRepository {
           } : {}),
           updatedAt: new Date(),
         });
+        if (item.currentVersionId !== undefined) {
+          const version = this.versions.get(item.currentVersionId);
+          if (version !== undefined) this.versions.set(version.id, {
+            ...version,
+            storagePath: `${record.trashPath}${item.storagePath.slice(record.oldPath.length)}`,
+          });
+        }
       }
     }
+    this.#adjustAncestorSizes(original.parentId, -original.sizeBytes);
     await this.setOperationState(record.operationId, "active");
     const result = this.resources.get(record.resourceId);
     if (result === undefined) throw new Error("Trashed resource missing");
@@ -331,6 +353,8 @@ class MemoryRepository implements FileRepository {
     readonly parentId: string;
     readonly name: string;
   }) {
+    const original = this.resources.get(record.resourceId);
+    if (original === undefined) throw new Error("Restore fixture missing");
     for (const [id, item] of this.resources) {
       if (item.storagePath === record.oldPath || item.storagePath.startsWith(`${record.oldPath}/`)) {
         this.resources.set(id, {
@@ -349,8 +373,27 @@ class MemoryRepository implements FileRepository {
     delete (clean as { trashedFromName?: string }).trashedFromName;
     delete (clean as { purgeAfter?: Date }).purgeAfter;
     this.resources.set(clean.id, clean);
+    this.#adjustAncestorSizes(record.parentId, original.sizeBytes);
     await this.setOperationState(record.operationId, "active");
     return clean;
+  }
+  async purgeTrashFile(record: { readonly operationId: string; readonly resourceId: string }) {
+    if (this.purgeFailuresRemaining > 0) {
+      this.purgeFailuresRemaining -= 1;
+      throw new Error("Simulated purge database failure");
+    }
+    const existing = this.resources.get(record.resourceId);
+    if (existing === undefined || existing.type !== "file" || existing.status !== "trashed" || existing.trashedFromParentId === undefined) {
+      throw new Error("Trash file fixture missing");
+    }
+    for (const [id, version] of this.versions) {
+      if (version.resourceId === record.resourceId) this.versions.set(id, { ...version, state: "expired" });
+    }
+    const purged: Resource = { ...existing, status: "purged", updatedAt: new Date() };
+    delete (purged as { purgeAfter?: Date }).purgeAfter;
+    this.resources.set(purged.id, purged);
+    await this.setOperationState(record.operationId, "active", { resourceId: record.resourceId });
+    return purged;
   }
   async commitVersionRestore(record: CommitVersionRestoreRecord) {
     const existing = this.resources.get(record.resourceId);
@@ -383,8 +426,18 @@ class MemoryRepository implements FileRepository {
       updatedAt: now,
     };
     this.resources.set(restored.id, restored);
+    if (existing.parentId !== undefined) this.#adjustAncestorSizes(existing.parentId, record.sizeBytes - existing.sizeBytes);
     await this.setOperationState(record.operationId, "active");
     return restored;
+  }
+
+  #adjustAncestorSizes(folderId: string, deltaBytes: number) {
+    let current = this.resources.get(folderId);
+    while (current !== undefined && current.type === "folder" && current.status === "active") {
+      const updated = { ...current, sizeBytes: current.sizeBytes + deltaBytes, updatedAt: new Date() };
+      this.resources.set(updated.id, updated);
+      current = updated.parentId === undefined ? undefined : this.resources.get(updated.parentId);
+    }
   }
 }
 
@@ -395,7 +448,7 @@ async function collect(stream: NodeJS.ReadableStream): Promise<Buffer> {
 }
 
 describe("FileService upload state machine", () => {
-  it("allows ordinary root folders while canonical roots remain rename-only", async () => {
+  it("allows ordinary root folders while canonical roots remain renameable and copyable but immovable", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "saturn-root-policy-"));
     const storage = new LocalStorageAdapter(root);
     const repository = new MemoryRepository();
@@ -435,14 +488,39 @@ describe("FileService upload state machine", () => {
         parentId: promoted.id,
         idempotencyKey: "canonical-move-001",
       })).rejects.toThrow(/can be renamed but cannot be moved/);
-      await expect(service.copyResource(SYNC_RESOURCE_ID, {
+      const copiedSync = await service.copyResource(SYNC_RESOURCE_ID, {
         parentId: ROOT_RESOURCE_ID,
         name: "sync copy",
         idempotencyKey: "canonical-copy-001",
-      })).rejects.toThrow(/cannot be copied/);
+      });
+      expect(copiedSync.storagePath).toBe("sync copy");
       await expect(service.trashResource(SYNC_RESOURCE_ID, { idempotencyKey: "canonical-trash-001" })).rejects.toThrow(/cannot be trashed/);
       await expect(service.createFolder(ROOT_RESOURCE_ID, "sync")).rejects.toThrow(/root name is reserved/);
       await expect(service.createFolder(ROOT_RESOURCE_ID, "_system")).rejects.toThrow(/root name is reserved/);
+    } finally {
+      await storage.close();
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("resolves a logical folder path to its stable resource chain", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "saturn-path-resolution-"));
+    const storage = new LocalStorageAdapter(root);
+    const service = new FileService(new MemoryRepository(), storage);
+    try {
+      await storage.initialize();
+      await service.initializeStorage();
+      const archive = await service.createFolder(ROOT_RESOURCE_ID, "Archive");
+      const photos = await service.createFolder(archive.id, "Photos 2026");
+
+      expect((await service.resolveFolderPath(["archive", "photos 2026"])).map((resource) => resource.id)).toEqual([
+        ROOT_RESOURCE_ID,
+        archive.id,
+        photos.id,
+      ]);
+      await expect(service.resolveFolderPath(["archive", "missing"])).rejects.toThrow(/not found/);
+      await expect(service.resolveFolderPath(["archive", ".."]))
+        .rejects.toThrow(/reserved/);
     } finally {
       await storage.close();
       await fs.rm(root, { recursive: true, force: true });
@@ -490,6 +568,9 @@ describe("FileService upload state machine", () => {
       expect(completed.resource.sha256).toBe(sha256);
       expect(completed.resource.storagePath).toBe("sync/Documents/note.txt");
       expect((await service.completeUpload(upload.id)).resource.id).toBe(completed.resource.id);
+      expect((await service.getResource(folder.id)).sizeBytes).toBe(payload.length);
+      expect((await service.getResource(SYNC_RESOURCE_ID)).sizeBytes).toBe(payload.length);
+      expect((await service.getResource(ROOT_RESOURCE_ID)).sizeBytes).toBe(payload.length);
       const download = await service.openDownload(completed.resource.id, 6, 9);
       expect((await collect(download.stream)).toString()).toBe("resumable");
       expect(await storage.exists(upload.tempPath)).toBe(false);
@@ -502,6 +583,10 @@ describe("FileService upload state machine", () => {
       });
       expect(moved.id).toBe(completed.resource.id);
       expect(moved.storagePath).toBe("sync/Archive/moved.txt");
+      expect((await service.getResource(folder.id)).sizeBytes).toBe(0);
+      expect((await service.getResource(archive.id)).sizeBytes).toBe(payload.length);
+      expect((await service.getResource(SYNC_RESOURCE_ID)).sizeBytes).toBe(payload.length);
+      expect((await service.getResource(ROOT_RESOURCE_ID)).sizeBytes).toBe(payload.length);
       expect((await service.moveResource(completed.resource.id, {
         parentId: archive.id,
         name: "moved.txt",
@@ -522,6 +607,8 @@ describe("FileService upload state machine", () => {
       const overwritten = await service.completeUpload(overwrite.id);
       expect(overwritten.resource.id).toBe(moved.id);
       expect(overwritten.resource.sha256).toBe(replacementSha);
+      expect((await service.getResource(archive.id)).sizeBytes).toBe(replacement.length);
+      expect((await service.getResource(ROOT_RESOURCE_ID)).sizeBytes).toBe(replacement.length);
       const versions = await service.listVersions(moved.id);
       expect(versions).toHaveLength(2);
       const originalVersion = versions.find((item) => item.sha256 === sha256);
@@ -531,6 +618,8 @@ describe("FileService upload state machine", () => {
       });
       expect(versionRestored.id).toBe(moved.id);
       expect(versionRestored.sha256).toBe(sha256);
+      expect((await service.getResource(archive.id)).sizeBytes).toBe(payload.length);
+      expect((await service.getResource(ROOT_RESOURCE_ID)).sizeBytes).toBe(payload.length);
       expect((await collect((await service.openDownload(moved.id)).stream)).toString()).toBe(payload.toString());
 
       const copied = await service.copyResource(moved.id, {
@@ -540,6 +629,9 @@ describe("FileService upload state machine", () => {
       });
       expect(copied.id).not.toBe(moved.id);
       expect((await collect((await service.openDownload(copied.id)).stream)).toString()).toBe(payload.toString());
+      expect((await service.getResource(folder.id)).sizeBytes).toBe(payload.length);
+      expect((await service.getResource(SYNC_RESOURCE_ID)).sizeBytes).toBe(payload.length * 2);
+      expect((await service.getResource(ROOT_RESOURCE_ID)).sizeBytes).toBe(payload.length * 2);
       expect((await service.copyResource(moved.id, {
         parentId: folder.id,
         name: "copied.txt",
@@ -551,10 +643,32 @@ describe("FileService upload state machine", () => {
       expect(trashed.storagePath).toMatch(/^_system\/trash\/\d{4}\/\d{2}\//);
       expect(trashed.purgeAfter?.getTime()).toBeGreaterThan(Date.now() + 89 * 24 * 60 * 60 * 1_000);
       expect(await storage.exists(trashed.storagePath)).toBe(true);
+      expect((await service.getResource(folder.id)).sizeBytes).toBe(0);
+      expect((await service.getResource(ROOT_RESOURCE_ID)).sizeBytes).toBe(payload.length);
       const restored = await service.restoreResource(copied.id, { idempotencyKey: "trash-restore-test-001" });
       expect(restored.id).toBe(copied.id);
       expect(restored.status).toBe("active");
+      expect((await service.getResource(folder.id)).sizeBytes).toBe(payload.length);
+      expect((await service.getResource(SYNC_RESOURCE_ID)).sizeBytes).toBe(payload.length * 2);
+      expect((await service.getResource(ROOT_RESOURCE_ID)).sizeBytes).toBe(payload.length * 2);
       expect((await collect((await service.openDownload(restored.id)).stream)).toString()).toBe(payload.toString());
+
+      const trashedAgain = await service.trashResource(moved.id, { idempotencyKey: "trash-purge-test-001" });
+      const versionStoragePaths = [...new Set((await repository.listVersions(moved.id, 0, 100)).map((version) => version.storagePath))];
+      expect(versionStoragePaths.length).toBeGreaterThan(1);
+      expect((await Promise.all(versionStoragePaths.map((storagePath) => storage.exists(storagePath)))).every(Boolean)).toBe(true);
+      expect(await storage.exists(trashedAgain.storagePath)).toBe(true);
+      repository.purgeFailuresRemaining = 1;
+      await expect(service.purgeTrashFile(moved.id, { idempotencyKey: "purge-test-001" })).rejects.toThrow(/database failure/);
+      expect(await storage.exists(trashedAgain.storagePath)).toBe(false);
+      expect((await Promise.all(versionStoragePaths.map((storagePath) => storage.exists(storagePath)))).every((exists) => !exists)).toBe(true);
+      const purged = await service.purgeTrashFile(moved.id, { idempotencyKey: "purge-test-001" });
+      expect(purged.status).toBe("purged");
+      expect(purged.purgeAfter).toBeUndefined();
+      expect(await storage.exists(trashedAgain.storagePath)).toBe(false);
+      expect((await repository.listVersions(moved.id, 0, 100)).every((version) => version.state === "expired")).toBe(true);
+      expect((await repository.listTrash(0, 100)).some((item) => item.id === moved.id)).toBe(false);
+      expect((await service.purgeTrashFile(moved.id, { idempotencyKey: "purge-test-001" })).status).toBe("purged");
     } finally {
       await storage.close();
       await fs.rm(root, { recursive: true, force: true });

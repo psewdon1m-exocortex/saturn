@@ -37,12 +37,33 @@ describe("loadEnvironment", () => {
     expect(config.storage.maxConnections).toBe(8);
     expect(config.storage.healthTimeoutMs).toBe(3_000);
     expect(config.readinessTimeoutMs).toBe(3_000);
+    expect(config.drop.codeTtlMs).toBe(30 * 60 * 1_000);
+    expect(config.drop.sessionTtlMs).toBe(30 * 60 * 1_000);
+    expect(config.recovery.pgDumpPrefixArgs).toEqual([]);
+    expect(config.recovery.pgRestorePrefixArgs).toEqual([]);
+    expect(config.recovery.pgCommandConnectionArgs).toEqual([]);
     expect(config.limits).toEqual({
       uploadMaxBytes: 20 * 1024 * 1024 * 1024,
       uploadChunkMaxBytes: 8 * 1024 * 1024,
       uploadIncompleteTtlMs: 24 * 60 * 60 * 1_000,
       trashRetentionMs: 90 * 24 * 60 * 60 * 1_000,
     });
+  });
+
+  it("loads bounded PostgreSQL command prefixes without exposing them publicly", () => {
+    const config = loadEnvironment({
+      ...valid,
+      PG_DUMP_BIN: "docker",
+      PG_RESTORE_BIN: "docker",
+      PG_DUMP_PREFIX_ARGS: '["compose","exec","-T","postgres","pg_dump"]',
+      PG_RESTORE_PREFIX_ARGS: '["compose","exec","-T","postgres","pg_restore"]',
+      PG_COMMAND_CONNECTION_ARGS: '["--username","vault","--dbname","vault"]',
+    });
+    expect(config.recovery.pgDumpPrefixArgs.at(-1)).toBe("pg_dump");
+    expect(config.recovery.pgRestorePrefixArgs.at(-1)).toBe("pg_restore");
+    expect(config.recovery.pgCommandConnectionArgs).toEqual(["--username", "vault", "--dbname", "vault"]);
+    expect(JSON.stringify(publicConfig(config))).not.toContain("pg_dump");
+    expect(() => loadEnvironment({ ...valid, PG_DUMP_PREFIX_ARGS: '["ok",""]' })).toThrow(/JSON array/);
   });
 
   it("rejects traversal in the storage root", () => {

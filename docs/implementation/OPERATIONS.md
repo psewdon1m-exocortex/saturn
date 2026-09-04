@@ -79,3 +79,13 @@ uses `StorageAdapter` only, enforces a byte cap and compares SHA-256 after every
 copy. Import the resulting tree into another adapter and compare the manifest,
 database stable IDs and active Gateway URLs before changing the
 backend configuration.
+
+## Runtime target change
+
+Use Settings → Security → Advanced security → Storage connection for an
+operator-approved target change. Recent owner proof, exact host fingerprint and
+a successful connection test are mandatory. A switch rebuilds the active
+catalog from the target and migrates no bytes; it also revokes active shares,
+devices and pending transfers so capabilities cannot cross file sets. API and
+worker must mount the same mode-`0700` `STORAGE_RUNTIME_CONFIG_DIR`. To return,
+select the prior target and submit its credential again.

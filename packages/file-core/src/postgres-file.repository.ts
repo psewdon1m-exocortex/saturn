@@ -219,7 +219,7 @@ export class PostgresFileRepository implements FileRepository {
   }
 
   createFolder(record: { readonly id: string; readonly parentId: string; readonly name: string; readonly storagePath: string }): Promise<Resource> {
-    return this.#database.withSql(async (sql) => {
+    return this.#database.transaction(async (sql) => {
       const rows = await sql<ResourceRow[]>`
         INSERT INTO resources (id, type, parent_id, name, storage_path, status)
         VALUES (${record.id}, 'folder', ${record.parentId}, ${record.name}, ${record.storagePath}, 'active')
@@ -227,6 +227,7 @@ export class PostgresFileRepository implements FileRepository {
       `;
       const row = rows[0];
       if (row === undefined) throw new Error("Folder insert returned no row");
+      await this.#adjustAncestorSizes(sql, record.parentId, 0);
       return resource(row);
     });
   }
@@ -329,6 +330,7 @@ export class PostgresFileRepository implements FileRepository {
           ${record.sizeBytes}, ${record.mimeType}, 'initial')
       `;
       await sql`UPDATE resources SET current_version_id = ${record.versionId}, updated_at = now() WHERE id = ${record.resourceId}`;
+      await this.#adjustAncestorSizes(sql, record.parentId, record.sizeBytes);
       const uploadRows = await sql<UploadRow[]>`
         UPDATE upload_sessions
         SET status = 'active', resource_id = ${record.resourceId}, actual_sha256 = ${record.sha256}, updated_at = now()
@@ -348,6 +350,8 @@ export class PostgresFileRepository implements FileRepository {
 
   commitOverwrite(record: CommitOverwriteRecord): Promise<CompleteUploadRecordResult> {
     return this.#database.transaction(async (sql) => {
+      const existing = await this.#resourceQuery(sql, record.resourceId);
+      if (existing === undefined || existing.parentId === undefined || existing.type !== "file") throw new Error("Overwrite resource was not found");
       await sql`
         UPDATE file_versions
         SET storage_path = ${record.previousVersionArchivePath}, archived_at = now(),
@@ -379,6 +383,7 @@ export class PostgresFileRepository implements FileRepository {
       const resourceRow = resourceRows[0];
       const uploadRow = uploadRows[0];
       if (resourceRow === undefined || uploadRow === undefined) throw new Error("Overwrite commit did not return state");
+      await this.#adjustAncestorSizes(sql, existing.parentId, record.sizeBytes - existing.sizeBytes);
       return { resource: resource(resourceRow), upload: upload(uploadRow) };
     });
   }
@@ -477,12 +482,20 @@ export class PostgresFileRepository implements FileRepository {
     readonly newPath: string;
   }): Promise<Resource> {
     return this.#database.transaction(async (sql) => {
+      const original = await this.#resourceQuery(sql, record.resourceId);
+      if (original === undefined || original.parentId === undefined) throw new Error("Moved resource was not found");
       await this.#rewriteCurrentVersionPaths(sql, record.oldPath, record.newPath);
       await this.#rewriteResourcePaths(sql, record.oldPath, record.newPath);
       const rows = await sql<ResourceRow[]>`
         UPDATE resources SET parent_id = ${record.parentId}, name = ${record.name}, updated_at = now()
         WHERE id = ${record.resourceId} RETURNING *
       `;
+      if (original.parentId === record.parentId) {
+        await this.#adjustAncestorSizes(sql, record.parentId, 0);
+      } else {
+        await this.#adjustAncestorSizes(sql, original.parentId, -original.sizeBytes);
+        await this.#adjustAncestorSizes(sql, record.parentId, original.sizeBytes);
+      }
       await sql`UPDATE operation_journal SET state = 'active', updated_at = now() WHERE id = ${record.operationId}`;
       const row = rows[0];
       if (row === undefined) throw new Error("Moved resource was not found");
@@ -514,6 +527,9 @@ export class PostgresFileRepository implements FileRepository {
           await sql`UPDATE resources SET current_version_id = ${item.versionId} WHERE id = ${item.id}`;
         }
       }
+      const copiedRoot = record.resources.find((item) => item.id === record.rootResourceId);
+      if (copiedRoot === undefined) throw new Error("Copied root metadata is missing");
+      await this.#adjustAncestorSizes(sql, copiedRoot.parentId, copiedRoot.sizeBytes);
       await sql`
         UPDATE operation_journal SET state = 'active', resource_id = ${record.rootResourceId}, updated_at = now()
         WHERE id = ${record.operationId}
@@ -545,6 +561,7 @@ export class PostgresFileRepository implements FileRepository {
           purge_after = ${record.purgeAfter}, updated_at = now()
         WHERE id = ${record.resourceId} RETURNING *
       `;
+      await this.#adjustAncestorSizes(sql, original.parentId, -original.sizeBytes);
       await sql`UPDATE operation_journal SET state = 'active', updated_at = now() WHERE id = ${record.operationId}`;
       const row = rows[0];
       if (row === undefined) throw new Error("Trashed resource was not found");
@@ -561,6 +578,8 @@ export class PostgresFileRepository implements FileRepository {
     readonly name: string;
   }): Promise<Resource> {
     return this.#database.transaction(async (sql) => {
+      const original = await this.#resourceQuery(sql, record.resourceId);
+      if (original === undefined) throw new Error("Restore resource was not found");
       await this.#rewriteCurrentVersionPaths(sql, record.oldPath, record.restoredPath);
       await this.#rewriteResourcePaths(sql, record.oldPath, record.restoredPath);
       await sql`
@@ -572,6 +591,7 @@ export class PostgresFileRepository implements FileRepository {
           trashed_from_parent_id = NULL, trashed_from_name = NULL, updated_at = now()
         WHERE id = ${record.resourceId} RETURNING *
       `;
+      await this.#adjustAncestorSizes(sql, record.parentId, original.sizeBytes);
       await sql`UPDATE operation_journal SET state = 'active', updated_at = now() WHERE id = ${record.operationId}`;
       const row = rows[0];
       if (row === undefined) throw new Error("Restored resource was not found");
@@ -579,8 +599,31 @@ export class PostgresFileRepository implements FileRepository {
     });
   }
 
+  purgeTrashFile(record: { readonly operationId: string; readonly resourceId: string }): Promise<Resource> {
+    return this.#database.transaction(async (sql) => {
+      const existing = await this.#resourceQuery(sql, record.resourceId);
+      if (existing === undefined || existing.type !== "file" || existing.status !== "trashed" || existing.trashedFromParentId === undefined) {
+        throw new Error("Trash file was not found");
+      }
+      await sql`UPDATE file_versions SET state = 'expired' WHERE resource_id = ${record.resourceId}`;
+      const rows = await sql<ResourceRow[]>`
+        UPDATE resources SET status = 'purged', purge_after = NULL, updated_at = now()
+        WHERE id = ${record.resourceId} RETURNING *
+      `;
+      await sql`
+        UPDATE operation_journal SET state = 'active', resource_id = ${record.resourceId}, updated_at = now()
+        WHERE id = ${record.operationId}
+      `;
+      const row = rows[0];
+      if (row === undefined) throw new Error("Purged trash file was not found");
+      return resource(row);
+    });
+  }
+
   commitVersionRestore(record: CommitVersionRestoreRecord): Promise<Resource> {
     return this.#database.transaction(async (sql) => {
+      const existing = await this.#resourceQuery(sql, record.resourceId);
+      if (existing === undefined || existing.parentId === undefined || existing.type !== "file") throw new Error("Version-restored resource was not found");
       await sql`
         UPDATE file_versions SET storage_path = ${record.previousVersionArchivePath},
           archived_at = now(), purge_after = ${record.previousVersionPurgeAfter ?? null}
@@ -596,6 +639,7 @@ export class PostgresFileRepository implements FileRepository {
           size_bytes = ${record.sizeBytes}, mime_type = ${record.mimeType}, status = 'active', updated_at = now()
         WHERE id = ${record.resourceId} RETURNING *
       `;
+      await this.#adjustAncestorSizes(sql, existing.parentId, record.sizeBytes - existing.sizeBytes);
       await sql`UPDATE operation_journal SET state = 'active', updated_at = now() WHERE id = ${record.operationId}`;
       const row = rows[0];
       if (row === undefined) throw new Error("Version-restored resource was not found");
@@ -626,6 +670,24 @@ export class PostgresFileRepository implements FileRepository {
         ELSE ${newPath} || substring(storage_path FROM char_length(${oldPath}) + 1)
       END, updated_at = now()
       WHERE storage_path = ${oldPath} OR storage_path LIKE ${`${oldPath}/%`}
+    `;
+  }
+
+  async #adjustAncestorSizes(sql: TransactionSql, folderId: string, deltaBytes: number): Promise<void> {
+    await sql`
+      WITH RECURSIVE ancestors AS (
+        SELECT id, parent_id
+        FROM resources
+        WHERE id = ${folderId} AND type = 'folder' AND status = 'active'
+        UNION ALL
+        SELECT parent.id, parent.parent_id
+        FROM resources AS parent
+        INNER JOIN ancestors AS child ON parent.id = child.parent_id
+        WHERE parent.type = 'folder' AND parent.status = 'active'
+      )
+      UPDATE resources
+      SET size_bytes = size_bytes + ${deltaBytes}, updated_at = now()
+      WHERE id IN (SELECT id FROM ancestors)
     `;
   }
 }

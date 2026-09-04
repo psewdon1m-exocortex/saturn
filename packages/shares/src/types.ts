@@ -35,6 +35,8 @@ export interface PublicShare {
   readonly expiresAt?: Date;
   readonly maxDownloads?: number;
   readonly downloadCount: number;
+  readonly createdAt: Date;
+  readonly updatedAt: Date;
 }
 
 export interface ShareSession {

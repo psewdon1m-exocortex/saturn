@@ -15,7 +15,13 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  quality-gate:
+    permissions:
+      contents: read
+    uses: ./.github/workflows/verify.yml
+
   release:
+    needs: quality-gate
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:

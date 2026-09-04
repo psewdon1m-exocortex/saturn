@@ -39,7 +39,7 @@ export class OwnerTokenGuard implements CanActivate {
   async canActivate(context: ExecutionContext): Promise<boolean> {
     const request = context.switchToHttp().getRequest<AuthenticatedOwnerRequest>();
     const bearer = request.headers.authorization;
-    if (bearer?.startsWith("Bearer ") === true && this.#auth.verifyBootstrap(bearer.slice(7))) return true;
+    if (bearer?.startsWith("Bearer ") === true && await this.#auth.verifyBootstrap(bearer.slice(7))) return true;
     const names = cookieNames(this.#config);
     let cookies: Record<string, string>;
     try {

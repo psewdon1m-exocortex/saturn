@@ -24,6 +24,8 @@ WORKDIR /app
 COPY --from=build --chown=node:node /release/api /app/api
 COPY --from=build --chown=node:node /release/worker /app/worker
 COPY --from=build --chown=node:node /release/deployment /app/deployment
+COPY --chown=node:node compose.production.yaml /app/recovery/compose.yaml
+COPY --chown=node:node packages/database/migrations /app/recovery/migrations
 COPY --chown=node:node scripts/validate-production.mjs scripts/migrate-runtime.mjs scripts/storage-bootstrap.mjs scripts/storage-smoke.mjs scripts/storage-exit.mjs /app/scripts/
 ENV VAULT_RUNTIME_ROOT=/app
 USER node

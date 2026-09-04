@@ -7,6 +7,7 @@ import { z } from "zod";
 import { OwnerTokenGuard, RequireRecentReauthentication } from "./owner-token.guard.js";
 import { ShareApiExceptionFilter } from "./share-api-exception.filter.js";
 import { APP_CONFIG, SHARE_SERVICE } from "./tokens.js";
+import { TransferMonitorService } from "./transfer-monitor.service.js";
 
 const mode = z.enum(["view", "download", "browse", "download_folder"]);
 const createSchema = z.object({
@@ -88,7 +89,6 @@ export class ShareOwnerController {
   constructor(@Inject(SHARE_SERVICE) private readonly shares: ShareService) {}
 
   @Post()
-  @RequireRecentReauthentication()
   async create(@Body() body: unknown) {
     const input = createSchema.parse(body);
     return this.shares.createShare({
@@ -120,7 +120,6 @@ export class ShareOwnerController {
   }
 
   @Delete(":id")
-  @RequireRecentReauthentication()
   revoke(@Param("id") id: string) { return this.shares.revokeShare(id); }
 }
 
@@ -140,7 +139,11 @@ export class ResourceClassificationController {
 @Controller("public/shares")
 @UseFilters(ShareApiExceptionFilter)
 export class PublicShareController {
-  constructor(@Inject(APP_CONFIG) private readonly config: SaturnConfig, @Inject(SHARE_SERVICE) private readonly shares: ShareService) {}
+  constructor(
+    @Inject(APP_CONFIG) private readonly config: SaturnConfig,
+    @Inject(SHARE_SERVICE) private readonly shares: ShareService,
+    @Inject(TransferMonitorService) private readonly transfers: TransferMonitorService,
+  ) {}
 
   @Get(":token")
   async metadata(@Param("token") token: string, @Req() request: FastifyRequest, @Res({ passthrough: true }) reply: FastifyReply) {
@@ -179,7 +182,25 @@ export class PublicShareController {
       .header("Content-Type", opened.resource.mimeType ?? "application/octet-stream")
       .header("Content-Disposition", disposition(opened.share.mode === "view" ? "inline" : "attachment", opened.resource.name));
     if (selectedRange.partial) reply.status(206).header("Content-Range", `bytes ${String(selectedRange.offset)}-${String(selectedRange.offset + contentLength - 1)}/${String(metadata.share.resourceSize)}`);
-    reply.send(opened.stream);
+    reply.send(this.transfers.trackDownload(opened.stream, { filename: opened.resource.name, totalBytes: contentLength }));
+  }
+
+  @Get(":token/content/:resourceId")
+  async childContent(@Param("token") token: string, @Param("resourceId") resourceId: string, @Headers("range") rawRange: string | undefined, @Req() request: FastifyRequest, @Res() reply: FastifyReply): Promise<void> {
+    const metadata = await this.shares.childMetadata(token, resourceId, accessInput(this.config, request));
+    if (metadata.session !== undefined) setSessionCookie(this.config, reply, metadata.session);
+    let selectedRange: ReturnType<typeof range>;
+    try { selectedRange = range(rawRange, metadata.resource.sizeBytes); }
+    catch { reply.status(416).header("Content-Range", `bytes */${String(metadata.resource.sizeBytes)}`).send({ code: "range_not_satisfiable" }); return; }
+    const opened = await this.shares.openChildContent(token, resourceId, selectedRange, accessInput(this.config, request, metadata.session?.token));
+    const contentLength = selectedRange.length ?? metadata.resource.sizeBytes;
+    reply
+      .header("Accept-Ranges", "bytes")
+      .header("Content-Length", contentLength)
+      .header("Content-Type", opened.resource.mimeType ?? "application/octet-stream")
+      .header("Content-Disposition", disposition("attachment", opened.resource.name));
+    if (selectedRange.partial) reply.status(206).header("Content-Range", `bytes ${String(selectedRange.offset)}-${String(selectedRange.offset + contentLength - 1)}/${String(metadata.resource.sizeBytes)}`);
+    reply.send(this.transfers.trackDownload(opened.stream, { filename: opened.resource.name, totalBytes: contentLength }));
   }
 
   @Post(":token/package")
@@ -202,6 +223,6 @@ export class PublicShareController {
     const contentLength = selectedRange.length ?? prepared.sizeBytes;
     reply.header("Accept-Ranges", "bytes").header("Content-Length", contentLength).header("Content-Type", "application/zip").header("Content-Disposition", disposition("attachment", `${metadata.share.resourceName}.zip`));
     if (selectedRange.partial) reply.status(206).header("Content-Range", `bytes ${String(selectedRange.offset)}-${String(selectedRange.offset + contentLength - 1)}/${String(prepared.sizeBytes)}`);
-    reply.send(opened.stream);
+    reply.send(this.transfers.trackDownload(opened.stream, { filename: `${metadata.share.resourceName}.zip`, totalBytes: contentLength }));
   }
 }

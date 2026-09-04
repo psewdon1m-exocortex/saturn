@@ -139,6 +139,22 @@ export class FileService {
     return this.#repository.listChildren(parentId, offset, limit);
   }
 
+  async resolveFolderPath(segments: readonly string[], rootId = ROOT_RESOURCE_ID): Promise<readonly Resource[]> {
+    if (segments.length > 128) throw new Error("Folder path exceeds 128 segments");
+    const root = await this.getResource(rootId);
+    if (root.type !== "folder" || root.status !== "active") throw new Error("Folder path root is not active");
+    const resources: Resource[] = [root];
+    let current = root;
+    for (const rawSegment of segments) {
+      const segment = normalizeStorageName(rawSegment);
+      const child = await this.#repository.getChild(current.id, segment);
+      if (child === undefined || child.type !== "folder" || child.status !== "active") throw new Error("Folder path not found");
+      resources.push(child);
+      current = child;
+    }
+    return resources;
+  }
+
   async listTrash(offset = 0, limit = 100): Promise<readonly Resource[]> {
     if (!Number.isSafeInteger(offset) || offset < 0) throw new Error("Trash offset is invalid");
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 500) throw new Error("Trash limit is invalid");
@@ -523,7 +539,7 @@ export class FileService {
     const source = await this.getResource(resourceId);
     const completed = await this.#completedMutation("copy", input.idempotencyKey, resourceId);
     if (completed !== undefined) return completed;
-    if (source.id === ROOT_RESOURCE_ID || CANONICAL_ROOT_RESOURCE_ID_SET.has(source.id) || source.status !== "active") throw new Error("Resource cannot be copied");
+    if (source.id === ROOT_RESOURCE_ID || source.status !== "active") throw new Error("Resource cannot be copied");
     const targetParent = await this.getResource(input.parentId);
     if (targetParent.type !== "folder" || targetParent.status !== "active") throw new Error("Copy destination is not active");
     const name = normalizeStorageName(input.name ?? source.name);
@@ -670,6 +686,45 @@ export class FileService {
         return restored;
       } catch (error) {
         await this.#rollbackRename(operation.id, restoredPath, source.storagePath);
+        throw error;
+      }
+    });
+  }
+
+  async purgeTrashFile(resourceId: string, input: ResourceMutationInput): Promise<Resource> {
+    const source = await this.getResource(resourceId);
+    const completed = await this.#completedMutation("purge", input.idempotencyKey, resourceId);
+    if (completed !== undefined) return completed;
+    if (source.type !== "file" || source.status !== "trashed" || source.trashedFromParentId === undefined) {
+      throw new Error("Only a file in trash can be permanently deleted");
+    }
+    const storagePaths = new Set<string>([source.storagePath]);
+    for (let offset = 0; ; offset += 500) {
+      const versions = await this.#repository.listVersions(source.id, offset, 500);
+      for (const version of versions) storagePaths.add(version.storagePath);
+      if (versions.length < 500) break;
+    }
+    const operation = await this.#beginMutation("purge", input.idempotencyKey, source.id, {
+      storagePath: source.storagePath,
+      storageObjectCount: storagePaths.size,
+    });
+    if (operation.state === "active" && operation.resourceId !== undefined) return this.getResource(operation.resourceId);
+    return this.#withMutationLocks(operation, [`resource:${source.id}`], async () => {
+      try {
+        await this.#repository.setOperationState(operation.id, "storage_committing");
+        for (const storagePath of storagePaths) {
+          if (await this.#storage.exists(storagePath)) await this.#storage.delete(storagePath);
+        }
+        await this.#repository.setOperationState(operation.id, "storage_committed");
+        const purged = await this.#repository.purgeTrashFile({ operationId: operation.id, resourceId: source.id });
+        await this.#writeAudit("resource.purged_manually", `mutation:${input.idempotencyKey}`, purged.id, {
+          storagePath: source.storagePath,
+          deletedStorageObjects: storagePaths.size,
+          previousPurgeAfter: source.purgeAfter,
+        }, input.auditActor);
+        return purged;
+      } catch (error) {
+        await this.#repository.setOperationState(operation.id, "failed_retryable", { errorCode: "purge_database_failed" });
         throw error;
       }
     });

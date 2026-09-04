@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import { Client, type ConnectConfig, type SFTPWrapper } from "ssh2";
 import type { SaturnConfig } from "@saturn/config";
 import type { HealthCheckResult } from "@saturn/contracts";
+import type { StorageAdapter } from "@saturn/storage";
 
 export function fingerprintForKey(key: Buffer): string {
   return `SHA256:${createHash("sha256").update(key).digest("base64").replace(/=+$/, "")}`;
@@ -105,6 +106,25 @@ export class SftpHealthProbe {
       return { state: "fail", latencyMs: performance.now() - started, detail: "storage_unavailable" };
     } finally {
       await closeClient(client);
+    }
+  }
+}
+
+export class AdapterStorageHealthProbe {
+  readonly #storage: StorageAdapter;
+
+  constructor(storage: StorageAdapter) {
+    this.#storage = storage;
+  }
+
+  async check(): Promise<HealthCheckResult> {
+    const started = performance.now();
+    try {
+      const root = await this.#storage.stat("");
+      if (root.type !== "directory") throw new Error("storage_root_not_directory");
+      return { state: "pass", latencyMs: performance.now() - started };
+    } catch {
+      return { state: "fail", latencyMs: performance.now() - started, detail: "storage_unavailable" };
     }
   }
 }

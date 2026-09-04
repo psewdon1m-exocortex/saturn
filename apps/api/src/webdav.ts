@@ -2,6 +2,7 @@ import { Readable } from "node:stream";
 import type { SaturnConfig } from "@saturn/config";
 import { DeviceServiceError, resourceEtag, type DavEntry, type DeviceService } from "@saturn/sync";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import type { TransferMonitorService } from "./transfer-monitor.service.js";
 
 function xml(value: string): string {
   return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&apos;");
@@ -56,7 +57,7 @@ function destinationPath(request: FastifyRequest, raw: string | undefined, confi
   return value.pathname.slice(5);
 }
 
-async function handler(request: FastifyRequest, reply: FastifyReply, devices: DeviceService, config: SaturnConfig): Promise<unknown> {
+async function handler(request: FastifyRequest, reply: FastifyReply, devices: DeviceService, config: SaturnConfig, transfers: TransferMonitorService): Promise<unknown> {
   reply.header("DAV", "1, 2").header("MS-Author-Via", "DAV").header("Cache-Control", "no-store");
   if (request.method === "OPTIONS") { reply.status(204).header("Allow", "OPTIONS, PROPFIND, GET, HEAD, PUT, MKCOL, MOVE, COPY, DELETE").send(); return; }
   try {
@@ -80,7 +81,8 @@ async function handler(request: FastifyRequest, reply: FastifyReply, devices: De
       reply.header("Accept-Ranges", "bytes").header("Content-Length", length).header("ETag", resourceEtag(resource)).header("Last-Modified", resource.updatedAt.toUTCString()).type(resource.mimeType ?? "application/octet-stream");
       if (selected !== undefined) reply.status(206).header("Content-Range", `bytes ${String(selected.offset)}-${String(selected.offset + length - 1)}/${String(resource.sizeBytes)}`);
       if (request.method === "HEAD") { reply.send(); return; }
-      return await reply.send((await devices.openRead(context, rawPath, selected)).stream);
+      const opened = await devices.openRead(context, rawPath, selected);
+      return await reply.send(transfers.trackDownload(opened.stream, { filename: resource.name, totalBytes: length }));
     }
     if (request.method === "PUT") {
       const size = Number(request.headers["content-length"]);
@@ -111,7 +113,7 @@ async function handler(request: FastifyRequest, reply: FastifyReply, devices: De
   }
 }
 
-export function registerWebDav(instance: FastifyInstance, devices: DeviceService, config: SaturnConfig): void {
+export function registerWebDav(instance: FastifyInstance, devices: DeviceService, config: SaturnConfig, transfers: TransferMonitorService): void {
   const method = ["OPTIONS", "PROPFIND", "GET", "HEAD", "PUT", "MKCOL", "MOVE", "COPY", "DELETE"] as const;
-  for (const url of ["/dav", "/dav/*"]) instance.route({ method: method as never, url, handler: (request, reply) => handler(request, reply, devices, config) });
+  for (const url of ["/dav", "/dav/*"]) instance.route({ method: method as never, url, handler: (request, reply) => handler(request, reply, devices, config, transfers) });
 }

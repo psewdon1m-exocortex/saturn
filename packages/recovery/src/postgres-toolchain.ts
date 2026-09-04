@@ -12,6 +12,30 @@ interface DatabaseConnectionArguments {
   readonly environment: NodeJS.ProcessEnv;
 }
 
+export const RECOVERY_TRANSIENT_TABLES = [
+  "web_sessions",
+  "login_sessions",
+  "operation_locks",
+  "upload_sessions",
+  // The journal can reference upload_sessions. Keeping its rows while
+  // excluding upload session rows produces a dump that cannot satisfy its
+  // foreign key when pg_restore recreates constraints.
+  "operation_journal",
+  "backup_runs",
+  "recovery_runs",
+  "auth_attempts",
+  "telegram_link_challenges",
+  "drop_challenges",
+  "drop_sessions",
+  "drop_uploads",
+  "drop_attempts",
+  "telegram_updates",
+  "share_sessions",
+  "share_password_attempts",
+  "share_packages",
+  "device_delete_events",
+] as const;
+
 function connectionArguments(databaseUrl: string): DatabaseConnectionArguments {
   const parsed = new URL(databaseUrl);
   if (parsed.protocol !== "postgres:" && parsed.protocol !== "postgresql:") throw new Error("Unsupported database URL protocol");
@@ -99,6 +123,7 @@ export class PostgresCommandToolchain implements LogicalDatabaseToolchain {
   readonly #pgRestoreExecutable: string;
   readonly #pgDumpPrefixArgs: readonly string[];
   readonly #pgRestorePrefixArgs: readonly string[];
+  readonly #commandConnectionArgs: readonly string[] | undefined;
   readonly #maximumDumpBytes: number;
 
   constructor(input: {
@@ -108,6 +133,7 @@ export class PostgresCommandToolchain implements LogicalDatabaseToolchain {
     readonly pgRestoreExecutable?: string;
     readonly pgDumpPrefixArgs?: readonly string[];
     readonly pgRestorePrefixArgs?: readonly string[];
+    readonly commandConnectionArgs?: readonly string[];
     readonly maximumDumpBytes: number;
   }) {
     this.#databaseUrl = input.databaseUrl;
@@ -116,6 +142,7 @@ export class PostgresCommandToolchain implements LogicalDatabaseToolchain {
     this.#pgRestoreExecutable = input.pgRestoreExecutable ?? "pg_restore";
     this.#pgDumpPrefixArgs = input.pgDumpPrefixArgs ?? [];
     this.#pgRestorePrefixArgs = input.pgRestorePrefixArgs ?? [];
+    this.#commandConnectionArgs = input.commandConnectionArgs;
     this.#maximumDumpBytes = input.maximumDumpBytes;
   }
 
@@ -128,24 +155,8 @@ export class PostgresCommandToolchain implements LogicalDatabaseToolchain {
       "--compress=6",
       "--no-owner",
       "--no-acl",
-      "--exclude-table-data=web_sessions",
-      "--exclude-table-data=login_sessions",
-      "--exclude-table-data=operation_locks",
-      "--exclude-table-data=upload_sessions",
-      "--exclude-table-data=backup_runs",
-      "--exclude-table-data=recovery_runs",
-      "--exclude-table-data=auth_attempts",
-      "--exclude-table-data=telegram_link_challenges",
-      "--exclude-table-data=drop_challenges",
-      "--exclude-table-data=drop_sessions",
-      "--exclude-table-data=drop_uploads",
-      "--exclude-table-data=drop_attempts",
-      "--exclude-table-data=telegram_updates",
-      "--exclude-table-data=share_sessions",
-      "--exclude-table-data=share_password_attempts",
-      "--exclude-table-data=share_packages",
-      "--exclude-table-data=device_delete_events",
-      ...connection.args,
+      ...RECOVERY_TRANSIENT_TABLES.map((table) => `--exclude-table-data=${table}`),
+      ...(this.#commandConnectionArgs ?? connection.args),
     ], { env: connection.environment, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
     let standardError = "";
     child.stderr.on("data", (chunk: Buffer) => { standardError = `${standardError}${chunk.toString("utf8")}`.slice(-32_768); });
@@ -176,8 +187,16 @@ export class PostgresCommandToolchain implements LogicalDatabaseToolchain {
       "--no-owner",
       "--no-acl",
       ...(mode === "replace" ? ["--clean", "--if-exists"] : []),
-      ...connection.args,
+      ...(this.#commandConnectionArgs ?? connection.args),
     ], connection.environment, dumpPath);
+  }
+
+  async checkReady(): Promise<void> {
+    const connection = connectionArguments(this.#databaseUrl);
+    await Promise.all([
+      runCommand(this.#pgDumpExecutable, [...this.#pgDumpPrefixArgs, "--version"], connection.environment),
+      runCommand(this.#pgRestoreExecutable, [...this.#pgRestorePrefixArgs, "--version"], connection.environment),
+    ]);
   }
 
   verifyRestoredDatabase(): Promise<Record<string, number>> {

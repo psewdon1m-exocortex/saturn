@@ -93,7 +93,7 @@
 
 ## 1.7. Drop Point
 
-Минимальная публичная страница, позволяющая загрузить один или несколько файлов в каталог `drop point` по одноразовому коду, полученному через Telegram-бота. Drop Point не показывает содержимое хранилища и не позволяет скачивать, переименовывать или удалять данные.
+Минимальная публичная страница, позволяющая загрузить один или несколько файлов в каталог `drop point` по короткоживущему многоклиентскому коду, полученному через Telegram-бота. Drop Point не показывает содержимое хранилища и не позволяет скачивать, переименовывать или удалять данные.
 
 ## 1.8. Mastermind
 
@@ -120,7 +120,7 @@
 Система должна обеспечивать:
 
 1. Собственный web-интерфейс для работы с файлами и папками.
-2. Быструю загрузку файлов через Drop Point по одноразовому Telegram-коду.
+2. Быструю загрузку файлов через Drop Point по короткоживущему Telegram-коду с общей очередью для нескольких устройств.
 3. Хранение и синхронизацию каталога Mastermind.
 4. Безопасное хранение и версионирование KeePass-файла.
 5. Приём автоматических резервных копий внутренних сервисов с отдельной аутентификацией.
@@ -748,7 +748,7 @@ Files | Laboratory | Drop Point | Shared | Trash | Activity | Settings
 
 1. Пользователь на доверенном телефоне пишет боту `/drop` или нажимает кнопку «Получить код».
 2. Bot проверяет Telegram `user_id` по allowlist.
-3. Gateway создаёт одноразовый короткий код.
+3. Gateway создаёт короткоживущий код общего Drop-канала.
 4. Bot отправляет код и срок действия.
 5. На чужом устройстве пользователь открывает `https://drive.example.com/drop`.
 6. Вводит код.
@@ -762,9 +762,9 @@ Files | Laboratory | Drop Point | Shared | Trash | Activity | Settings
 | Параметр | Значение по умолчанию |
 |---|---|
 | Формат | 8 символов Crockford Base32 |
-| Срок действия | 5 минут |
-| Число погашений | 1 |
-| Drop session после погашения | 15 минут |
+| Срок действия | 30 минут от выпуска |
+| Число погашений | несколько, пока код действует |
+| Drop channel и client sessions | до того же срока: 30 минут от выпуска |
 | Максимум файлов | 20 |
 | Максимум batch | 20 GB |
 | Права | только upload |
@@ -784,7 +784,7 @@ Files | Laboratory | Drop Point | Shared | Trash | Activity | Settings
 - лимиты;
 - статус.
 
-После успешного погашения код немедленно становится недействительным, а браузеру выдаётся отдельная HttpOnly cookie Drop session.
+Каждое успешное погашение в пределах срока выдаёт устройству отдельную HttpOnly cookie Drop session. Все такие сессии входят в один канал, разделяют очередь и прекращают действие в общей точке — через 30 минут после выпуска кода.
 
 ## 10.4. Защита от перебора
 
@@ -809,7 +809,7 @@ Files | Laboratory | Drop Point | Shared | Trash | Activity | Settings
 Drop-код не защищает от malware/keylogger на устройстве, но ограничивает ущерб:
 
 - код короткоживущий;
-- одноразовый;
+- допускает несколько устройств только в пределах общего абсолютного срока;
 - не открывает архив;
 - не позволяет скачать KeePass;
 - не позволяет удалить/перезаписать существующие данные;
@@ -1346,6 +1346,16 @@ Share должен немедленно перестать работать пр
 
 # 18. API: рекомендуемый контракт
 
+Runtime storage replacement is exposed only to an authenticated owner with
+recent proof: `GET /api/v1/operator/storage`, `POST
+/api/v1/operator/storage/test`, and `POST /api/v1/operator/storage/switch`.
+The test/switch bodies accept the SFTP target and one write-only password or
+private key. Read responses never contain credential material. Switching means
+activation of an independent file set, a complete Gateway catalog rebuild and
+zero byte migration; the previous backend is not modified. API and worker read
+the atomically published profile from the shared protected
+`STORAGE_RUNTIME_CONFIG_DIR`.
+
 ## 18.1. Authentication modes
 
 | Режим | Для кого | Права |
@@ -1715,7 +1725,7 @@ Gateway не должен хранить основной архив. Локал
 
 | Угроза | Последствие | Мера |
 |---|---|---|
-| Перебор Drop-кода | чужой upload | короткий TTL, одноразовость, rate limit, Telegram alert |
+| Перебор Drop-кода | чужой upload | короткий абсолютный TTL, rate limit, Telegram alert |
 | Кража Drop-кода | upload мусора | upload-only, batch quota, no list/read/delete |
 | Path traversal | запись вне `drop point` | canonical path + server-generated destination |
 | Вредоносный файл | exploit preview | store outside webroot, sandbox/allowlist preview |
@@ -2038,7 +2048,7 @@ Telegram может быть модулем `gateway-api`; отдельный к
 4. Неполный upload не появляется в Files.
 5. Удалённый файл восстанавливается из trash.
 6. Перезаписанный KeePass восстанавливается из версии.
-7. Drop code одноразовый, живёт не более заданного TTL и не даёт list/read/delete.
+7. Drop code допускает несколько устройств до общей абсолютной границы 30 минут от выпуска и не даёт list/read/delete.
 8. Telegram bot выдаёт код только разрешённому user ID.
 9. Backup producer видит только собственный upload API.
 10. Mastermind хранится целиком и может быть открыт как обычная Obsidian folder после выгрузки.

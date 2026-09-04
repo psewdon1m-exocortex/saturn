@@ -18,6 +18,7 @@
 | ADR-012 | Promote the same immutable artifact from tests to PROD | Rebuilding after testing does not prove byte identity | Production deployment consumes a verified digest |
 | ADR-013 | Scope sync clients to stable logical root IDs and preserve KeePass as an opaque confidential file | Paths can move physically without changing authority; Gateway must not handle a KeePass master key | WebDAV resolves only `mastermind`, `sync` and `volt`; KDBX preview/share/index are denied and conflict copies retain both inputs |
 | ADR-014 | Derive backup namespaces exclusively from HMAC-authenticated service identity | A compromised producer must not choose another service's path or receive Storage Box credentials | Producer routes are upload/status-only; quota, receipt, retention and restore evidence remain owner-controlled |
+| ADR-015 | Treat an operator-selected SFTP target as an independent active file set, never an implicit migration | Switching providers must not copy or merge unknown bytes and the UI/catalog must describe the selected target | Preflight and full hashing precede an exclusive catalog rebuild; active shares/devices/transfers are revoked; the previous storage remains untouched |
 
 ## Environment topology
 
@@ -52,3 +53,4 @@ separate Storage Box.
 | MD-001 | A working DEV password is stored as plaintext under `docs` with broad inherited ACL | Local disclosure and accidental packaging risk | Added source exclusion; credential must move to restricted runtime secret storage before Stage 2 completion |
 | MD-002 | User topology initially places DEV and PROD sub-accounts on one physical Storage Box | Shared capacity and reachability reduce isolation | Allowed only with explicit exposure controls; separate PROD box remains recommended before real data |
 | MD-003 | The selected v2 business layout names only six root directories and omits runtime internals | Omitting runtime internals would break upload commit, versions, trash and reconciliation contracts | Six business roots are direct children of the sub-account home; hidden `_system` is retained and excluded from ordinary UI |
+| MD-004 | Part VII permits only Access Key and Kernel token browser secret rotation, while the operator requested SFTP credential replacement in Settings | Adds a high-impact secret and external-provider control surface | Explicitly approved by the operator on 2026-09-04; constrained to strict SFTP fields, CSRF + recent proof, pinned identity, write-only credential, protected volume, pre-activation validation, audit and rollback |

@@ -19,13 +19,31 @@ export interface NewOwnerSession {
 }
 
 export interface OwnerPreferences {
-  readonly darkColor: string;
-  readonly lightColor: string;
   readonly accentColor: string;
+  readonly sidebarMode: "fixed" | "auto-hide";
+  readonly navigationOrder: readonly ("dashboard" | "files" | "inbox" | "shared" | "trash" | "settings")[];
+  readonly dashboardOrder: readonly ("cpu" | "ram" | "disk" | "uptime" | "storage" | "drop" | "reachability" | "tasks")[];
+  readonly settingsOrder: readonly ("appearance" | "security" | "telegram" | "backup" | "updates" | "logs")[];
   readonly updatedAt: Date;
 }
 
+export interface OwnerCredentialVerifier {
+  readonly algorithm: "scrypt-v1";
+  readonly saltHex: string;
+  readonly verifierHex: string;
+  readonly revision: number;
+}
+
 export interface OwnerAuthRepository {
+  getCredentialVerifier(): Promise<OwnerCredentialVerifier | undefined>;
+  initializeCredentialVerifier(verifier: Omit<OwnerCredentialVerifier, "revision">): Promise<OwnerCredentialVerifier>;
+  replaceCredentialVerifier(input: {
+    readonly expectedRevision: number;
+    readonly verifier: Omit<OwnerCredentialVerifier, "revision">;
+    readonly previousTokenHash: string;
+    readonly replacementSession: OwnerSession;
+    readonly now: Date;
+  }): Promise<{ readonly verifier: OwnerCredentialVerifier; readonly revokedSessions: number }>;
   countRecentFailures(sourceIpHash: string, since: Date): Promise<number>;
   recordAttempt(sourceIpHash: string, outcome: "success" | "failure" | "rate_limited", occurredAt: Date): Promise<void>;
   createSession(session: OwnerSession): Promise<void>;

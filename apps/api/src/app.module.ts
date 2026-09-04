@@ -1,16 +1,17 @@
 import { Module } from "@nestjs/common";
+import { APP_INTERCEPTOR } from "@nestjs/core";
 import fs from "node:fs/promises";
 import { AuditService } from "@saturn/audit";
 import { OwnerAuthService, PostgresOwnerAuthRepository } from "@saturn/auth";
 import { BackupIngestService, PostgresBackupRepository, type BackupRepository } from "@saturn/backup-ingest";
 import { loadEnvironment } from "@saturn/config";
 import { Database } from "@saturn/database";
-import { DropService, PostgresDropRepository, TelegramHttpProvider, TelegramNotifier, TelegramSupervisor, TelegramWebhookService, type DropRepository, type TelegramProvider } from "@saturn/drop";
+import { DropBufferStore, DropService, PostgresDropRepository, TelegramHttpProvider, TelegramNotifier, TelegramSupervisor, TelegramWebhookService, type DropRepository, type TelegramProvider } from "@saturn/drop";
 import { FileService, PostgresFileRepository } from "@saturn/file-core";
 import { LaboratoryService, PostgresLaboratoryRepository, type LaboratoryRepository } from "@saturn/laboratory";
-import { SftpStorageAdapter, type StorageAdapter } from "@saturn/storage";
+import { RuntimeStorageManager, type StorageAdapter } from "@saturn/storage";
 import { PostgresPurgeRepository, PostgresReconciliationRepository, PurgeService, ReconciliationService } from "@saturn/protection";
-import { SftpHealthProbe } from "@saturn/storage-health";
+import { AdapterStorageHealthProbe } from "@saturn/storage-health";
 import { PostgresShareRepository, ShareService, type ShareRepository } from "@saturn/shares";
 import { DeviceService, PostgresDeviceRepository, type DeviceRepository } from "@saturn/sync";
 import { HealthController } from "./health.controller.js";
@@ -53,20 +54,36 @@ import {
   SHARE_SERVICE,
   STORAGE_ADAPTER,
   STORAGE_HEALTH,
+  STORAGE_RUNTIME,
   TELEGRAM_PROVIDER,
   TELEGRAM_RUNTIME,
   TELEGRAM_SUPERVISOR,
   TELEGRAM_WEBHOOK_SERVICE,
 } from "./tokens.js";
+import { OperatorController } from "./operator.controller.js";
+import { TransferMonitorService } from "./transfer-monitor.service.js";
+import { MaintenanceBarrierInterceptor } from "./maintenance-barrier.interceptor.js";
+import { RecoveryController } from "./recovery.controller.js";
+import { RecoveryWorkflowService } from "./recovery-workflow.service.js";
+import { StorageConnectionController } from "./storage-connection.controller.js";
+import { StorageConnectionService } from "./storage-connection.service.js";
 
 const config = loadEnvironment();
 
 @Module({
-  controllers: [HealthController, AuthController, FileController, ActivityController, ProtectionController, DropController, TelegramOwnerController, TelegramWebhookController, ShareOwnerController, ResourceClassificationController, PublicShareController, DeviceController, BackupOwnerController, BackupRestoreController, BackupProducerController, LaboratoryClientController, LaboratoryAssetController, LaboratoryDeliveryController],
+  controllers: [HealthController, AuthController, OperatorController, StorageConnectionController, RecoveryController, FileController, ActivityController, ProtectionController, DropController, TelegramOwnerController, TelegramWebhookController, ShareOwnerController, ResourceClassificationController, PublicShareController, DeviceController, BackupOwnerController, BackupRestoreController, BackupProducerController, LaboratoryClientController, LaboratoryAssetController, LaboratoryDeliveryController],
   providers: [
     { provide: APP_CONFIG, useValue: config },
-    { provide: DATABASE, useFactory: () => new Database(config.databaseUrl, { max: 10 }) },
-    { provide: STORAGE_ADAPTER, useFactory: () => new SftpStorageAdapter(config.storage) },
+    { provide: DATABASE, useFactory: () => new Database(config.databaseUrl, { max: 10, maintenanceBarrier: true }) },
+    {
+      provide: STORAGE_RUNTIME,
+      useFactory: async () => {
+        const storage = new RuntimeStorageManager(config.storage, config.storageRuntimeConfigDirectory);
+        await storage.initialize();
+        return storage;
+      },
+    },
+    { provide: STORAGE_ADAPTER, useExisting: STORAGE_RUNTIME },
     {
       provide: AUDIT_SERVICE,
       useFactory: (database: Database) => createAuditService(database, config),
@@ -74,20 +91,24 @@ const config = loadEnvironment();
     },
     {
       provide: AUTH_SERVICE,
-      useFactory: async (database: Database, audit: AuditService) => new OwnerAuthService({
-        repository: new PostgresOwnerAuthRepository(database),
-        ownerAccessKey: (await fs.readFile(config.ownerBootstrapTokenFile, "utf8")).replace(/[\r\n]+$/, ""),
-        pepper: (await fs.readFile(config.auth.pepperFile, "utf8")).replace(/[\r\n]+$/, ""),
-        options: {
-          publicOrigin: config.publicOrigin,
-          sessionIdleTtlMs: config.auth.sessionIdleTtlMs,
-          sessionAbsoluteTtlMs: config.auth.sessionAbsoluteTtlMs,
-          reauthTtlMs: config.auth.reauthTtlMs,
-          failureLimit: config.auth.failureLimit,
-          failureWindowMs: config.auth.failureWindowMs,
-        },
-        audit,
-      }),
+      useFactory: async (database: Database, audit: AuditService) => {
+        const service = new OwnerAuthService({
+          repository: new PostgresOwnerAuthRepository(database),
+          ownerAccessKey: (await fs.readFile(config.ownerBootstrapTokenFile, "utf8")).replace(/[\r\n]+$/, ""),
+          pepper: (await fs.readFile(config.auth.pepperFile, "utf8")).replace(/[\r\n]+$/, ""),
+          options: {
+            publicOrigin: config.publicOrigin,
+            sessionIdleTtlMs: config.auth.sessionIdleTtlMs,
+            sessionAbsoluteTtlMs: config.auth.sessionAbsoluteTtlMs,
+            reauthTtlMs: config.auth.reauthTtlMs,
+            failureLimit: config.auth.failureLimit,
+            failureWindowMs: config.auth.failureWindowMs,
+          },
+          audit,
+        });
+        await service.initialize();
+        return service;
+      },
       inject: [DATABASE, AUDIT_SERVICE],
     },
     {
@@ -138,7 +159,16 @@ const config = loadEnvironment();
           failureLimit: config.drop.failureLimit,
           globalFailureLimit: config.drop.globalFailureLimit,
           failureWindowMs: config.drop.failureWindowMs,
+          continuationTtlMs: config.drop.continuationTtlMs,
         },
+        buffer: new DropBufferStore({
+          root: config.drop.bufferDirectory,
+          maxBytes: config.drop.bufferMaxBytes,
+          minFreeBytes: config.drop.bufferMinFreeBytes,
+          warningRatio: config.drop.bufferWarningRatio,
+          criticalRatio: config.drop.bufferCriticalRatio,
+          refusalRatio: config.drop.bufferRefusalRatio,
+        }),
         audit,
       }),
       inject: [DROP_REPOSITORY, FILE_SERVICE, AUDIT_SERVICE],
@@ -270,7 +300,7 @@ const config = loadEnvironment();
       ),
       inject: [DATABASE, STORAGE_ADAPTER, AUDIT_SERVICE],
     },
-    { provide: STORAGE_HEALTH, useFactory: () => new SftpHealthProbe(config.storage) },
+    { provide: STORAGE_HEALTH, useFactory: (storage: StorageAdapter) => new AdapterStorageHealthProbe(storage), inject: [STORAGE_ADAPTER] },
     HealthService,
     OwnerTokenGuard,
     DropSessionGuard,
@@ -278,6 +308,14 @@ const config = loadEnvironment();
     ShareApiExceptionFilter,
     BackupApiExceptionFilter,
     LaboratoryApiExceptionFilter,
+    TransferMonitorService,
+    {
+      provide: StorageConnectionService,
+      useFactory: (database: Database, storage: RuntimeStorageManager, audit: AuditService) => new StorageConnectionService(database, storage, config, audit),
+      inject: [DATABASE, STORAGE_RUNTIME, AUDIT_SERVICE],
+    },
+    RecoveryWorkflowService,
+    { provide: APP_INTERCEPTOR, useClass: MaintenanceBarrierInterceptor },
     RuntimeLifecycleService,
   ],
 })

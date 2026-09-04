@@ -1,12 +1,15 @@
 import { Readable } from "node:stream";
-import { Body, Controller, Get, Headers, HttpCode, HttpException, HttpStatus, Inject, Param, Patch, Post, Req, Res, UnauthorizedException, UseFilters, UseGuards } from "@nestjs/common";
+import { Body, Controller, Delete, Get, Headers, HttpCode, HttpException, HttpStatus, Inject, type MessageEvent, Param, Patch, Post, Req, Res, Sse, UnauthorizedException, UseFilters, UseGuards } from "@nestjs/common";
 import type { SaturnConfig } from "@saturn/config";
 import { DropServiceError, type DropService } from "@saturn/drop";
 import { fastifyCookie } from "@fastify/cookie";
 import type { FastifyReply, FastifyRequest } from "fastify";
+import { from, interval, type Observable, timer } from "rxjs";
+import { distinctUntilChanged, map, startWith, switchMap, takeUntil } from "rxjs/operators";
 import { z } from "zod";
 import { DROP_SESSION, DropSessionGuard, dropCookieNames } from "./drop-session.guard.js";
 import type { AuthenticatedDropRequest } from "./drop-session.guard.js";
+import { OwnerTokenGuard } from "./owner-token.guard.js";
 import { APP_CONFIG, DROP_SERVICE } from "./tokens.js";
 import { SaturnApiExceptionFilter } from "./saturn-api-exception.filter.js";
 
@@ -38,7 +41,7 @@ export class DropController {
 
   #setCookies(reply: FastifyReply, created: { readonly token: string; readonly csrfToken: string; readonly session: { readonly expiresAt: Date } }): void {
     const names = dropCookieNames(this.config);
-    const common = { path: "/", sameSite: "strict" as const, secure: this.config.environment === "production", expires: created.session.expiresAt };
+    const common = { path: "/", sameSite: "strict" as const, secure: this.config.environment === "production", expires: new Date(created.session.expiresAt.getTime() + this.config.drop.continuationTtlMs) };
     reply.header("Set-Cookie", [
       fastifyCookie.serialize(names.session, created.token, { ...common, httpOnly: true }),
       fastifyCookie.serialize(names.csrf, created.csrfToken, { ...common, httpOnly: false }),
@@ -54,6 +57,43 @@ export class DropController {
     ]);
   }
 
+  @Post("codes")
+  @UseGuards(OwnerTokenGuard)
+  issueCode() {
+    return this.drop.issueDropCode();
+  }
+
+  @Post("internal/session")
+  @UseGuards(OwnerTokenGuard)
+  async internalSession(@Req() request: FastifyRequest, @Res({ passthrough: true }) reply: FastifyReply) {
+    const now = new Date();
+    const challenge = await this.drop.issueDropCode(now);
+    const created = await this.drop.redeem(challenge.code, `owner:${request.ip}`, request.headers["user-agent"] ?? "", now);
+    this.#setCookies(reply, created);
+    return {
+      state: "upload_only",
+      channelId: created.session.channelId,
+      expiresAt: created.session.expiresAt,
+      maxFiles: created.session.maxFiles,
+      maxBytes: created.session.maxBytes,
+      reservedFiles: created.session.reservedFiles,
+      reservedBytes: created.session.reservedBytes,
+      buffer: await this.drop.bufferCapacity(),
+    };
+  }
+
+  @Get("buffer")
+  @UseGuards(OwnerTokenGuard)
+  async buffer() {
+    return {
+      capacity: await this.drop.bufferCapacity(),
+      sessionTtlMs: this.config.drop.sessionTtlMs,
+      continuationTtlMs: this.config.drop.continuationTtlMs,
+      workers: this.config.drop.drainWorkers,
+      intervalMs: this.config.drop.drainIntervalMs,
+    };
+  }
+
   @Post("redeem")
   async redeem(@Body() body: unknown, @Req() request: FastifyRequest, @Res({ passthrough: true }) reply: FastifyReply) {
     const expectedOrigin = new URL(this.config.publicOrigin).origin;
@@ -64,7 +104,7 @@ export class DropController {
     try {
       const created = await this.drop.redeem(redeemSchema.parse(body).code, request.ip, request.headers["user-agent"] ?? "");
       this.#setCookies(reply, created);
-      return { state: "upload_only", expiresAt: created.session.expiresAt, maxFiles: created.session.maxFiles, maxBytes: created.session.maxBytes };
+      return { state: "upload_only", channelId: created.session.channelId, expiresAt: created.session.expiresAt, maxFiles: created.session.maxFiles, maxBytes: created.session.maxBytes };
     } catch (error) {
       if (error instanceof DropServiceError && error.code === "rate_limited") {
         throw new HttpException({ code: "drop_unavailable" }, HttpStatus.TOO_MANY_REQUESTS);
@@ -102,17 +142,43 @@ export class DropController {
 
   @Get("session")
   @UseGuards(DropSessionGuard)
-  session(@Req() request: AuthenticatedDropRequest) {
+  async session(@Req() request: AuthenticatedDropRequest) {
     const session = request[DROP_SESSION];
     if (session === undefined) throw new UnauthorizedException();
     return {
       state: "upload_only",
+      channelId: session.channelId,
       expiresAt: session.expiresAt,
       maxFiles: session.maxFiles,
       maxBytes: session.maxBytes,
       reservedFiles: session.reservedFiles,
       reservedBytes: session.reservedBytes,
+      buffer: await this.drop.bufferCapacity(),
     };
+  }
+
+  @Get("uploads")
+  @UseGuards(DropSessionGuard)
+  uploads(@Req() request: AuthenticatedDropRequest) {
+    const session = request[DROP_SESSION];
+    if (session === undefined) throw new UnauthorizedException();
+    return this.drop.listUploads(session);
+  }
+
+  @Sse("events")
+  @UseGuards(DropSessionGuard)
+  events(@Req() request: AuthenticatedDropRequest): Observable<MessageEvent> {
+    const session = request[DROP_SESSION];
+    if (session === undefined) throw new UnauthorizedException();
+    const remainingMs = Math.max(1, session.expiresAt.getTime() - Date.now());
+    return interval(750).pipe(
+      startWith(0),
+      switchMap(() => from(this.drop.listUploads(session))),
+      map((uploads) => ({ uploads, fingerprint: JSON.stringify(uploads) })),
+      distinctUntilChanged((left, right) => left.fingerprint === right.fingerprint),
+      map(({ uploads }) => ({ type: "uploads", data: uploads })),
+      takeUntil(timer(remainingMs)),
+    );
   }
 
   @Get("uploads/:id/status")
@@ -145,6 +211,14 @@ export class DropController {
     const session = request[DROP_SESSION];
     if (session === undefined) throw new UnauthorizedException();
     return this.drop.completeUpload(session, completeSchema.parse(body).uploadId);
+  }
+
+  @Delete("uploads/:id")
+  @UseGuards(DropSessionGuard)
+  cancel(@Param("id") id: string, @Req() request: AuthenticatedDropRequest) {
+    const session = request[DROP_SESSION];
+    if (session === undefined) throw new UnauthorizedException();
+    return this.drop.cancelUpload(session, id);
   }
 
   @Post("logout")

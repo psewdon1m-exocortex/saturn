@@ -181,7 +181,11 @@ export class SaturnBackupService {
     }
   }
 
-  async restore(input: RestoreInput, migrateTarget: () => Promise<unknown> = () => Promise.resolve()): Promise<RestoreResult> {
+  async restore(
+    input: RestoreInput,
+    migrateTarget: () => Promise<unknown> = () => Promise.resolve(),
+    withWriteBarrier: <T>(action: () => Promise<T>) => Promise<T> = (action) => action(),
+  ): Promise<RestoreResult> {
     const started = new Date();
     const restoreId = uuidv7();
     const restoreDirectory = path.join(this.#spoolRoot, `restore-${restoreId}`);
@@ -202,34 +206,36 @@ export class SaturnBackupService {
           kind: "pre_restore",
         });
       }
-      try {
-        await this.#database.restoreDump(dumpPath, input.mode);
-        await migrateTarget();
-        const verification = await this.#database.verifyRestoredDatabase();
-        const finished = new Date();
-        return {
-          backupId: validated.manifest.backupId,
-          mode: input.mode,
-          startedAt: started.toISOString(),
-          finishedAt: finished.toISOString(),
-          measuredRpoMs: Math.max(0, started.getTime() - new Date(validated.manifest.createdAt).getTime()),
-          measuredRtoMs: finished.getTime() - started.getTime(),
-          verification,
-          ...(snapshot === undefined ? {} : { snapshotPath: snapshot.archivePath }),
-        };
-      } catch (restoreError) {
-        if (snapshot === undefined) throw restoreError;
-        const rollbackDirectory = path.join(restoreDirectory, "rollback");
+      return await withWriteBarrier(async () => {
         try {
-          await this.#validator.validate(snapshot.archivePath, rollbackDirectory);
-          await this.#database.restoreDump(path.join(rollbackDirectory, "database", "database.dump"), "replace");
+          await this.#database.restoreDump(dumpPath, input.mode);
           await migrateTarget();
-          await this.#database.verifyRestoredDatabase();
-        } catch (rollbackError) {
-          throw new AggregateError([restoreError, rollbackError], "Restore and snapshot rollback both failed");
+          const verification = await this.#database.verifyRestoredDatabase();
+          const finished = new Date();
+          return {
+            backupId: validated.manifest.backupId,
+            mode: input.mode,
+            startedAt: started.toISOString(),
+            finishedAt: finished.toISOString(),
+            measuredRpoMs: Math.max(0, started.getTime() - new Date(validated.manifest.createdAt).getTime()),
+            measuredRtoMs: finished.getTime() - started.getTime(),
+            verification,
+            ...(snapshot === undefined ? {} : { snapshotPath: snapshot.archivePath }),
+          };
+        } catch (restoreError) {
+          if (snapshot === undefined) throw restoreError;
+          const rollbackDirectory = path.join(restoreDirectory, "rollback");
+          try {
+            await this.#validator.validate(snapshot.archivePath, rollbackDirectory);
+            await this.#database.restoreDump(path.join(rollbackDirectory, "database", "database.dump"), "replace");
+            await migrateTarget();
+            await this.#database.verifyRestoredDatabase();
+          } catch (rollbackError) {
+            throw new AggregateError([restoreError, rollbackError], "Restore and snapshot rollback both failed");
+          }
+          throw restoreError;
         }
-        throw restoreError;
-      }
+      });
     } finally {
       await fs.rm(restoreDirectory, { recursive: true, force: true });
     }

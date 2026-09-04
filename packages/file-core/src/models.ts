@@ -42,7 +42,7 @@ export interface Resource {
 
 export interface FileOperation {
   readonly id: string;
-  readonly operationType: "move" | "copy" | "trash" | "restore" | "version_restore";
+  readonly operationType: "move" | "copy" | "trash" | "restore" | "purge" | "version_restore";
   readonly state: string;
   readonly idempotencyKey: string;
   readonly resourceId?: string;

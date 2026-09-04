@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useRef, useState, type DragEvent, type ReactNode, type SyntheticEvent } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type CSSProperties, type DragEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode, type SyntheticEvent } from "react";
 import type { HealthResponse } from "@saturn/contracts";
-import { ApiError, api, downloadUrl, dropApi, publicShareApi, uploadDropFile, uploadFile } from "./api.js";
+import { ApiError, api, downloadRecoverySnapshot, downloadUrl, dropApi, folderDownloadUrl, publicShareApi, uploadDropFile, uploadFile, uploadRecoverySnapshot } from "./api.js";
 import {
   BACKUPS_RESOURCE_ID,
   DROP_POINT_RESOURCE_ID,
@@ -9,23 +9,94 @@ import {
   VOLT_RESOURCE_ID,
   ROOT_RESOURCE_ID,
   SYNC_RESOURCE_ID,
-  type AuditEvent,
   type BackupServiceInfo,
+  type AuditEventInfo,
   type DeviceInfo,
   type FileVersion,
-  type LaboratoryAssetInfo,
-  type LaboratoryClientInfo,
+  type KernelStatus,
   type OwnerPreferences,
+  type OperatorOverview,
+  type RecoveryStatus,
+  type RecoveryRestoreCandidate,
+  type RecoveryRestoreResult,
   type Resource,
   type ShareChild,
   type ShareInfo,
   type DropSessionInfo,
+  type DropUploadStatus,
+  type StorageConnectionInput,
+  type StorageConnectionStatus,
   type TelegramStatus,
+  type UpdateStatus,
 } from "./types.js";
 
+const saturnPlanet = "/saturn-favicon.png";
+
 type GatewayState = "checking" | "ready" | "degraded";
-type ViewName = "files" | "laboratory" | "inbox" | "shared" | "activity" | "settings" | "trash";
+type GatewayHealth = { readonly gateway: GatewayState; readonly storage: GatewayState };
+type PrimaryViewName = "dashboard" | "files" | "inbox" | "shared" | "settings" | "trash";
+type ViewName = PrimaryViewName | "documentation";
+type DashboardCardName = OwnerPreferences["dashboardOrder"][number];
+type SettingsCardName = OwnerPreferences["settingsOrder"][number];
 type Notice = { readonly id: string; readonly kind: "success" | "error" | "info"; readonly message: string };
+type OwnerRoute = { readonly view: ViewName; readonly folderSegments: readonly string[] };
+type SortField = "name" | "modified" | "size";
+type SortDirection = "ascending" | "descending";
+type ResourceClipboard = { readonly operation: "copy" | "cut"; readonly resource: Resource };
+type ContextMenuState = { readonly x: number; readonly y: number; readonly resource?: Resource };
+
+const NAV_ITEMS: Readonly<Record<PrimaryViewName, { readonly label: string; readonly ordinal: string }>> = {
+  dashboard: { label: "Dashboard", ordinal: "01" },
+  files: { label: "Storage", ordinal: "02" },
+  inbox: { label: "Drop Point", ordinal: "04" },
+  shared: { label: "Shared", ordinal: "05" },
+  trash: { label: "Trash", ordinal: "06" },
+  settings: { label: "Settings", ordinal: "07" },
+};
+const DEFAULT_NAVIGATION_ORDER: readonly PrimaryViewName[] = ["dashboard", "files", "inbox", "shared", "trash", "settings"];
+const DEFAULT_DASHBOARD_ORDER: readonly DashboardCardName[] = ["cpu", "ram", "disk", "uptime", "storage", "drop", "reachability", "tasks"];
+const DEFAULT_SETTINGS_ORDER: readonly SettingsCardName[] = ["appearance", "security", "telegram", "backup", "updates", "logs"];
+const SETTINGS_CARD_TITLES: Readonly<Record<SettingsCardName, string>> = {
+  appearance: "Appearance",
+  security: "Security",
+  telegram: "Telegram bot connection",
+  backup: "Backup",
+  updates: "Updates",
+  logs: "Logs",
+};
+const OWNER_ROUTE_PATHS: Readonly<Record<ViewName, string>> = {
+  dashboard: "/dashboard",
+  files: "/files",
+  inbox: "/inbox",
+  shared: "/shared",
+  trash: "/trash",
+  settings: "/settings",
+  documentation: "/documentation",
+};
+
+function ownerRouteFromPathname(pathname: string): OwnerRoute {
+  const normalized = pathname.replace(/\/+$/, "") || "/";
+  if (normalized === "/") return { view: "dashboard", folderSegments: [] };
+  for (const view of Object.keys(OWNER_ROUTE_PATHS) as ViewName[]) {
+    const base = OWNER_ROUTE_PATHS[view];
+    if (normalized === base) return { view, folderSegments: [] };
+    if ((view === "files" || view === "inbox") && normalized.startsWith(`${base}/`)) {
+      try {
+        const folderSegments = normalized.slice(base.length + 1).split("/").map((segment) => decodeURIComponent(segment));
+        return { view, folderSegments };
+      } catch {
+        return { view, folderSegments: [] };
+      }
+    }
+  }
+  return { view: "files", folderSegments: [] };
+}
+
+function ownerRouteUrl(route: OwnerRoute): string {
+  const base = OWNER_ROUTE_PATHS[route.view];
+  if ((route.view !== "files" && route.view !== "inbox") || route.folderSegments.length === 0) return base;
+  return `${base}/${route.folderSegments.map((segment) => encodeURIComponent(segment)).join("/")}`;
+}
 
 const PROTECTED_ROOT_RESOURCE_IDS = new Set([
   DROP_POINT_RESOURCE_ID,
@@ -37,13 +108,47 @@ const PROTECTED_ROOT_RESOURCE_IDS = new Set([
 ]);
 
 const defaultPreferences: Omit<OwnerPreferences, "updatedAt"> = {
-  darkColor: "#000000",
-  lightColor: "#ffffff",
   accentColor: "#00a8ff",
+  sidebarMode: "fixed",
+  navigationOrder: DEFAULT_NAVIGATION_ORDER,
+  dashboardOrder: DEFAULT_DASHBOARD_ORDER,
+  settingsOrder: DEFAULT_SETTINGS_ORDER,
 };
 
-function appearancePreferences(value: OwnerPreferences | Omit<OwnerPreferences, "updatedAt">): Omit<OwnerPreferences, "updatedAt"> {
-  return { darkColor: value.darkColor, lightColor: value.lightColor, accentColor: value.accentColor };
+function ownerPreferences(value: OwnerPreferences | Omit<OwnerPreferences, "updatedAt">): Omit<OwnerPreferences, "updatedAt"> {
+  const order = "navigationOrder" in value ? value.navigationOrder : undefined;
+  const validOrder = Array.isArray(order)
+    && order.length === DEFAULT_NAVIGATION_ORDER.length
+    && new Set(order).size === order.length
+    && order.every((item) => item in NAV_ITEMS);
+  const dashboardOrder = "dashboardOrder" in value ? value.dashboardOrder : undefined;
+  const dashboardDestinations = new Set<string>(DEFAULT_DASHBOARD_ORDER);
+  const validDashboardOrder = Array.isArray(dashboardOrder)
+    && dashboardOrder.length === DEFAULT_DASHBOARD_ORDER.length
+    && new Set(dashboardOrder).size === dashboardOrder.length
+    && dashboardOrder.every((item: unknown) => typeof item === "string" && dashboardDestinations.has(item));
+  const settingsOrder = "settingsOrder" in value ? value.settingsOrder : undefined;
+  const settingsDestinations = new Set<string>(DEFAULT_SETTINGS_ORDER);
+  const validSettingsOrder = Array.isArray(settingsOrder)
+    && settingsOrder.length === DEFAULT_SETTINGS_ORDER.length
+    && new Set(settingsOrder).size === settingsOrder.length
+    && settingsOrder.every((item: unknown) => typeof item === "string" && settingsDestinations.has(item));
+  const legacySettingsOrder = Array.isArray(settingsOrder)
+    && settingsOrder.length === DEFAULT_SETTINGS_ORDER.length - 1
+    && new Set(settingsOrder).size === settingsOrder.length
+    && settingsOrder.every((item: unknown) => typeof item === "string" && item !== "telegram" && settingsDestinations.has(item));
+  const typedSettingsOrder = settingsOrder;
+  const legacySecurityIndex = typedSettingsOrder?.indexOf("security") ?? -1;
+  const normalizedSettingsOrder = legacySettingsOrder
+    ? [...(typedSettingsOrder?.slice(0, legacySecurityIndex + 1) ?? []), "telegram", ...(typedSettingsOrder?.slice(legacySecurityIndex + 1) ?? [])] as readonly SettingsCardName[]
+    : DEFAULT_SETTINGS_ORDER;
+  return {
+    accentColor: value.accentColor,
+    sidebarMode: "sidebarMode" in value && value.sidebarMode === "auto-hide" ? "auto-hide" : "fixed",
+    navigationOrder: validOrder ? order as readonly PrimaryViewName[] : DEFAULT_NAVIGATION_ORDER,
+    dashboardOrder: validDashboardOrder ? dashboardOrder as readonly DashboardCardName[] : DEFAULT_DASHBOARD_ORDER,
+    settingsOrder: validSettingsOrder ? typedSettingsOrder ?? DEFAULT_SETTINGS_ORDER : normalizedSettingsOrder,
+  };
 }
 
 function formatBytes(bytes: number): string {
@@ -58,17 +163,121 @@ function formatBytes(bytes: number): string {
   return `${value.toFixed(value >= 10 ? 1 : 2)} ${unit}`;
 }
 
-function useGatewayHealth(): GatewayState {
-  const [state, setState] = useState<GatewayState>("checking");
+function formatStorageBytes(bytes: number): string {
+  return formatBytes(bytes).replace("KiB", "KB").replace("MiB", "MB").replace("GiB", "GB").replace("TiB", "TB");
+}
+
+function formatStorageDate(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "—";
+  const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  const day = String(date.getDate()).padStart(2, "0");
+  const month = months[date.getMonth()] ?? "—";
+  const hour = String(date.getHours()).padStart(2, "0");
+  const minute = String(date.getMinutes()).padStart(2, "0");
+  return `${day} ${month} ${String(date.getFullYear())}, ${hour}:${minute}`;
+}
+
+function formatDropCountdown(expiresAt: string | undefined, now: number): string {
+  if (expiresAt === undefined) return "—";
+  const remainingSeconds = Math.max(0, Math.ceil((new Date(expiresAt).getTime() - now) / 1_000));
+  const minutes = Math.floor(remainingSeconds / 60);
+  const seconds = remainingSeconds % 60;
+  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+}
+
+function formatShareAccess(mode: ShareInfo["mode"]): string {
+  if (mode === "view") return "View";
+  if (mode === "download") return "Download";
+  if (mode === "browse") return "Browse";
+  return "Browse + download";
+}
+
+function compareResources(left: Resource, right: Resource, field: SortField, direction: SortDirection): number {
+  const multiplier = direction === "ascending" ? 1 : -1;
+  if (field === "name") return left.name.localeCompare(right.name, undefined, { numeric: true, sensitivity: "base" }) * multiplier;
+  if (field === "modified") return (new Date(left.updatedAt).getTime() - new Date(right.updatedAt).getTime()) * multiplier;
+  return (left.sizeBytes - right.sizeBytes || left.name.localeCompare(right.name, undefined, { numeric: true, sensitivity: "base" })) * multiplier;
+}
+
+function SortButton({ field, activeField, direction, children, onChange }: {
+  readonly field: SortField;
+  readonly activeField: SortField;
+  readonly direction: SortDirection;
+  readonly children: ReactNode;
+  readonly onChange: (field: SortField) => void;
+}) {
+  const active = field === activeField;
+  return <button className={`sort-button ${active ? "sort-button--active" : ""}`} type="button" onClick={() => onChange(field)} aria-sort={active ? direction : "none"}>{children}<span aria-hidden="true">{active ? direction === "ascending" ? "↑" : "↓" : "↕"}</span></button>;
+}
+
+function ResourceContextMenu({ state, canPaste, protectedRoot, onAction, onClose }: {
+  readonly state: ContextMenuState;
+  readonly canPaste: boolean;
+  readonly protectedRoot: boolean;
+  readonly onAction: (action: "copy" | "cut" | "paste" | "download" | "folder" | "trash" | "rename" | "share") => void;
+  readonly onClose: () => void;
+}) {
+  const menu = useRef<HTMLDivElement>(null);
+  const actions = [
+    { id: "copy", label: "Copy", disabled: state.resource === undefined },
+    { id: "cut", label: "Cut", disabled: state.resource === undefined || protectedRoot },
+    { id: "paste", label: "Paste", disabled: !canPaste },
+    { id: "download", label: "Download", disabled: state.resource === undefined },
+    { id: "folder", label: "New folder", disabled: false },
+    { id: "trash", label: "Delete", disabled: state.resource === undefined || protectedRoot, danger: true },
+    { id: "rename", label: "Rename", disabled: state.resource === undefined },
+    { id: "share", label: "Share", disabled: state.resource === undefined },
+  ] as const;
+  useEffect(() => {
+    const close = () => onClose();
+    window.addEventListener("pointerdown", close);
+    window.addEventListener("resize", close);
+    window.addEventListener("scroll", close, true);
+    menu.current?.querySelector<HTMLButtonElement>("button:not(:disabled)")?.focus();
+    return () => { window.removeEventListener("pointerdown", close); window.removeEventListener("resize", close); window.removeEventListener("scroll", close, true); };
+  }, [onClose]);
+  const keyboard = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (event.key === "Escape") { event.preventDefault(); onClose(); return; }
+    if (event.key !== "ArrowDown" && event.key !== "ArrowUp" && event.key !== "Home" && event.key !== "End") return;
+    event.preventDefault();
+    const buttons = [...(menu.current?.querySelectorAll<HTMLButtonElement>("button:not(:disabled)") ?? [])];
+    if (buttons.length === 0) return;
+    const index = buttons.indexOf(document.activeElement as HTMLButtonElement);
+    const next = event.key === "Home" ? 0 : event.key === "End" ? buttons.length - 1 : event.key === "ArrowDown" ? (index + 1) % buttons.length : (index <= 0 ? buttons.length : index) - 1;
+    buttons[next]?.focus();
+  };
+  const width = 155;
+  const height = 197;
+  const x = Math.max(8, Math.min(state.x, window.innerWidth - width - 8));
+  const y = Math.max(8, Math.min(state.y, window.innerHeight - height - 8));
+  return <div ref={menu} className="context-menu" role="menu" aria-label={state.resource === undefined ? "Folder actions" : `Actions for ${state.resource.name}`} style={{ left: x, top: y }} onKeyDown={keyboard} onPointerDown={(event) => event.stopPropagation()}>
+    {actions.map((action, index) => <button className={"danger" in action ? "context-menu__danger" : ""} type="button" role="menuitem" key={action.id} disabled={action.disabled} onClick={() => onAction(action.id)}><span className="context-menu__ordinal" aria-hidden="true">{String(index + 1)}.</span><span>{action.label}</span></button>)}
+  </div>;
+}
+
+function useGatewayHealth(): GatewayHealth {
+  const [state, setState] = useState<GatewayHealth>({ gateway: "checking", storage: "checking" });
   useEffect(() => {
     let active = true;
     const check = async () => {
       try {
         const response = await fetch("/health/ready", { credentials: "same-origin", cache: "no-store" });
         const body = await response.json() as HealthResponse;
-        if (active) setState(response.ok && body.status === "ok" ? "ready" : "degraded");
+        if (active) {
+          const gateway = response.ok && body.status === "ok" ? "ready" : "degraded";
+          const storageCheck = (body as Partial<HealthResponse>).checks?.storage;
+          const storage = storageCheck === undefined
+            ? gateway
+            : storageCheck.state === "pass"
+              ? "ready"
+              : storageCheck.state === "fail"
+                ? "degraded"
+                : "degraded";
+          setState({ gateway, storage });
+        }
       } catch {
-        if (active) setState("degraded");
+        if (active) setState({ gateway: "degraded", storage: "degraded" });
       }
     };
     void check();
@@ -78,80 +287,140 @@ function useGatewayHealth(): GatewayState {
   return state;
 }
 
-function HealthLabel({ state }: { readonly state: GatewayState }) {
-  return (
-    <span className={`health health--${state}`} role="status" aria-live="polite">
-      <span className="health__dot" aria-hidden="true" />
-      {state === "checking" ? "Checking" : state === "ready" ? "Available" : "Unavailable"}
-    </span>
-  );
-}
-
 function LoginView({ health, onAuthenticated }: { readonly health: GatewayState; readonly onAuthenticated: () => void }) {
-  const [accessKey, setAccessKey] = useState("");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
+  const accessKeyInput = useRef<HTMLInputElement>(null);
+  const clearAccessKey = () => {
+    if (accessKeyInput.current !== null) accessKeyInput.current.value = "";
+  };
   const submit = async (event: SyntheticEvent<HTMLFormElement>) => {
     event.preventDefault();
+    const accessKey = accessKeyInput.current?.value ?? "";
     if (!accessKey || pending) return;
+    let refocusAccessKey = false;
     setPending(true);
     setError("");
     try {
       await api.login(accessKey);
-      setAccessKey("");
+      clearAccessKey();
       onAuthenticated();
     } catch (caught) {
-      setAccessKey("");
+      clearAccessKey();
       setError(caught instanceof ApiError && caught.status === 429
         ? "Too many attempts. Wait before trying again."
         : "The access key was not accepted.");
+      refocusAccessKey = true;
     } finally {
       setPending(false);
+      if (refocusAccessKey) window.requestAnimationFrame(() => accessKeyInput.current?.focus());
     }
   };
+  const reachabilityLabel = health === "checking"
+    ? "Checking Reachability"
+    : health === "ready"
+      ? "Service Reachability"
+      : "Service Unreachable";
+  const reachabilityDescription = health === "checking" ? "checking" : health === "ready" ? "reachable" : "unreachable";
   return (
     <main className="login-view">
-      <section className="login-panel" aria-labelledby="login-title">
-        <div className="login-panel__head">
-          <h1 id="login-title" className="wordmark" aria-label="Saturn">SATURN</h1>
-          <HealthLabel state={health} />
-        </div>
-        <p className="login-copy">Private storage gateway. Authenticate to enter the owner workspace.</p>
-        <form className="login-form" onSubmit={(event) => void submit(event)}>
-          <label htmlFor="owner-access-key">Owner access key</label>
-          <input
-            id="owner-access-key"
-            name="owner-access-key"
-            type="password"
-            autoComplete="current-password"
-            value={accessKey}
-            onChange={(event) => setAccessKey(event.target.value)}
-            disabled={pending}
-            required
-            autoFocus
-          />
-          <button className="button button--primary" type="submit" disabled={pending || !accessKey}>
-            {pending ? "Authenticating…" : "Enter Saturn"}
-          </button>
-          <p className="form-error" role="alert">{error}</p>
-        </form>
-      </section>
+      <div className="login-composition">
+        <header className="login-brand" aria-labelledby="login-title">
+          <h1 id="login-title" className="wordmark" aria-label="Saturn">saturn</h1>
+          <span className="login-brand__icon" aria-hidden="true"><img src={saturnPlanet} alt="" /></span>
+        </header>
+        <section className="login-panel" aria-labelledby="login-title">
+          <div
+            className={`login-reachability login-reachability--${health}`}
+            role="status"
+            aria-live="polite"
+            aria-label={`Service reachability: ${reachabilityDescription}`}
+          >
+            <span>{reachabilityLabel}</span>
+            <span className="login-reachability__square" aria-hidden="true" />
+          </div>
+          <form className="login-form" onSubmit={(event) => void submit(event)}>
+            <p id="login-error" className="login-error" role="alert">{error}</p>
+            <label className="login-key-field" htmlFor="owner-access-key">
+              <span className="sr-only">Access Key</span>
+              <input
+                ref={accessKeyInput}
+                id="owner-access-key"
+                name="owner-access-key"
+                type="text"
+                autoComplete="off"
+                autoCapitalize="none"
+                spellCheck={false}
+                maxLength={512}
+                placeholder="Access Key..."
+                aria-describedby="login-error"
+                aria-invalid={error ? "true" : undefined}
+                disabled={pending}
+                required
+              />
+            </label>
+            <button className="button login-submit" type="submit" disabled={pending}>
+              {pending ? "Authenticating…" : "Enter service"}
+            </button>
+          </form>
+        </section>
+      </div>
     </main>
   );
 }
 
-function Dialog({ title, description, children, onClose }: {
+function Dialog({ title, description, children, onClose, dismissible = true }: {
   readonly title: string;
   readonly description?: string;
   readonly children: ReactNode;
   readonly onClose: () => void;
+  readonly dismissible?: boolean;
 }) {
+  const titleId = useId();
+  const dialog = useRef<HTMLElement>(null);
+  const previousFocus = useRef<HTMLElement | null>(null);
+  const close = useRef(onClose);
+  const drag = useRef<{ readonly x: number; readonly y: number; readonly left: number; readonly top: number } | undefined>(undefined);
+  const [offset, setOffset] = useState({ x: 0, y: 0 });
+  useEffect(() => { close.current = onClose; }, [onClose]);
+  useEffect(() => {
+    previousFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const node = dialog.current;
+    const focusable = node?.querySelector<HTMLElement>("button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [href], [tabindex]:not([tabindex='-1'])");
+    focusable?.focus();
+    const handleKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && dismissible) { event.preventDefault(); close.current(); return; }
+      if (event.key !== "Tab" || node === null) return;
+      const items = [...node.querySelectorAll<HTMLElement>("button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [href], [tabindex]:not([tabindex='-1'])")];
+      if (items.length === 0) { event.preventDefault(); node.focus(); return; }
+      const first = items[0]; const last = items.at(-1);
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+    };
+    window.addEventListener("keydown", handleKey);
+    return () => { window.removeEventListener("keydown", handleKey); previousFocus.current?.focus(); };
+  }, [dismissible]);
+  const moveDialog = (event: ReactPointerEvent<HTMLElement>) => {
+    const start = drag.current; const node = dialog.current;
+    if (start === undefined || node === null) return;
+    const dx = event.clientX - start.x; const dy = event.clientY - start.y;
+    const width = node.offsetWidth; const height = node.offsetHeight;
+    const desiredLeft = Math.min(Math.max(8, start.left + dx), Math.max(8, window.innerWidth - width - 8));
+    const desiredTop = Math.min(Math.max(8, start.top + dy), Math.max(8, window.innerHeight - height - 8));
+    const centeredLeft = (window.innerWidth - width) / 2; const centeredTop = (window.innerHeight - height) / 2;
+    setOffset({ x: desiredLeft - centeredLeft, y: desiredTop - centeredTop });
+  };
   return (
-    <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-      <section className="dialog" role="dialog" aria-modal="true" aria-labelledby="dialog-title">
-        <header className="dialog__head">
-          <h2 id="dialog-title">{title}</h2>
-          <button className="icon-button" type="button" onClick={onClose} aria-label="Close dialog">×</button>
+    <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (dismissible && event.target === event.currentTarget) onClose(); }}>
+      <section ref={dialog} className="dialog" role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1} style={{ transform: `translate(${String(offset.x)}px, ${String(offset.y)}px)` }}>
+        <header
+          className="dialog__head"
+          onPointerDown={(event) => { if ((event.target as HTMLElement).closest("button") !== null || dialog.current === null) return; const box = dialog.current.getBoundingClientRect(); drag.current = { x: event.clientX, y: event.clientY, left: box.left, top: box.top }; event.currentTarget.setPointerCapture(event.pointerId); }}
+          onPointerMove={moveDialog}
+          onPointerUp={(event) => { drag.current = undefined; if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId); }}
+        >
+          <h2 id={titleId}>{title}</h2>
+          <button className="icon-button" type="button" onClick={onClose} aria-label="Close dialog" disabled={!dismissible}>×</button>
         </header>
         {description === undefined ? null : <p className="muted">{description}</p>}
         {children}
@@ -181,76 +450,138 @@ function ConfirmDialog({ title, description, confirmLabel, danger = false, pendi
   );
 }
 
+function DropReachability({ state }: { readonly state: GatewayState }) {
+  const label = state === "checking" ? "Checking" : state === "ready" ? "Available" : "Unavailable";
+  return <div className={`drop-reachability drop-reachability--${state}`} role="status" aria-live="polite" aria-label={`Service Reachability: ${label}`}>
+    <span>Service Reachability</span><i aria-hidden="true" />
+  </div>;
+}
+
+const DROP_CHANNEL_HISTORY_KEY = "saturnDropChannelId";
+
+function expectedDropChannelId(): string | undefined {
+  const value: unknown = window.history.state;
+  if (typeof value !== "object" || value === null || !(DROP_CHANNEL_HISTORY_KEY in value)) return undefined;
+  const channelId = (value as Record<string, unknown>)[DROP_CHANNEL_HISTORY_KEY];
+  return typeof channelId === "string" ? channelId : undefined;
+}
+
+function rememberDropChannel(channelId: string): void {
+  const current = typeof window.history.state === "object" && window.history.state !== null ? window.history.state as Record<string, unknown> : {};
+  window.history.replaceState({ ...current, [DROP_CHANNEL_HISTORY_KEY]: channelId }, "", window.location.href);
+}
+
 function DropView({ health }: { readonly health: GatewayState }) {
   const [state, setState] = useState<"checking" | "redeem" | "active">("checking");
   const [session, setSession] = useState<DropSessionInfo | undefined>();
   const [code, setCode] = useState("");
   const [pending, setPending] = useState(false);
   const [message, setMessage] = useState("");
-  const [jobs, setJobs] = useState<Array<{ readonly id: string; readonly name: string; readonly progress: number; readonly state: "uploading" | "completed" | "failed" }>>([]);
+  const [jobs, setJobs] = useState<Array<{ readonly id: string; readonly name: string; readonly progress: number; readonly state: DropUploadStatus["state"] }>>([]);
+  const [draggingFiles, setDraggingFiles] = useState(false);
+  const [now, setNow] = useState(() => Date.now());
   const input = useRef<HTMLInputElement>(null);
+  const dragDepth = useRef(0);
 
   useEffect(() => {
-    void dropApi.session().then((value) => { setSession(value); setState("active"); }).catch(() => setState("redeem"));
+    const expectedChannelId = expectedDropChannelId();
+    void dropApi.session().then(async (value) => {
+      if (expectedChannelId !== undefined && value.channelId !== expectedChannelId) {
+        setJobs([]); setSession(undefined); setMessage("This tab's Drop session has expired. Enter a code to open another channel."); setState("redeem");
+        return;
+      }
+      rememberDropChannel(value.channelId);
+      setSession(value); setState("active");
+      const uploads = await dropApi.uploads().catch(() => []);
+      setJobs(uploads.map((upload) => ({ id: upload.id, name: upload.filename ?? "Upload", progress: upload.expectedSize === 0 ? 1 : upload.receivedSize / upload.expectedSize, state: upload.state })));
+    }).catch(() => { setJobs([]); setSession(undefined); if (expectedChannelId !== undefined) setMessage("This Drop session has expired. Enter a code to continue."); setState("redeem"); });
   }, []);
+  useEffect(() => {
+    if (state !== "active") return;
+    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [state]);
+  const expired = session !== undefined && new Date(session.expiresAt).getTime() <= now;
+  const dropBlocked = pending || expired || session?.buffer?.state === "refusing";
+  useEffect(() => {
+    if (state !== "active" || expired) return;
+    const applyUploads = (uploads: readonly DropUploadStatus[]) => setJobs((current) => uploads.map((upload) => ({ id: upload.id, name: upload.filename ?? current.find((job) => job.id === upload.id)?.name ?? "Upload", progress: upload.expectedSize === 0 ? 1 : upload.receivedSize / upload.expectedSize, state: upload.state })));
+    const unsubscribe = dropApi.subscribeUploads(applyUploads);
+    if (unsubscribe !== undefined) return unsubscribe;
+    const poll = window.setInterval(() => { void dropApi.uploads().then(applyUploads).catch(() => undefined); }, 1_500);
+    return () => window.clearInterval(poll);
+  }, [state, expired]);
 
   const redeem = async (event: SyntheticEvent<HTMLFormElement>) => {
     event.preventDefault(); if (!code || pending) return; setPending(true); setMessage("");
-    try { const value = await dropApi.redeem(code); setCode(""); setSession(value); setState("active"); }
+    try { const value = await dropApi.redeem(code); rememberDropChannel(value.channelId); setCode(""); setSession(value); setState("active"); }
     catch (error) { setCode(""); setMessage(error instanceof ApiError && error.status === 429 ? "Too many attempts. Wait before trying again." : "The Drop code was not accepted."); }
     finally { setPending(false); }
   };
 
   const upload = async (files: readonly File[]) => {
-    if (files.length === 0 || pending) return;
+    if (files.length === 0 || pending || expired) return;
     setPending(true); setMessage("");
     for (const file of files) {
-      const id = crypto.randomUUID();
-      setJobs((current) => [...current, { id, name: file.name, progress: 0, state: "uploading" }]);
+      const localId = crypto.randomUUID();
+      setJobs((current) => [...current, { id: localId, name: file.name, progress: 0, state: "uploading" }]);
       try {
-        await uploadDropFile(file, (progress) => setJobs((current) => current.map((job) => job.id === id ? { ...job, progress } : job)));
-        setJobs((current) => current.map((job) => job.id === id ? { ...job, progress: 1, state: "completed" } : job));
+        const result = await uploadDropFile(file, (progress) => setJobs((current) => current.map((job) => job.id === localId ? { ...job, progress } : job)));
+        setJobs((current) => current.map((job) => job.id === localId ? { id: result.id, name: file.name, progress: 1, state: result.state } : job));
       } catch (error) {
         if (error instanceof ApiError && error.status === 401) { setState("redeem"); setSession(undefined); }
-        setJobs((current) => current.map((job) => job.id === id ? { ...job, state: "failed" } : job));
-        setMessage("An upload stopped before commit. No partial file is visible in Drop Point.");
+        setJobs((current) => current.map((job) => job.id === localId ? { ...job, state: "failed" } : job));
+        setMessage("An upload stopped before entering the verified buffer. No partial file is visible in Drop Point.");
       }
     }
     setPending(false); if (input.current !== null) input.current.value = "";
   };
 
-  const logout = async () => {
+  const cancel = async (id: string) => {
     setPending(true);
-    try { await dropApi.logout(); } finally { setSession(undefined); setState("redeem"); setJobs([]); setPending(false); }
+    try { const value = await dropApi.cancel(id); setJobs((current) => current.map((job) => job.id === id ? { ...job, state: value.state } : job)); }
+    catch { setMessage("This upload can no longer be removed because remote transfer has started."); }
+    finally { setPending(false); }
   };
 
   if (state === "checking") return <main className="boot-state">Checking Drop session…</main>;
   return (
-    <main className="drop-view" onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); if (state === "active") void upload([...event.dataTransfer.files]); }}>
-      <section className="drop-panel" aria-labelledby="drop-title">
-        <header className="drop-panel__head"><div><p className="eyebrow">Upload-only gateway</p><h1 id="drop-title" className="wordmark wordmark--drop">Saturn Drop</h1></div><HealthLabel state={health} /></header>
-        {state === "redeem" ? (
-          <form className="drop-redeem" onSubmit={(event) => void redeem(event)}>
-            <p className="muted">Enter the one-time code from the bound Telegram bot. Codes never belong in a URL.</p>
-            <label>Drop code<input value={code} onChange={(event) => setCode(event.target.value.toUpperCase())} autoComplete="one-time-code" inputMode="text" maxLength={9} required autoFocus /></label>
-            <button className="button button--primary" type="submit" disabled={pending || !code}>{pending ? "Redeeming…" : "Open upload session"}</button>
-            <p className="form-error" role="alert">{message}</p>
-          </form>
-        ) : (
-          <div className="drop-active">
-            <div className="drop-policy"><strong>UPLOAD ONLY</strong><span>No listing · no reading · no overwrite · no delete</span><span>Expires {session === undefined ? "soon" : new Date(session.expiresAt).toLocaleTimeString()}</span></div>
-            <button className="drop-target" type="button" disabled={pending} onClick={() => input.current?.click()}>
-              <span>Drop files here</span><small>or choose files · up to {String(session?.maxFiles ?? 20)} files / {formatBytes(session?.maxBytes ?? 0)}</small>
+    <main
+      className={`drop-view drop-view--${state === "redeem" ? "closed" : "opened"}`}
+      onDragEnter={(event) => { if (state !== "active" || !event.dataTransfer.types.includes("Files")) return; event.preventDefault(); dragDepth.current += 1; setDraggingFiles(true); }}
+      onDragLeave={() => { dragDepth.current = Math.max(0, dragDepth.current - 1); if (dragDepth.current === 0) setDraggingFiles(false); }}
+      onDragOver={(event) => { if (!event.dataTransfer.types.includes("Files")) return; event.preventDefault(); event.dataTransfer.dropEffect = state === "active" && !dropBlocked ? "copy" : "none"; }}
+      onDrop={(event) => { if (!event.dataTransfer.types.includes("Files")) return; event.preventDefault(); dragDepth.current = 0; setDraggingFiles(false); if (state === "active" && !dropBlocked) void upload([...event.dataTransfer.files]); }}
+    >
+      {state === "redeem" ? <div className="drop-closed-composition">
+        <form className="drop-code-gate" aria-labelledby="drop-code-title" onSubmit={(event) => void redeem(event)}>
+          <p id="drop-code-title">Please enter<br />drop point code:</p>
+          <label className="sr-only" htmlFor="drop-code">Drop code</label>
+          <input id="drop-code" value={code} onChange={(event) => setCode(event.target.value.toUpperCase())} autoComplete="one-time-code" inputMode="text" maxLength={9} placeholder="Code..." required autoFocus />
+          <button className="drop-code-submit" type="submit" disabled={pending}>{pending ? "Checking..." : "Enter"}</button>
+          <p className="drop-code-error" role="alert">{message}</p>
+        </form>
+        <DropReachability state={health} />
+      </div> : <div className="drop-opened-composition">
+        <h1 id="drop-title" className="drop-public-title">saturn drop point</h1>
+        <section className="drop-opened-panel" aria-labelledby="drop-title">
+          <div className="drop-public-notice"><strong>Upload only Gateway</strong><p>This page cannot list Saturn contents. Files uploaded through this Drop code appear here on every connected device.</p></div>
+          <div className={`drop-session-status ${expired ? "drop-session-status--expired" : ""}`}><span>Drop code status:</span><strong>{formatDropCountdown(session?.expiresAt, now)}</strong></div>
+          <DropReachability state={health} />
+          <div className={`drop-upload-stage ${jobs.length > 0 ? "drop-upload-stage--with-jobs" : ""}`}>
+            <button className="drop-target" type="button" disabled={dropBlocked} onClick={() => input.current?.click()}>
+              <span>Drop and drag files here</span><small>or choose files - up to {formatStorageBytes(session?.maxBytes ?? 0)}</small>
             </button>
             <input ref={input} aria-label="Choose files for Drop" className="visually-hidden-input" type="file" multiple onChange={(event) => void upload([...event.target.files ?? []])} />
-            <div className="drop-jobs" role="region" aria-live="polite" aria-label="This session upload queue">
-              {jobs.length === 0 ? <p className="empty-state">This page cannot list Saturn contents. Only files selected in this browser session appear here.</p> : jobs.map((job) => <div className="drop-job" key={job.id}><span>{job.name}</span><progress max={1} value={job.progress} /><strong>{job.state}</strong></div>)}
-            </div>
-            <p className="form-error" role="alert">{message}</p>
-            <div className="inline-actions"><button className="button" type="button" onClick={() => void logout()} disabled={pending}>End Drop session</button></div>
+            {jobs.length === 0 ? null : <div className="drop-jobs" role="region" aria-live="polite" aria-label="Shared Drop upload queue">
+              {jobs.map((job) => <div className={`drop-job ${job.state === "stored" ? "drop-job--stored" : ""}`} key={job.id}><span>{job.name}</span><progress max={1} value={job.progress} /><strong>{job.state}</strong>{!expired && ["reserved", "uploading", "buffered"].includes(job.state) ? <button type="button" onClick={() => void cancel(job.id)} disabled={pending}>Remove</button> : null}</div>)}
+            </div>}
           </div>
-        )}
-      </section>
+          {session?.buffer === undefined || session.buffer.state === "available" ? null : <p className={`buffer-state buffer-state--${session.buffer.state}`}>Local buffer {session.buffer.state.toUpperCase()} · {formatBytes(session.buffer.reservedBytes)} reserved of {formatBytes(session.buffer.maxBytes)}</p>}
+          {message ? <p className="drop-message" role="alert">{message}</p> : null}
+        </section>
+      </div>}
+      {draggingFiles ? <div className={`storage-drop-overlay ${dropBlocked ? "storage-drop-overlay--blocked" : ""}`} aria-hidden="true"><strong>{dropBlocked ? "UPLOAD UNAVAILABLE" : "UPLOAD HERE"}</strong><span>Drop Point</span></div> : null}
     </main>
   );
 }
@@ -268,36 +599,26 @@ function NoticeStack({ notices, dismiss }: { readonly notices: readonly Notice[]
   );
 }
 
-function CollectionToolbar({ search, setSearch, count, children }: {
-  readonly search: string;
-  readonly setSearch: (value: string) => void;
-  readonly count: string;
-  readonly children: ReactNode;
-}) {
-  return (
-    <div className="collection-toolbar" role="search" aria-label="Collection controls">
-      <label className="search-control">
-        <span className="sr-only">Search collection</span>
-        <input type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search" />
-      </label>
-      <output className="collection-count" aria-live="polite">{count}</output>
-      <div className="collection-actions">{children}</div>
-    </div>
-  );
-}
-
-function FilesView({ initialFolderId, title, addNotice, onUnauthorized }: {
+function FilesView({ initialFolderId, title, routeSegments, onPathChange, shareCapabilities, onShareCapabilityCreated, onShareCapabilityRevoked, addNotice, onUnauthorized, embeddedInHouse = false, refreshKey = 0 }: {
   readonly initialFolderId: string;
   readonly title: string;
+  readonly routeSegments: readonly string[];
+  readonly onPathChange: (segments: readonly string[], replace?: boolean) => void;
+  readonly shareCapabilities: Readonly<Record<string, string>>;
+  readonly onShareCapabilityCreated: (id: string, url: string) => void;
+  readonly onShareCapabilityRevoked: (id: string) => void;
   readonly addNotice: (kind: Notice["kind"], message: string) => void;
   readonly onUnauthorized: () => void;
+  readonly embeddedInHouse?: boolean;
+  readonly refreshKey?: number;
 }) {
   const [folderId, setFolderId] = useState(initialFolderId);
   const [folder, setFolder] = useState<Resource | undefined>();
-  const [breadcrumbs, setBreadcrumbs] = useState<Array<{ readonly id: string; readonly name: string }>>([]);
+  const [breadcrumbs, setBreadcrumbs] = useState<Array<{ readonly id: string; readonly name: string; readonly segments: readonly string[] }>>([]);
   const [items, setItems] = useState<readonly Resource[]>([]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [search, setSearch] = useState("");
+  const [sort, setSort] = useState<{ readonly field: SortField; readonly direction: SortDirection }>({ field: "name", direction: "ascending" });
   const [loading, setLoading] = useState(true);
   const [pending, setPending] = useState(false);
   const [uploadProgress, setUploadProgress] = useState<number | undefined>();
@@ -308,7 +629,19 @@ function FilesView({ initialFolderId, title, addNotice, onUnauthorized }: {
   const [versions, setVersions] = useState<{ readonly resource: Resource; readonly items: readonly FileVersion[] } | undefined>();
   const [restoreVersion, setRestoreVersion] = useState<FileVersion | undefined>();
   const [preview, setPreview] = useState<Resource | undefined>();
-  const [laboratoryFragment, setLaboratoryFragment] = useState<string | undefined>();
+  const [pathError, setPathError] = useState("");
+  const [clipboard, setClipboard] = useState<ResourceClipboard | undefined>();
+  const [contextMenu, setContextMenu] = useState<ContextMenuState | undefined>();
+  const [shares, setShares] = useState<readonly ShareInfo[]>([]);
+  const [shareResource, setShareResource] = useState<Resource | undefined>();
+  const [shareMode, setShareMode] = useState<ShareInfo["mode"]>("download");
+  const [shareExpiresAt, setShareExpiresAt] = useState("");
+  const [sharePassword, setSharePassword] = useState("");
+  const [shareError, setShareError] = useState("");
+  const [shareDetails, setShareDetails] = useState<ShareInfo | undefined>();
+  const [draggingFiles, setDraggingFiles] = useState(false);
+  const dragDepth = useRef(0);
+  const selectionAnchor = useRef<string | undefined>(undefined);
   const uploadInput = useRef<HTMLInputElement>(null);
   const overwriteInput = useRef<HTMLInputElement>(null);
 
@@ -324,6 +657,8 @@ function FilesView({ initialFolderId, title, addNotice, onUnauthorized }: {
       setFolder(resource);
       setItems(children);
       setSelected(new Set());
+      selectionAnchor.current = undefined;
+      setPathError("");
     } catch (error) {
       handleError(error, "The folder could not be loaded.");
     } finally {
@@ -331,33 +666,116 @@ function FilesView({ initialFolderId, title, addNotice, onUnauthorized }: {
     }
   };
 
+  const loadShares = async () => {
+    try { const value = await api.shares(); setShares(Array.isArray(value) ? value : []); }
+    catch (error) { handleError(error, "Share status could not be loaded."); }
+  };
+
+  const routeKey = JSON.stringify(routeSegments);
   useEffect(() => {
-    setFolderId(initialFolderId);
-    setBreadcrumbs([]);
-  }, [initialFolderId]);
-  useEffect(() => { void reload(); }, [folderId]);
+    const controller = new AbortController();
+    setLoading(true);
+    setPathError("");
+    setSelected(new Set());
+    selectionAnchor.current = undefined;
+    void (async () => {
+      try {
+        const chain = await api.resolveFolder(initialFolderId, routeSegments);
+        const current = chain.at(-1);
+        if (current === undefined) throw new Error("Folder path could not be resolved");
+        const [children, currentShares] = await Promise.all([api.children(current.id), api.shares()]);
+        if (controller.signal.aborted) return;
+        const canonicalSegments = chain.slice(1).map((resource) => resource.name);
+        setFolderId(current.id);
+        setFolder(current);
+        setItems(children);
+        setShares(Array.isArray(currentShares) ? currentShares : []);
+        setBreadcrumbs(chain.slice(0, -1).map((resource, index) => ({
+          id: resource.id,
+          name: index === 0 ? initialFolderId === ROOT_RESOURCE_ID ? "root" : title.toLocaleLowerCase() : resource.name,
+          segments: canonicalSegments.slice(0, index),
+        })));
+        if (canonicalSegments.some((segment, index) => segment !== routeSegments[index])) onPathChange(canonicalSegments, true);
+      } catch (error) {
+        if (controller.signal.aborted) return;
+        setFolder(undefined);
+        setItems([]);
+        setBreadcrumbs([]);
+        const message = error instanceof ApiError && error.status === 404
+          ? "The folder in this URL does not exist."
+          : "The folder path could not be loaded.";
+        setPathError(message);
+        handleError(error, message);
+      } finally {
+        if (!controller.signal.aborted) setLoading(false);
+      }
+    })();
+    return () => controller.abort();
+  }, [initialFolderId, routeKey, refreshKey]);
 
   const visible = useMemo(() => {
     const query = search.trim().toLocaleLowerCase();
-    return query ? items.filter((item) => item.name.toLocaleLowerCase().includes(query)) : items;
-  }, [items, search]);
+    const filtered = query ? items.filter((item) => item.name.toLocaleLowerCase().includes(query)) : items;
+    return [...filtered].sort((left, right) => compareResources(left, right, sort.field, sort.direction));
+  }, [items, search, sort]);
   const selectedItems = items.filter((item) => selected.has(item.id));
   const single = selectedItems.length === 1 ? selectedItems[0] : undefined;
+  const visibleSizeBytes = visible.reduce((total, item) => total + item.sizeBytes, 0);
   const atStorageRoot = folderId === ROOT_RESOURCE_ID;
+  const folderUnavailable = folder === undefined;
   const selectedProtectedRoot = selectedItems.some((item) => PROTECTED_ROOT_RESOURCE_IDS.has(item.id));
   const singleProtectedRoot = single !== undefined && PROTECTED_ROOT_RESOURCE_IDS.has(single.id);
+  const activeShareByResource = useMemo(() => new Map(shares.filter((share) => share.state === "active").map((share) => [share.resourceId, share])), [shares]);
+
+  const changeSort = (field: SortField) => setSort((current) => current.field === field
+    ? { field, direction: current.direction === "ascending" ? "descending" : "ascending" }
+    : { field, direction: field === "name" ? "ascending" : "descending" });
+
+  const selectOnly = (resource: Resource) => {
+    selectionAnchor.current = resource.id;
+    setSelected(new Set([resource.id]));
+  };
+
+  const selectResource = (resource: Resource, additive: boolean, range: boolean) => {
+    if (range) {
+      const anchorIndex = visible.findIndex((item) => item.id === selectionAnchor.current);
+      const resourceIndex = visible.findIndex((item) => item.id === resource.id);
+      setSelected((current) => {
+        if (anchorIndex < 0 || resourceIndex < 0) return new Set([resource.id]);
+        const next = additive ? new Set(current) : new Set<string>();
+        const start = Math.min(anchorIndex, resourceIndex);
+        const end = Math.max(anchorIndex, resourceIndex);
+        for (const item of visible.slice(start, end + 1)) next.add(item.id);
+        return next;
+      });
+      if (anchorIndex < 0) selectionAnchor.current = resource.id;
+      return;
+    }
+
+    selectionAnchor.current = resource.id;
+    setSelected((current) => {
+      if (!additive) return new Set([resource.id]);
+      const next = new Set(current);
+      if (next.has(resource.id)) next.delete(resource.id); else next.add(resource.id);
+      return next;
+    });
+  };
+
+  const openContextMenu = (event: ReactMouseEvent, resource?: Resource) => {
+    event.preventDefault();
+    if (resource !== undefined) selectOnly(resource);
+    setContextMenu({ x: event.clientX, y: event.clientY, ...(resource === undefined ? {} : { resource }) });
+  };
 
   const openFolder = (resource: Resource) => {
     if (resource.type !== "folder") return;
-    setBreadcrumbs((current) => [...current, { id: folderId, name: folder?.name ?? title }]);
-    setFolderId(resource.id);
+    onPathChange([...routeSegments, resource.name]);
   };
 
   const navigateBreadcrumb = (index: number) => {
     const target = breadcrumbs[index];
     if (target === undefined) return;
-    setFolderId(target.id);
-    setBreadcrumbs((current) => current.slice(0, index));
+    onPathChange(target.segments);
   };
 
   const performUpload = async (files: readonly File[], overwrite?: Resource) => {
@@ -423,6 +841,93 @@ function FilesView({ initialFolderId, title, addNotice, onUnauthorized }: {
     }
   };
 
+  const pasteClipboard = async (targetFolderId = folderId) => {
+    if (clipboard === undefined || pending) return;
+    setPending(true);
+    try {
+      if (clipboard.operation === "copy") await api.copy(clipboard.resource.id, targetFolderId);
+      else await api.move(clipboard.resource.id, targetFolderId);
+      addNotice("success", `${clipboard.resource.name} ${clipboard.operation === "copy" ? "copied" : "moved"} here.`);
+      if (clipboard.operation === "cut") setClipboard(undefined);
+      await reload();
+    } catch (error) { handleError(error, "Paste could not be completed. Check for a name conflict or protected root."); }
+    finally { setPending(false); }
+  };
+
+  const beginShare = (resource: Resource) => {
+    setShareResource(resource);
+    setShareMode(resource.type === "folder" ? "browse" : "download");
+    setShareExpiresAt("");
+    setSharePassword("");
+    setShareError("");
+  };
+
+  const closeShareComposer = () => {
+    setShareResource(undefined);
+    setSharePassword("");
+    setShareError("");
+  };
+
+  const createShare = async (event: SyntheticEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (shareResource === undefined || pending) return;
+    setPending(true);
+    setShareError("");
+    try {
+      const created = await api.createShare({
+        resourceId: shareResource.id,
+        mode: shareMode,
+        ...(shareExpiresAt ? { expiresAt: new Date(shareExpiresAt).toISOString() } : {}),
+        ...(sharePassword ? { password: sharePassword } : {}),
+      });
+      onShareCapabilityCreated(created.share.id, created.url);
+      closeShareComposer();
+      setShareDetails(created.share);
+      await loadShares();
+      addNotice("success", "Share created. Its capability remains available in Shared for this session.");
+    } catch (error) {
+      if (error instanceof ApiError && error.code === "share_denied") {
+        setShareError("This resource cannot be shared in its current state or security classification.");
+      } else if (error instanceof ApiError && error.code === "invalid_request") {
+        setShareError("Check the expiry date and use at least 12 characters when a password is enabled.");
+      } else {
+        handleError(error, "The share could not be created.");
+      }
+    }
+    finally { setPending(false); }
+  };
+
+  const revokeShare = async (share: ShareInfo) => {
+    if (pending) return;
+    setPending(true);
+    try {
+      const revoked = await api.revokeShare(share.id);
+      setShareDetails(revoked);
+      onShareCapabilityRevoked(share.id);
+      await loadShares();
+      addNotice("success", "Share revoked immediately.");
+    } catch (error) { handleError(error, "The share could not be revoked."); }
+    finally { setPending(false); }
+  };
+
+  const copyText = async (value: string) => {
+    try { await navigator.clipboard.writeText(value); addNotice("success", "Share link copied."); }
+    catch { addNotice("error", "Clipboard access was blocked. Select and copy the visible link manually."); }
+  };
+
+  const contextAction = (action: "copy" | "cut" | "paste" | "download" | "folder" | "trash" | "rename" | "share") => {
+    const resource = contextMenu?.resource;
+    setContextMenu(undefined);
+    if (action === "paste") { void pasteClipboard(resource?.type === "folder" ? resource.id : folderId); return; }
+    if (action === "folder") { setForm("folder"); setFormName(""); return; }
+    if (resource === undefined) return;
+    if (action === "copy" || action === "cut") { setClipboard({ operation: action, resource }); addNotice("info", `${resource.name} ready to ${action}.`); return; }
+    if (action === "download") { window.location.assign(resource.type === "file" ? downloadUrl(resource.id) : folderDownloadUrl(resource.id)); return; }
+    if (action === "trash") { selectOnly(resource); setConfirmTrash(true); return; }
+    if (action === "rename") { selectOnly(resource); setForm("rename"); setFormName(resource.name); return; }
+    beginShare(resource);
+  };
+
   const showVersions = async (resource: Resource) => {
     try {
       setVersions({ resource, items: await api.versions(resource.id) });
@@ -447,20 +952,11 @@ function FilesView({ initialFolderId, title, addNotice, onUnauthorized }: {
     }
   };
 
-  const useInLaboratory = async () => {
-    if (single?.type !== "file") return;
-    setPending(true);
-    try {
-      const asset = await api.createLaboratoryAsset({ resourceId: single.id, mode: "private" });
-      setLaboratoryFragment((await api.laboratoryFragment(asset.id)).fragment);
-      addNotice("success", "Private Laboratory asset created with a stable Gateway URL.");
-    } catch {
-      addNotice("error", "Recent owner proof is required to create a Laboratory asset.");
-    } finally { setPending(false); }
-  };
-
   const drop = (event: DragEvent) => {
     event.preventDefault();
+    dragDepth.current = 0;
+    setDraggingFiles(false);
+    if (folderUnavailable) return;
     if (atStorageRoot) {
       addNotice("error", "Create or open a folder first. Files cannot be stored directly in the Saturn root.");
       return;
@@ -469,64 +965,73 @@ function FilesView({ initialFolderId, title, addNotice, onUnauthorized }: {
   };
 
   return (
-    <section className="workspace" aria-labelledby="workspace-title" onDragOver={(event) => event.preventDefault()} onDrop={drop}>
-      <header className="workspace__head">
+    <section className={`workspace storage-workspace ${embeddedInHouse ? "storage-workspace--in-house" : ""} ${draggingFiles ? "storage-workspace--drop" : ""}`} aria-labelledby={embeddedInHouse ? undefined : "workspace-title"} aria-label={embeddedInHouse ? "Drop Point storage" : undefined} onDragEnter={(event) => { if (!event.dataTransfer.types.includes("Files")) return; event.preventDefault(); dragDepth.current += 1; setDraggingFiles(true); }} onDragLeave={() => { dragDepth.current = Math.max(0, dragDepth.current - 1); if (dragDepth.current === 0) setDraggingFiles(false); }} onDragOver={(event) => { if (event.dataTransfer.types.includes("Files")) { event.preventDefault(); event.dataTransfer.dropEffect = atStorageRoot ? "none" : "copy"; } }} onDrop={drop}>
+      {embeddedInHouse ? null : <header className="workspace__head">
         <div>
           <p className="eyebrow">Owner workspace</p>
           <h1 id="workspace-title" className="page-title">{title}</h1>
         </div>
         {uploadProgress === undefined ? null : <div className="upload-progress" role="status">Uploading {Math.round(uploadProgress * 100)}%</div>}
-      </header>
-      <nav className="breadcrumbs" aria-label="Folder breadcrumbs">
-        {breadcrumbs.map((item, index) => <button type="button" key={`${item.id}-${String(index)}`} onClick={() => navigateBreadcrumb(index)}>{item.name}</button>)}
-        <span>{folder?.name ?? title}</span>
-      </nav>
-      <CollectionToolbar search={search} setSearch={setSearch} count={`${String(visible.length)} of ${String(items.length)}`}>
-        <button className="button" type="button" onClick={() => { setForm("folder"); setFormName(""); }}>New folder</button>
-        <button className="button button--primary" type="button" onClick={() => uploadInput.current?.click()} disabled={pending || atStorageRoot}>Upload</button>
+      </header>}
+      <div className="storage-browserbar">
+        <div className="storage-path-summary">
+          <nav className="breadcrumbs" aria-label="Folder breadcrumbs">
+            {embeddedInHouse ? <><span className="breadcrumbs__boundary">root</span><span className="breadcrumbs__separator" aria-hidden="true">›</span></> : null}
+            {breadcrumbs.map((item, index) => <button type="button" key={`${item.id}-${String(index)}`} onClick={() => navigateBreadcrumb(index)}>{item.name}</button>)}
+            <span>{folder?.id === initialFolderId ? initialFolderId === ROOT_RESOURCE_ID ? "root" : title.toLocaleLowerCase() : folder?.name ?? routeSegments.at(-1) ?? title}</span>
+          </nav>
+          <p className="storage-meta" aria-live="polite">{String(visible.length)} items · {String(selectedItems.length)} selected · {formatStorageBytes(visibleSizeBytes)}{embeddedInHouse && uploadProgress !== undefined ? ` · uploading ${String(Math.round(uploadProgress * 100))}%` : ""}</p>
+        </div>
+        <label className="search-control storage-search">
+          <span className="sr-only">Search storage</span>
+          <input type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search" />
+        </label>
+        {embeddedInHouse ? null : <button className="button storage-upload" type="button" onClick={() => uploadInput.current?.click()} disabled={pending || atStorageRoot || folderUnavailable || loading}>Upload here</button>}
         <input ref={uploadInput} aria-label="Choose files to upload" className="visually-hidden-input" type="file" multiple onChange={(event) => void performUpload([...event.target.files ?? []])} />
-      </CollectionToolbar>
-      <div className="selection-bar" role="toolbar" aria-label="Selection actions">
-        <span>{selectedItems.length === 0 ? "No selection" : `${String(selectedItems.length)} selected`}</span>
+      </div>
+      <div className="selection-bar storage-selection-bar" role="toolbar" aria-label="Selection actions">
+        <span>{clipboard === undefined ? selectedItems.length === 0 ? "No selection" : `${String(selectedItems.length)} selected` : `${clipboard.operation === "copy" ? "Copy" : "Cut"}: ${clipboard.resource.name}`}</span>
         <button type="button" disabled={single === undefined} onClick={() => { if (single?.type === "folder") openFolder(single); }}>Open</button>
-        <button type="button" disabled={single?.type !== "file"} onClick={() => { if (single !== undefined) window.location.assign(downloadUrl(single.id)); }}>Download</button>
+        <button type="button" disabled={single === undefined} onClick={() => { if (single !== undefined) window.location.assign(single.type === "file" ? downloadUrl(single.id) : folderDownloadUrl(single.id)); }}>Download</button>
         <button type="button" disabled={single?.type !== "file"} onClick={() => { if (single !== undefined) setPreview(single); }}>Preview</button>
         <button type="button" disabled={single?.type !== "file"} onClick={() => { if (single !== undefined) void showVersions(single); }}>Versions</button>
-        <button type="button" disabled={single?.type !== "file" || pending} onClick={() => void useInLaboratory()}>Use in Laboratory</button>
         <button type="button" disabled={single?.type !== "file" || pending} onClick={() => overwriteInput.current?.click()}>Overwrite</button>
         <input ref={overwriteInput} aria-label="Choose replacement file" className="visually-hidden-input" type="file" onChange={(event) => { if (single !== undefined) void performUpload([...event.target.files ?? []], single); }} />
         <button type="button" disabled={single === undefined} onClick={() => { if (single !== undefined) { setForm("rename"); setFormName(single.name); } }}>Rename</button>
         <button type="button" disabled={single === undefined || singleProtectedRoot} onClick={() => { if (single !== undefined) { setForm("move"); setDestinationId(folderId); setFormName(single.name); } }}>Move</button>
-        <button type="button" disabled={single === undefined || singleProtectedRoot} onClick={() => { if (single !== undefined) { setForm("copy"); setDestinationId(folderId); setFormName(single.name); } }}>Copy</button>
+        <button type="button" disabled={single === undefined} onClick={() => { if (single !== undefined) { setForm("copy"); setDestinationId(folderId); setFormName(single.name); } }}>Copy</button>
+        <button type="button" disabled={clipboard === undefined || pending} onClick={() => void pasteClipboard()}>Paste</button>
+        <button type="button" disabled={single === undefined} onClick={() => { if (single !== undefined) beginShare(single); }}>Share</button>
         <button className="danger-link" type="button" disabled={selectedItems.length === 0 || selectedProtectedRoot} onClick={() => setConfirmTrash(true)}>Trash</button>
       </div>
-      <div className="collection" tabIndex={0} onKeyDown={(event) => { if (event.key === "Delete" && selectedItems.length > 0 && !selectedProtectedRoot) setConfirmTrash(true); }}>
-        <div className="file-row file-row--head">
-          <span aria-hidden="true" />
-          <span>Name</span><span>Type</span><span>Size</span><span>Modified</span>
+      <div className="collection storage-collection" tabIndex={0} onContextMenu={(event) => openContextMenu(event)} onKeyDown={(event) => { if (event.key === "Delete" && selectedItems.length > 0 && !selectedProtectedRoot) setConfirmTrash(true); }}>
+        <div className="file-row file-row--head storage-file-row">
+          <SortButton field="name" activeField={sort.field} direction={sort.direction} onChange={changeSort}>Name</SortButton>
+          <SortButton field="modified" activeField={sort.field} direction={sort.direction} onChange={changeSort}>Modified</SortButton>
+          <SortButton field="size" activeField={sort.field} direction={sort.direction} onChange={changeSort}>Size</SortButton>
+          <span>Shared status</span>
         </div>
-        {loading ? <p className="empty-state">Loading folder…</p> : visible.length === 0 ? <p className="empty-state">{atStorageRoot ? "No root folders are available. Create one to get started." : "No matching items. Drop files here or create a folder."}</p> : visible.map((item) => (
-          <div className={`file-row ${selected.has(item.id) ? "file-row--selected" : ""}`} key={item.id} onDoubleClick={() => item.type === "folder" ? openFolder(item) : setPreview(item)}>
+        {loading ? <p className="empty-state">Loading folder…</p> : pathError ? <p className="empty-state" role="alert">{pathError}</p> : visible.length === 0 ? <p className="empty-state">{atStorageRoot ? "No root folders are available. Create one to get started." : "No matching items. Drop files here or create a folder."}</p> : visible.map((item) => (
+          <div className={`file-row storage-file-row ${item.type === "folder" ? "file-row--folder" : ""} ${selected.has(item.id) ? "file-row--selected" : ""}`} key={item.id} onClick={(event) => { if ((event.target as HTMLElement).closest("button, input") === null) selectResource(item, event.ctrlKey || event.metaKey, event.shiftKey); }} onContextMenu={(event) => { event.stopPropagation(); openContextMenu(event, item); }} onDoubleClick={() => item.type === "folder" ? openFolder(item) : setPreview(item)} onKeyDown={(event) => { if ((event.key === "F10" && event.shiftKey) || event.key === "ContextMenu") { const bounds = event.currentTarget.getBoundingClientRect(); setContextMenu({ x: bounds.left + 40, y: bounds.top + 30, resource: item }); } }}>
             <input
+              className="file-row__selector"
               type="checkbox"
               aria-label={`Select ${item.name}`}
               checked={selected.has(item.id)}
-              onChange={() => setSelected((current) => {
-                const next = new Set(current);
-                if (next.has(item.id)) next.delete(item.id); else next.add(item.id);
-                return next;
-              })}
+              readOnly
+              onClick={(event) => selectResource(item, true, event.shiftKey)}
             />
-            <button className="file-name" type="button" onClick={() => item.type === "folder" ? openFolder(item) : setSelected(new Set([item.id]))}>
+            <button className="file-name" type="button" onClick={(event) => selectResource(item, event.ctrlKey || event.metaKey, event.shiftKey)}>
               <span aria-hidden="true">{item.type === "folder" ? "□" : "·"}</span>{item.name}
             </button>
-            <span>{item.type === "folder" ? "Folder" : item.mimeType ?? "File"}</span>
-            <span>{item.type === "folder" ? "—" : formatBytes(item.sizeBytes)}</span>
-            <time dateTime={item.updatedAt}>{new Date(item.updatedAt).toLocaleString()}</time>
+            <time dateTime={item.updatedAt}>{formatStorageDate(item.updatedAt)}</time>
+            <span>{item.type === "folder" && item.sizeBytes === 0 ? "—" : formatStorageBytes(item.sizeBytes)}</span>
+            {activeShareByResource.get(item.id) === undefined ? <span className="share-status share-status--private">Private</span> : <button className="share-status share-status--active" type="button" onClick={() => setShareDetails(activeShareByResource.get(item.id))}>[ Shared ]</button>}
           </div>
         ))}
       </div>
       <p className="drop-hint">{atStorageRoot ? "Create arbitrary folders here, then open one to upload files. Preinstalled folders can be renamed but not moved or deleted." : "Drag and drop files anywhere in this workspace to upload into the current folder."}</p>
+      {draggingFiles ? <div className={`storage-drop-overlay ${atStorageRoot ? "storage-drop-overlay--blocked" : ""}`} aria-hidden="true"><strong>{atStorageRoot ? "OPEN A FOLDER" : "UPLOAD HERE"}</strong><span>{atStorageRoot ? "Files cannot be stored directly in root" : folder?.name ?? title}</span></div> : null}
 
       {form === undefined ? null : (
         <Dialog title={form === "folder" ? "Create folder" : `${form[0]?.toUpperCase() ?? ""}${form.slice(1)} ${single?.name ?? "item"}`} onClose={() => setForm(undefined)}>
@@ -553,129 +1058,336 @@ function FilesView({ initialFolderId, title, addNotice, onUnauthorized }: {
         </Dialog>
       )}
       {restoreVersion === undefined ? null : <ConfirmDialog title="Restore historical version" description="The selected version becomes current. The current bytes are archived as another reversible version." confirmLabel="Restore version" pending={pending} onConfirm={() => void restoreSelectedVersion()} onClose={() => setRestoreVersion(undefined)} />}
-      {laboratoryFragment === undefined ? null : <Dialog title="Laboratory fragment" description="Copy this Gateway-owned fragment. It contains no Storage Box hostname, SFTP path or share token." onClose={() => setLaboratoryFragment(undefined)}><textarea className="fragment-output" value={laboratoryFragment} readOnly rows={5} aria-label="Laboratory fragment" /><div className="dialog__actions"><button className="button button--primary" type="button" onClick={() => void navigator.clipboard.writeText(laboratoryFragment)}>Copy fragment</button></div></Dialog>}
       {preview === undefined ? null : (
         <Dialog title={`Preview — ${preview.name}`} description="Only allow-listed content types render inline. Everything else remains download-only." onClose={() => setPreview(undefined)}>
           <iframe className="preview-frame" title={`Preview of ${preview.name}`} src={downloadUrl(preview.id, true)} sandbox="allow-same-origin" />
           <div className="dialog__actions"><a className="button" href={downloadUrl(preview.id)}>Download instead</a></div>
         </Dialog>
       )}
+      {contextMenu === undefined ? null : <ResourceContextMenu state={contextMenu} canPaste={clipboard !== undefined} protectedRoot={contextMenu.resource !== undefined && PROTECTED_ROOT_RESOURCE_IDS.has(contextMenu.resource.id)} onAction={contextAction} onClose={() => setContextMenu(undefined)} />}
+      {shareResource === undefined ? null : <Dialog title={`Share — ${shareResource.name}`} description="Create a read-only capability. Expiry and password are optional." onClose={closeShareComposer}><form className="dialog-form" onSubmit={(event) => void createShare(event)}>
+        <label>Access<select value={shareMode} onChange={(event) => setShareMode(event.target.value as ShareInfo["mode"])}>{shareResource.type === "file" ? <><option value="view">View</option><option value="download">Download</option></> : <><option value="browse">Browse</option><option value="download_folder">Browse + download all</option></>}</select></label>
+        <label>Expires<input type="datetime-local" value={shareExpiresAt} min={new Date().toISOString().slice(0, 16)} onChange={(event) => setShareExpiresAt(event.target.value)} /></label>
+        <label>Password<input type="password" value={sharePassword} minLength={12} maxLength={128} onChange={(event) => setSharePassword(event.target.value)} autoComplete="new-password" placeholder="Off" /></label>
+        {shareError ? <p className="form-error" role="alert">{shareError}</p> : null}
+        <div className="dialog__actions"><button className="button" type="button" onClick={closeShareComposer}>Cancel</button><button className="button button--primary" type="submit" disabled={pending}>Create share</button></div>
+      </form></Dialog>}
+      {shareDetails === undefined ? null : <Dialog title="Share" description={shareDetails.resourceName} onClose={() => setShareDetails(undefined)}><div className="share-details">
+        {shareCapabilities[shareDetails.id] === undefined ? <p className="muted">This historical link cannot be copied because Saturn stores only its non-reversible hash. You can still revoke access.</p> : <div className="share-link-field"><input aria-label="Share link" value={shareCapabilities[shareDetails.id]} readOnly /><button className="button" type="button" onClick={() => void copyText(shareCapabilities[shareDetails.id] ?? "")}>Copy</button></div>}
+        <dl><div><dt>Access</dt><dd>{shareDetails.mode.replace("_", " ")}</dd></div><div><dt>Expires</dt><dd>{shareDetails.expiresAt === undefined ? "None" : new Date(shareDetails.expiresAt).toLocaleString()}</dd></div><div><dt>Password</dt><dd>{shareDetails.locked ? "On" : "Off"}</dd></div><div><dt>Status</dt><dd>{shareDetails.state}</dd></div></dl>
+        <div className="dialog__actions"><button className="button button--danger" type="button" disabled={pending || shareDetails.state !== "active"} onClick={() => void revokeShare(shareDetails)}>Revoke</button></div>
+      </div></Dialog>}
     </section>
   );
+}
+
+function InternalDropUploader({ health, addNotice, onUnauthorized, onStored }: { readonly health: GatewayState; readonly addNotice: (kind: Notice["kind"], message: string) => void; readonly onUnauthorized: () => void; readonly onStored: () => void }) {
+  const [jobs, setJobs] = useState<Array<{ readonly id: string; readonly name: string; readonly progress: number; readonly state: DropUploadStatus["state"] }>>([]);
+  const [session, setSession] = useState<DropSessionInfo | undefined>();
+  const [pending, setPending] = useState(false);
+  const [dragging, setDragging] = useState(false);
+  const input = useRef<HTMLInputElement>(null);
+  const sessionExpiresAt = useRef(0);
+  const dragDepth = useRef(0);
+  const monitor = async (id: string) => {
+    for (;;) {
+      await new Promise((resolve) => window.setTimeout(resolve, 1_000));
+      try {
+        const status = await dropApi.status(id);
+        setJobs((current) => current.map((job) => job.id === id ? { ...job, progress: status.expectedSize === 0 ? 1 : status.receivedSize / status.expectedSize, state: status.state } : job));
+        if (status.state === "stored") onStored();
+        if (["stored", "failed", "cancelled"].includes(status.state)) return;
+      } catch { return; }
+    }
+  };
+  const upload = async (files: readonly File[]) => {
+    if (files.length === 0 || pending) return;
+    setPending(true);
+    try {
+      if (sessionExpiresAt.current <= Date.now() + 5_000) {
+        const openedSession = await api.openInternalDropSession();
+        sessionExpiresAt.current = new Date(openedSession.expiresAt).getTime();
+        setSession(openedSession);
+      }
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) onUnauthorized();
+      else addNotice("error", "The in-house Drop buffer could not be opened.");
+      setPending(false);
+      return;
+    }
+    for (const file of files) {
+      const id = crypto.randomUUID();
+      setJobs((current) => [...current, { id, name: file.name, progress: 0, state: "uploading" }]);
+      try {
+        const result = await uploadDropFile(file, (progress) => setJobs((current) => current.map((job) => job.id === id ? { ...job, progress } : job)));
+        setJobs((current) => current.map((job) => job.id === id ? { id: result.id, name: file.name, progress: 1, state: result.state } : job));
+        if (result.state === "stored") onStored();
+        if (!["stored", "failed", "cancelled"].includes(result.state)) void monitor(result.id);
+      } catch (error) {
+        if (error instanceof ApiError && error.status === 401) onUnauthorized();
+        setJobs((current) => current.map((job) => job.id === id ? { ...job, state: "failed" } : job));
+      }
+    }
+    setPending(false);
+    if (input.current !== null) input.current.value = "";
+    addNotice("success", "Files entered the in-house Drop buffer.");
+  };
+  return <aside className={`internal-drop ${dragging ? "internal-drop--dragging" : ""}`} aria-labelledby="internal-drop-title" onDragEnter={(event) => { if (!event.dataTransfer.types.includes("Files")) return; event.preventDefault(); event.stopPropagation(); dragDepth.current += 1; setDragging(true); }} onDragLeave={(event) => { event.stopPropagation(); dragDepth.current = Math.max(0, dragDepth.current - 1); if (dragDepth.current === 0) setDragging(false); }} onDragOver={(event) => { if (event.dataTransfer.types.includes("Files")) { event.preventDefault(); event.stopPropagation(); event.dataTransfer.dropEffect = "copy"; } }} onDrop={(event) => { event.preventDefault(); event.stopPropagation(); dragDepth.current = 0; setDragging(false); void upload([...event.dataTransfer.files]); }}>
+    <h2 id="internal-drop-title" className="internal-drop__title">saturn drop point</h2>
+    <div className="drop-public-notice"><strong>Upload only Gateway</strong><p>This page cannot list Saturn contents. Only files selected in this session appear here.</p></div>
+    <div className="drop-session-status"><span>Drop code status:</span><strong>none</strong></div>
+    <DropReachability state={health} />
+    <div className={`drop-upload-stage ${jobs.length > 0 ? "drop-upload-stage--with-jobs" : ""}`}>
+      <button className="drop-target" type="button" disabled={pending} onClick={() => input.current?.click()}><span>{dragging ? "Release to upload" : "Drop and drag files here"}</span><small>or choose files - up to {formatStorageBytes(session?.maxBytes ?? 100 * 1024 ** 3).replace(".0 ", " ")}</small></button>
+      <input ref={input} className="visually-hidden-input" type="file" multiple aria-label="Choose files for in-house Drop" onChange={(event) => void upload([...event.target.files ?? []])} />
+      {jobs.length === 0 ? null : <div className="drop-jobs" role="region" aria-live="polite" aria-label="In-house upload queue">{jobs.map((job) => <div className={`drop-job ${job.state === "stored" ? "drop-job--stored" : ""}`} key={job.id}><span>{job.name}</span><progress max={1} value={job.progress} /><strong>{job.state}</strong></div>)}</div>}
+    </div>
+  </aside>;
+}
+
+function InHouseDropView({ health, routeSegments, onPathChange, shareCapabilities, onShareCapabilityCreated, onShareCapabilityRevoked, addNotice, onUnauthorized }: {
+  readonly health: GatewayState;
+  readonly routeSegments: readonly string[];
+  readonly onPathChange: (segments: readonly string[], replace?: boolean) => void;
+  readonly shareCapabilities: Readonly<Record<string, string>>;
+  readonly onShareCapabilityCreated: (id: string, url: string) => void;
+  readonly onShareCapabilityRevoked: (id: string) => void;
+  readonly addNotice: (kind: Notice["kind"], message: string) => void;
+  readonly onUnauthorized: () => void;
+}) {
+  const [storageRevision, setStorageRevision] = useState(0);
+  return <section className="workspace in-house-drop" aria-labelledby="in-house-drop-title">
+    <header className="workspace__head"><h1 id="in-house-drop-title" className="page-title">drop point</h1></header>
+    <div className="in-house-drop__body">
+      <FilesView embeddedInHouse refreshKey={storageRevision} initialFolderId={DROP_POINT_RESOURCE_ID} title="Drop Point" routeSegments={routeSegments} onPathChange={onPathChange} shareCapabilities={shareCapabilities} onShareCapabilityCreated={onShareCapabilityCreated} onShareCapabilityRevoked={onShareCapabilityRevoked} addNotice={addNotice} onUnauthorized={onUnauthorized} />
+      <InternalDropUploader health={health} addNotice={addNotice} onUnauthorized={onUnauthorized} onStored={() => setStorageRevision((current) => current + 1)} />
+    </div>
+  </section>;
 }
 
 function TrashView({ addNotice, onUnauthorized }: { readonly addNotice: (kind: Notice["kind"], message: string) => void; readonly onUnauthorized: () => void }) {
   const [items, setItems] = useState<readonly Resource[]>([]);
   const [search, setSearch] = useState("");
-  const [selected, setSelected] = useState<Resource | undefined>();
+  const [expanded, setExpanded] = useState<string | undefined>();
+  const [restoreCandidate, setRestoreCandidate] = useState<Resource | undefined>();
+  const [purgeCandidate, setPurgeCandidate] = useState<Resource | undefined>();
+  const [sort, setSort] = useState<{ readonly field: SortField; readonly direction: SortDirection }>({ field: "modified", direction: "descending" });
   const [pending, setPending] = useState(false);
+  const [loading, setLoading] = useState(true);
   const load = async () => {
+    setLoading(true);
     try { setItems(await api.trash()); } catch (error) { if (error instanceof ApiError && error.status === 401) onUnauthorized(); else addNotice("error", "Trash could not be loaded."); }
+    finally { setLoading(false); }
   };
   useEffect(() => { void load(); }, []);
-  const visible = items.filter((item) => item.name.toLocaleLowerCase().includes(search.toLocaleLowerCase()));
+  const visible = useMemo(() => {
+    const query = search.trim().toLocaleLowerCase();
+    return items
+      .filter((item) => [item.name, item.trashedFromName ?? "", item.storagePath, item.type].some((value) => value.toLocaleLowerCase().includes(query)))
+      .sort((left, right) => compareResources(left, right, sort.field, sort.direction));
+  }, [items, search, sort]);
+  const visibleSizeBytes = visible.reduce((total, item) => total + item.sizeBytes, 0);
+  const changeSort = (field: SortField) => setSort((current) => current.field === field
+    ? { field, direction: current.direction === "ascending" ? "descending" : "ascending" }
+    : { field, direction: field === "name" ? "ascending" : "descending" });
   const restore = async () => {
-    if (selected === undefined) return;
+    if (restoreCandidate === undefined) return;
+    const candidate = restoreCandidate;
     setPending(true);
-    try { await api.restoreResource(selected.id); addNotice("success", `${selected.name} restored to its original folder.`); setSelected(undefined); await load(); }
+    try {
+      await api.restoreResource(candidate.id);
+      setItems((current) => current.filter((item) => item.id !== candidate.id));
+      setExpanded((current) => current === candidate.id ? undefined : current);
+      setRestoreCandidate(undefined);
+      addNotice("success", `${candidate.trashedFromName ?? candidate.name} restored to its original folder.`);
+      await load();
+    }
     catch (error) { if (error instanceof ApiError && error.status === 401) onUnauthorized(); else addNotice("error", "Restore failed; no bytes were discarded."); }
     finally { setPending(false); }
   };
-  return (
-    <section className="workspace" aria-labelledby="trash-title">
-      <header className="workspace__head"><div><p className="eyebrow">Reversible deletion</p><h1 className="page-title" id="trash-title">Trash</h1></div></header>
-      <CollectionToolbar search={search} setSearch={setSearch} count={`${String(visible.length)} item(s)`}><span className="muted">90-day default retention</span></CollectionToolbar>
-      <div className="collection">
-        {visible.length === 0 ? <p className="empty-state">Trash is empty.</p> : visible.map((item) => (
-          <button className="trash-row" type="button" key={item.id} onClick={() => setSelected(item)}>
-            <span>{item.name}</span><span>{item.trashedFromParentId ?? "Original folder unavailable"}</span><span>{item.purgeAfter === undefined ? "Manual retention" : `Eligible after ${new Date(item.purgeAfter).toLocaleString()}`}</span>
-          </button>
-        ))}
-      </div>
-      {selected === undefined ? null : <ConfirmDialog title={`Restore ${selected.name}`} description="The item returns to its original folder and keeps the same stable resource ID. Restore stops if the original name is occupied." confirmLabel="Restore" pending={pending} onConfirm={() => void restore()} onClose={() => setSelected(undefined)} />}
-    </section>
-  );
-}
-
-function ActivityView({ onUnauthorized }: { readonly onUnauthorized: () => void }) {
-  const [events, setEvents] = useState<readonly AuditEvent[]>([]);
-  const [search, setSearch] = useState("");
-  const [loading, setLoading] = useState(true);
-  useEffect(() => {
-    void api.activity().then(setEvents).catch((error: unknown) => { if (error instanceof ApiError && error.status === 401) onUnauthorized(); }).finally(() => setLoading(false));
-  }, []);
-  const visible = events.filter((event) => event.action.toLocaleLowerCase().includes(search.toLocaleLowerCase()));
-  return (
-    <section className="workspace" aria-labelledby="activity-title">
-      <header className="workspace__head"><div><p className="eyebrow">Append-only record</p><h1 className="page-title" id="activity-title">Activity</h1></div><a className="button" href="/api/v1/activity/export?limit=10000">Export JSONL</a></header>
-      <CollectionToolbar search={search} setSearch={setSearch} count={`${String(visible.length)} of ${String(events.length)}`}><button className="button" type="button" onClick={() => void api.activity().then(setEvents)}>Refresh</button></CollectionToolbar>
-      <div className="collection activity-list">
-        {loading ? <p className="empty-state">Loading activity…</p> : visible.map((event) => (
-          <article className="activity-row" key={event.sequence}>
-            <time dateTime={event.occurredAt}>{new Date(event.occurredAt).toLocaleString()}</time>
-            <strong>{event.action}</strong><span className={`outcome outcome--${event.outcome}`}>{event.outcome}</span>
-            <code>{event.resourceId ?? "system"}</code>
-          </article>
-        ))}
-      </div>
-    </section>
-  );
-}
-
-function SharedView({ addNotice, onAnonymous }: { readonly addNotice: (kind: Notice["kind"], message: string) => void; readonly onAnonymous: () => void }) {
-  const [shares, setShares] = useState<readonly ShareInfo[]>([]);
-  const [resourceId, setResourceId] = useState("");
-  const [mode, setMode] = useState<ShareInfo["mode"]>("download");
-  const [password, setPassword] = useState("");
-  const [maxDownloads, setMaxDownloads] = useState("");
-  const [pending, setPending] = useState(false);
-  const [createdUrl, setCreatedUrl] = useState("");
-  const load = async () => {
-    try { setShares(await api.shares()); }
-    catch (error) { if (error instanceof ApiError && error.status === 401) onAnonymous(); else addNotice("error", "Shares could not be loaded."); }
-  };
-  useEffect(() => { void load(); }, []);
-  const create = async (event: SyntheticEvent<HTMLFormElement>) => {
-    event.preventDefault(); setPending(true); setCreatedUrl("");
-    try {
-      const created = await api.createShare({
-        resourceId,
-        mode,
-        ...(password ? { password } : {}),
-        ...(maxDownloads ? { maxDownloads: Number(maxDownloads) } : {}),
-      });
-      setCreatedUrl(created.url); setPassword(""); await load();
-      addNotice("success", "Share created. Its capability URL is shown only in this view now.");
-    } catch (error) {
-      if (error instanceof ApiError && error.status === 401) onAnonymous();
-      else addNotice("error", "Share creation requires a compatible active resource and recent owner proof.");
-    } finally { setPending(false); }
-  };
-  const revoke = async (id: string) => {
+  const purge = async () => {
+    if (purgeCandidate === undefined) return;
+    const candidate = purgeCandidate;
     setPending(true);
-    try { await api.revokeShare(id); await load(); addNotice("success", "Share revoked immediately."); }
-    catch { addNotice("error", "Share revoke requires recent owner proof."); }
+    try {
+      await api.purgeTrashFile(candidate.id);
+      setItems((current) => current.filter((item) => item.id !== candidate.id));
+      setExpanded((current) => current === candidate.id ? undefined : current);
+      setPurgeCandidate(undefined);
+      addNotice("success", `${candidate.trashedFromName ?? candidate.name} permanently deleted.`);
+      await load();
+    }
+    catch (error) {
+      if (error instanceof ApiError && error.status === 401) onUnauthorized();
+      else addNotice("error", "Permanent deletion failed. Saturn will safely retry the recorded operation on the next request.");
+    }
     finally { setPending(false); }
   };
   return (
-    <section className="workspace shared" aria-labelledby="shared-title">
-      <header className="workspace__head"><div><p className="eyebrow">External read-only access</p><h1 className="page-title" id="shared-title">Shared</h1></div></header>
-      <section className="settings-section">
-        <h2>Create share</h2><p className="muted">Use a stable resource ID. The generated capability URL is disclosed once and never appears in this list.</p>
-        <form className="share-form" onSubmit={(event) => void create(event)}>
-          <label>Resource ID<input value={resourceId} onChange={(event) => setResourceId(event.target.value)} required pattern="[0-9a-fA-F-]{36}" /></label>
-          <label>Mode<select value={mode} onChange={(event) => setMode(event.target.value as ShareInfo["mode"])}><option value="view">View file</option><option value="download">Download file</option><option value="browse">Browse folder</option><option value="download_folder">Download folder package</option></select></label>
-          <label>Optional password<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} minLength={12} maxLength={128} autoComplete="new-password" /></label>
-          <label>Optional max downloads<input type="number" value={maxDownloads} onChange={(event) => setMaxDownloads(event.target.value)} min={1} max={1000000} /></label>
-          <button className="button button--primary" type="submit" disabled={pending}>Create capability</button>
-        </form>
-        {createdUrl ? <div className="one-time-code" role="status"><span>Copy this URL now</span><strong className="share-url">{createdUrl}</strong><small>It is held only in page memory and disappears on navigation or refresh.</small></div> : null}
-      </section>
-      <section className="settings-section"><h2>Active and historical shares</h2>
-        <div className="share-list">{shares.length === 0 ? <p className="empty-state">No share records.</p> : shares.map((share) => <article className="share-row" key={share.id}><div><strong>{share.resourceName}</strong><span>{share.mode} · {share.state} · {String(share.downloadCount)} download session(s)</span><small>{share.expiresAt === undefined ? "No expiry" : `Expires ${new Date(share.expiresAt).toLocaleString()}`}</small></div><button className="button button--danger" type="button" onClick={() => void revoke(share.id)} disabled={pending || share.state === "revoked"}>Revoke</button></article>)}</div>
-      </section>
+    <section className="workspace trash-workspace" aria-labelledby="trash-title">
+      <header className="workspace__head"><h1 className="page-title" id="trash-title">trash</h1></header>
+      <div className="trash-workspace__body">
+        <div className="trash-command-bar">
+          <div className="trash-path-summary"><span>reversible trash</span><p className="storage-meta" aria-live="polite">{String(visible.length)} items · {formatStorageBytes(visibleSizeBytes)} · 90-day retention</p></div>
+          <label className="search-control storage-search trash-search">
+            <span className="sr-only">Search trash</span>
+            <input type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search" />
+          </label>
+        </div>
+        <div className="trash-owner-list">
+          <div className="trash-owner-list__head">
+            <SortButton field="name" activeField={sort.field} direction={sort.direction} onChange={changeSort}>Name</SortButton>
+            <SortButton field="modified" activeField={sort.field} direction={sort.direction} onChange={changeSort}>Deleted</SortButton>
+            <SortButton field="size" activeField={sort.field} direction={sort.direction} onChange={changeSort}>Size</SortButton>
+            <span>Retention</span><span aria-hidden="true" />
+          </div>
+          <div className="trash-owner-list__body">
+            {loading ? <p className="empty-state">Loading trash…</p> : visible.length === 0 ? <p className="empty-state">{search.trim() ? "No matching trash records." : "Trash is empty."}</p> : visible.map((item) => {
+              const isExpanded = expanded === item.id;
+              const displayName = item.trashedFromName ?? item.name;
+              return <article className={`trash-owner-row ${isExpanded ? "trash-owner-row--expanded" : ""}`} key={item.id}>
+                <div className="trash-owner-row__summary">
+                  <button className="trash-owner-row__toggle" type="button" aria-expanded={isExpanded} onClick={() => setExpanded((current) => current === item.id ? undefined : item.id)}>
+                    <strong className={`trash-owner-row__name ${item.type === "folder" ? "trash-owner-row__name--folder" : ""}`}>{displayName}</strong>
+                    <time dateTime={item.updatedAt}>{formatStorageDate(item.updatedAt)}</time>
+                    <span>{item.type === "folder" && item.sizeBytes === 0 ? "—" : formatStorageBytes(item.sizeBytes)}</span>
+                    <span>{item.purgeAfter === undefined ? "Manual" : formatStorageDate(item.purgeAfter)}</span>
+                  </button>
+                  <div className="trash-owner-row__actions">
+                    <button className="trash-owner-row__restore" type="button" disabled={pending} onClick={() => setRestoreCandidate(item)}>Restore</button>
+                    {item.type === "file" ? <button className="trash-owner-row__purge" type="button" disabled={pending} onClick={() => setPurgeCandidate(item)}>Delete permanently</button> : null}
+                  </div>
+                </div>
+                {isExpanded ? <div className="trash-owner-row__details"><dl>
+                  <div><dt>Type</dt><dd>{item.type}</dd></div>
+                  <div><dt>Deleted at</dt><dd>{formatStorageDate(item.updatedAt)}</dd></div>
+                  <div><dt>Purge at</dt><dd>{item.purgeAfter === undefined ? "Manual" : formatStorageDate(item.purgeAfter)}</dd></div>
+                  <div><dt>Original name</dt><dd>{displayName}</dd></div>
+                  <div><dt>Original folder ID</dt><dd>{item.trashedFromParentId ?? "Unavailable"}</dd></div>
+                  <div><dt>Status</dt><dd className="state-danger">{item.status}</dd></div>
+                </dl><p>{item.type === "file" ? "Restore returns this file to its original folder. Permanent deletion destroys its stored bytes and retained versions after explicit confirmation." : "Restore returns this folder to its original location. Permanent recursive folder deletion is not available."}</p></div> : null}
+              </article>;
+            })}
+          </div>
+        </div>
+      </div>
+      {restoreCandidate === undefined ? null : <ConfirmDialog title={`Restore ${restoreCandidate.trashedFromName ?? restoreCandidate.name}`} description="The item returns to its original folder and keeps the same stable resource ID. Restore stops if the original name is occupied." confirmLabel="Restore" pending={pending} onConfirm={() => void restore()} onClose={() => setRestoreCandidate(undefined)} />}
+      {purgeCandidate === undefined ? null : <ConfirmDialog title={`Delete ${purgeCandidate.trashedFromName ?? purgeCandidate.name} permanently`} description="This permanently destroys the stored file bytes and every retained version. The file cannot be restored after this action." confirmLabel="Delete permanently" danger pending={pending} onConfirm={() => void purge()} onClose={() => setPurgeCandidate(undefined)} />}
     </section>
   );
+}
+
+function SharedView({ shareCapabilities, onShareCapabilityRevoked, addNotice, onAnonymous }: {
+  readonly shareCapabilities: Readonly<Record<string, string>>;
+  readonly onShareCapabilityRevoked: (id: string) => void;
+  readonly addNotice: (kind: Notice["kind"], message: string) => void;
+  readonly onAnonymous: () => void;
+}) {
+  const [shares, setShares] = useState<readonly ShareInfo[]>([]);
+  const [search, setSearch] = useState("");
+  const [sort, setSort] = useState<{ readonly field: SortField; readonly direction: SortDirection }>({ field: "modified", direction: "descending" });
+  const [expanded, setExpanded] = useState<string | undefined>();
+  const [pending, setPending] = useState(false);
+  const load = async () => {
+    try { const value = await api.shares(); setShares(value.filter((share) => share.state === "active")); }
+    catch (error) { if (error instanceof ApiError && error.status === 401) onAnonymous(); else addNotice("error", "Shares could not be loaded."); }
+  };
+  useEffect(() => { void load(); }, []);
+  const revoke = async (share: ShareInfo) => {
+    if (pending) return;
+    setPending(true);
+    try {
+      await api.revokeShare(share.id);
+      setShares((current) => current.filter((item) => item.id !== share.id));
+      setExpanded((current) => current === share.id ? undefined : current);
+      onShareCapabilityRevoked(share.id);
+      addNotice("success", "Share revoked immediately.");
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) {
+        onAnonymous();
+      } else {
+        addNotice("error", "The share could not be revoked.");
+      }
+    }
+    finally { setPending(false); }
+  };
+  const copyLink = async (id: string) => {
+    const value = shareCapabilities[id];
+    if (value === undefined) { addNotice("info", "This historical capability is non-recoverable. Reissue is awaiting the operator policy decision."); return; }
+    try { await navigator.clipboard.writeText(value); addNotice("success", "Share link copied."); }
+    catch { addNotice("error", "Clipboard access was blocked. Copy the visible link manually."); }
+  };
+  const changeSort = (field: SortField) => setSort((current) => current.field === field
+    ? { field, direction: current.direction === "ascending" ? "descending" : "ascending" }
+    : { field, direction: field === "name" ? "ascending" : "descending" });
+  const visible = useMemo(() => {
+    const query = search.trim().toLocaleLowerCase();
+    const multiplier = sort.direction === "ascending" ? 1 : -1;
+    return [...shares]
+      .filter((share) => [share.resourceName, share.resourceType, share.mode, share.state, share.id, share.resourceId, share.createdAt, share.updatedAt]
+        .some((value) => value.toLocaleLowerCase().includes(query)))
+      .sort((left, right) => sort.field === "name"
+        ? left.resourceName.localeCompare(right.resourceName, undefined, { numeric: true, sensitivity: "base" }) * multiplier
+        : (new Date(left.updatedAt).getTime() - new Date(right.updatedAt).getTime()) * multiplier);
+  }, [shares, search, sort]);
+  return (
+    <section className="workspace shared-workspace" aria-labelledby="shared-title">
+      <header className="workspace__head"><h1 className="page-title" id="shared-title">shared</h1></header>
+      <div className="shared-workspace__body">
+        <div className="shared-command-bar" role="search" aria-label="Shared collection controls">
+          <label className="shared-search-control">
+            <span aria-hidden="true">⌕</span>
+            <span className="sr-only">Search shared objects</span>
+            <input type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search" aria-label="Search shared objects" />
+          </label>
+          <output className="sr-only" aria-live="polite">{String(visible.length)} of {String(shares.length)} shared objects</output>
+        </div>
+        <div className="share-owner-list">
+          <div className="share-owner-list__head">
+            <SortButton field="name" activeField={sort.field} direction={sort.direction} onChange={changeSort}>Name</SortButton>
+            <SortButton field="modified" activeField={sort.field} direction={sort.direction} onChange={changeSort}>Modified</SortButton>
+            <span>Access</span>
+            <span aria-hidden="true" />
+          </div>
+          <div className="share-owner-list__body">
+            {visible.length === 0 ? <p className="empty-state">No matching share records.</p> : visible.map((share) => {
+              const capability = shareCapabilities[share.id];
+              const isExpanded = expanded === share.id;
+              return <article className={`share-owner-row ${isExpanded ? "share-owner-row--expanded" : ""}`} key={share.id}>
+                <div className="share-owner-row__summary">
+                  <button className="share-owner-row__toggle" type="button" aria-expanded={isExpanded} onClick={() => setExpanded((current) => current === share.id ? undefined : share.id)}>
+                    <strong className={`share-owner-row__name ${share.resourceType === "folder" ? "share-owner-row__name--folder" : ""}`}>{share.resourceName}</strong>
+                    <time dateTime={share.updatedAt}>{formatStorageDate(share.updatedAt)}</time>
+                  </button>
+                  <span className="share-owner-row__access">{formatShareAccess(share.mode)}</span>
+                  <button className="share-owner-row__copy" type="button" disabled={share.state !== "active" || capability === undefined} title={capability === undefined ? "Historical capability is not recoverable from its stored hash" : "Copy capability URL"} onClick={() => void copyLink(share.id)}>Copy link</button>
+                </div>
+                {isExpanded ? <div className="share-owner-row__details">
+                  <dl>
+                    <div><dt>Password</dt><dd>{share.locked ? "On" : "Off"}</dd></div>
+                    <div><dt>Shared since</dt><dd>{new Date(share.createdAt).toLocaleString()}</dd></div>
+                    <div><dt>Expires at</dt><dd>{share.expiresAt === undefined ? "None" : new Date(share.expiresAt).toLocaleString()}</dd></div>
+                    <div><dt>Size</dt><dd>{share.resourceType === "folder" && share.resourceSize === 0 ? "—" : formatBytes(share.resourceSize)}</dd></div>
+                    <div><dt>Access</dt><dd>{formatShareAccess(share.mode)}</dd></div>
+                    <div><dt>Downloads</dt><dd>{String(share.downloadCount)}{share.maxDownloads === undefined ? "" : ` / ${String(share.maxDownloads)}`}</dd></div>
+                  </dl>
+                  {capability === undefined ? <p className="muted">This historical link cannot be copied because Saturn stores only its non-reversible hash. You can still revoke access.</p> : <input aria-label={`Share URL for ${share.resourceName}`} value={capability} readOnly />}
+                  <button className="button button--danger" type="button" onClick={() => void revoke(share)} disabled={pending || share.state !== "active"}>Revoke</button>
+                </div> : null}
+              </article>;
+            })}
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function PublicShareReachability({ state }: { readonly state: GatewayState }) {
+  const label = state === "checking" ? "Checking" : state === "ready" ? "Available" : "Unavailable";
+  return <div className={`share-public-reachability share-public-reachability--${state}`} role="status" aria-label={`Service Reachability: ${label}`}>
+    <span>Service Reachability</span><i aria-hidden="true" />
+  </div>;
 }
 
 function PublicShareView({ token }: { readonly token: string }) {
@@ -687,10 +1399,11 @@ function PublicShareView({ token }: { readonly token: string }) {
   const [history, setHistory] = useState<readonly string[]>([]);
   const [message, setMessage] = useState("");
   const [pending, setPending] = useState(false);
-  const [packageReady, setPackageReady] = useState(false);
+  const [unavailable, setUnavailable] = useState(false);
+  const [sort, setSort] = useState<{ readonly field: "name" | "size"; readonly direction: SortDirection }>({ field: "name", direction: "ascending" });
   const loadChildren = async (parentId?: string) => { setChildren(await publicShareApi.children(token, parentId)); setFolderId(parentId); };
   useEffect(() => {
-    void publicShareApi.metadata(token).then((value) => { setShare(value); if (!value.locked && value.resourceType === "folder") void loadChildren(); }).catch(() => setMessage("This share is unavailable."));
+    void publicShareApi.metadata(token).then((value) => { setShare(value); setUnavailable(false); if (!value.locked && value.resourceType === "folder") void loadChildren(); }).catch(() => { setUnavailable(true); setMessage("This share is unavailable."); });
   }, [token]);
   const unlock = async (event: SyntheticEvent<HTMLFormElement>) => {
     event.preventDefault(); setPending(true); setMessage("");
@@ -700,41 +1413,379 @@ function PublicShareView({ token }: { readonly token: string }) {
   };
   const openFolder = async (id: string) => { setPending(true); try { setHistory((current) => [...current, folderId ?? ""]); await loadChildren(id); } catch { setMessage("That folder is outside this share."); } finally { setPending(false); } };
   const back = async () => { const next = history.at(-1); if (next === undefined) return; setHistory((current) => current.slice(0, -1)); await loadChildren(next || undefined); };
-  const prepare = async () => { setPending(true); try { const value = await publicShareApi.preparePackage(token); setPackageReady(value.state === "ready"); } catch { setMessage("The folder package could not be prepared within its limits."); } finally { setPending(false); } };
+  const prepareAndDownload = async () => {
+    setPending(true);
+    setMessage("");
+    try {
+      const value = await publicShareApi.preparePackage(token);
+      if (value.state !== "ready") throw new Error("Share package is not ready");
+      const download = document.createElement("a");
+      download.href = publicShareApi.packageUrl(token);
+      download.download = `${share?.resourceName ?? "shared-folder"}.zip`;
+      download.hidden = true;
+      document.body.append(download);
+      download.click();
+      download.remove();
+    } catch {
+      setMessage("The folder package could not be prepared within its limits.");
+    } finally {
+      setPending(false);
+    }
+  };
+  const entries = useMemo<readonly ShareChild[]>(() => {
+    const source: readonly ShareChild[] = share !== undefined && !share.locked && share.resourceType === "file"
+      ? [{ id: share.resourceId, type: "file", name: share.resourceName, sizeBytes: share.resourceSize, ...(share.resourceMimeType === undefined ? {} : { mimeType: share.resourceMimeType }), updatedAt: share.updatedAt }]
+      : children;
+    const multiplier = sort.direction === "ascending" ? 1 : -1;
+    return [...source].sort((left, right) => {
+      const value = sort.field === "name" ? left.name.localeCompare(right.name, undefined, { numeric: true, sensitivity: "base" }) : left.sizeBytes - right.sizeBytes;
+      return (value === 0 ? left.name.localeCompare(right.name, undefined, { numeric: true, sensitivity: "base" }) : value) * multiplier;
+    });
+  }, [children, share, sort]);
+  const changeSort = (field: SortField) => {
+    if (field === "modified") return;
+    setSort((current) => current.field === field
+      ? { field, direction: current.direction === "ascending" ? "descending" : "ascending" }
+      : { field, direction: "ascending" });
+  };
+  const knownTotal = share?.resourceType === "file" ? share.resourceSize : children.reduce((sum, child) => sum + child.sizeBytes, 0);
+  const expiry = share?.expiresAt === undefined ? "none" : new Date(share.expiresAt).toLocaleString();
+  const modeLabel = share?.mode === "view" ? "View only Gateway" : share?.mode === "browse" ? "Browse Gateway" : "Download only Gateway";
+  const bulkSize = share?.resourceSize ?? knownTotal;
   return (
-    <main className="share-public-view"><section className="share-public-panel" aria-labelledby="public-share-title">
-      <header className="drop-panel__head"><div><p className="eyebrow">Read-only capability</p><h1 id="public-share-title" className="wordmark wordmark--share">Saturn Share</h1></div><HealthLabel state={health} /></header>
-      {share === undefined ? <p className="empty-state">{message || "Checking share…"}</p> : share.locked ? <form className="drop-redeem" onSubmit={(event) => void unlock(event)}><p className="muted">This capability is password protected.</p><label>Share password<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="current-password" required autoFocus /></label><button className="button button--primary" type="submit" disabled={pending}>Unlock</button><p className="form-error" role="alert">{message}</p></form> : <div className="share-public-content">
-        <div className="drop-policy"><strong>READ ONLY</strong><span>{share.mode.replace("_", " ")} · expires {share.expiresAt === undefined ? "by owner revoke" : new Date(share.expiresAt).toLocaleString()}</span></div>
-        <h2>{share.resourceName}</h2><p className="muted">View-only changes browser presentation; any content delivered to a browser can still be copied. Saturn does not promise impossible download prevention.</p>
-        {share.resourceType === "file" ? <a className="button button--primary" href={publicShareApi.contentUrl(token)}>{share.mode === "view" ? "Open view" : `Download · ${formatBytes(share.resourceSize)}`}</a> : <>
-          <div className="inline-actions">{history.length > 0 ? <button className="button" type="button" onClick={() => void back()}>Back</button> : null}{share.mode === "download_folder" ? packageReady ? <a className="button button--primary" href={publicShareApi.packageUrl(token)}>Download prepared ZIP</a> : <button className="button button--primary" type="button" onClick={() => void prepare()} disabled={pending}>Prepare bounded ZIP</button> : null}</div>
-          <div className="share-browser">{children.length === 0 ? <p className="empty-state">This shared folder is empty.</p> : children.map((child) => <button type="button" key={child.id} onClick={() => child.type === "folder" ? void openFolder(child.id) : undefined} disabled={pending || child.type === "file"}><span>{child.type === "folder" ? "DIR" : "FILE"}</span><strong>{child.name}</strong><small>{child.type === "file" ? formatBytes(child.sizeBytes) : "Open folder"}</small></button>)}</div>
-        </>}
-        <p className="form-error" role="alert">{message}</p>
+    <main className={`share-public-view ${share?.locked === true ? "share-public-view--locked" : "share-public-view--opened"}`}>
+      {share === undefined ? unavailable ? <div className="not-found-state"><strong>404</strong><span>Shared link not found</span></div> : <p className="share-public-loading">{message || "Checking share…"}</p> : share.locked ? <div className="share-locked-composition">
+        <form className="share-password-gate" aria-labelledby="shared-password-title" onSubmit={(event) => void unlock(event)}>
+          <p id="shared-password-title">Please enter<br />shared link password:</p>
+          <label className="sr-only" htmlFor="shared-link-password">Shared link password</label>
+          <input id="shared-link-password" type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="current-password" placeholder="Password..." required autoFocus />
+          <button className="share-password-submit" type="submit" disabled={pending}>{pending ? "Checking..." : "Enter"}</button>
+          <p className="share-password-error" role="alert">{message}</p>
+        </form>
+        <PublicShareReachability state={health.gateway} />
+      </div> : <div className="share-opened-composition">
+        <h1 id="public-share-title" className="share-public-title">saturn shared link</h1>
+        <section className="share-public-panel" aria-labelledby="public-share-title">
+          <div className="share-public-notice"><strong>{modeLabel}</strong><p>Any content delivered to a browser can still be copied. Saturn does not promise impossible download prevention.{share.mode === "browse" ? " Download permission is not granted for this link." : ""}</p></div>
+          <div className="share-public-facts"><span>Shared link expires:</span><strong>{expiry}</strong></div>
+          <PublicShareReachability state={health.gateway} />
+          <div className="share-public-files">
+            <div className="share-public-files__title"><span>Files list:</span>{history.length > 0 ? <button type="button" onClick={() => void back()} disabled={pending}>← Back</button> : null}</div>
+            <div className="share-browser" role="table" aria-label={`Shared files in ${share.resourceName}`}>
+              <div className="share-browser__head" role="row">
+                <span role="columnheader"><SortButton field="name" activeField={sort.field} direction={sort.direction} onChange={changeSort}>Name</SortButton></span>
+                <span role="columnheader"><SortButton field="size" activeField={sort.field} direction={sort.direction} onChange={changeSort}>Size</SortButton></span>
+                <span className="sr-only" role="columnheader">Action</span>
+              </div>
+              {entries.length === 0 ? <p className="share-browser__empty">This shared folder is empty.</p> : entries.map((child) => <div className="share-browser__row" role="row" key={child.id}>
+                <span role="cell">{child.type === "folder" ? <button className="share-browser__name share-browser__name--folder" type="button" onClick={() => void openFolder(child.id)} disabled={pending}>{child.name}</button> : <span className="share-browser__name share-browser__name--file">{child.name}</span>}</span>
+                <span role="cell">{formatBytes(child.sizeBytes)}</span>
+                <span role="cell">{child.type === "file" && share.mode !== "browse" ? <a className="share-browser__download" aria-label={`${share.mode === "view" ? "Open" : "Download"} ${child.name}`} href={share.resourceType === "file" ? publicShareApi.contentUrl(token) : publicShareApi.contentUrl(token, child.id)}>{share.mode === "view" ? "↗" : "↓"}</a> : null}</span>
+              </div>)}
+            </div>
+          </div>
+          {share.resourceType === "file" ? <a className="share-public-download-all" href={publicShareApi.contentUrl(token)}>{share.mode === "view" ? "Open file" : "Download all"} - {formatBytes(share.resourceSize)}</a> : share.mode === "download_folder" ? <button className="share-public-download-all" type="button" onClick={() => void prepareAndDownload()} disabled={pending}>{pending ? "Preparing..." : `Download all - ${formatBytes(bulkSize)}`}</button> : share.mode === "browse" ? <button className="share-public-download-all" type="button" disabled>{`Download all - ${formatBytes(bulkSize)}`}</button> : null}
+          <p className="share-public-error" role="alert">{message}</p>
+        </section>
       </div>}
-    </section></main>
+    </main>
   );
 }
 
-function LaboratoryView({ addNotice }: { readonly addNotice: (kind: Notice["kind"], message: string) => void }) {
-  const [assets, setAssets] = useState<readonly LaboratoryAssetInfo[]>([]);
-  const [clients, setClients] = useState<readonly LaboratoryClientInfo[]>([]);
-  const [resourceId, setResourceId] = useState(""); const [mode, setMode] = useState<LaboratoryAssetInfo["mode"]>("private"); const [assetLabel, setAssetLabel] = useState(""); const [disposition, setDisposition] = useState<LaboratoryAssetInfo["disposition"]>("attachment"); const [clientName, setClientName] = useState(""); const [token, setToken] = useState<string | undefined>(); const [fragment, setFragment] = useState<string | undefined>(); const [pending, setPending] = useState(false);
-  const load = async () => { try { const [nextAssets, nextClients] = await Promise.all([api.laboratoryAssets(), api.laboratoryClients()]); setAssets(nextAssets); setClients(nextClients); } catch { addNotice("error", "Laboratory registry could not be loaded."); } };
-  useEffect(() => { void load(); }, []);
-  const createAsset = async (event: SyntheticEvent<HTMLFormElement>) => { event.preventDefault(); setPending(true); try { const created = await api.createLaboratoryAsset({ resourceId, mode, ...(assetLabel.trim() ? { label: assetLabel } : {}), disposition }); setResourceId(""); setAssetLabel(""); setFragment((await api.laboratoryFragment(created.id)).fragment); await load(); addNotice("success", "Stable Laboratory asset created."); } catch { addNotice("error", "Asset policy rejected the request or recent owner proof is missing."); } finally { setPending(false); } };
-  const createClient = async (event: SyntheticEvent<HTMLFormElement>) => { event.preventDefault(); setPending(true); try { const created = await api.createLaboratoryClient(clientName); setClientName(""); setToken(created.token); await load(); addNotice("success", "Laboratory client token created for one-time copy."); } catch { addNotice("error", "Recent owner proof is required to create a client."); } finally { setPending(false); } };
-  const rotateClient = async (id: string) => { setPending(true); try { const rotated = await api.rotateLaboratoryClient(id); setToken(rotated.token); await load(); } catch { addNotice("error", "Client rotation requires recent owner proof."); } finally { setPending(false); } };
-  const revokeClient = async (id: string) => { setPending(true); try { await api.revokeLaboratoryClient(id); await load(); addNotice("success", "Laboratory client revoked."); } catch { addNotice("error", "Client revoke requires recent owner proof."); } finally { setPending(false); } };
-  const disableAsset = async (id: string) => { setPending(true); try { await api.disableLaboratoryAsset(id); await load(); addNotice("success", "Asset delivery disabled; source bytes were preserved."); } catch { addNotice("error", "Asset disable requires recent owner proof."); } finally { setPending(false); } };
-  const showFragment = async (id: string) => { try { setFragment((await api.laboratoryFragment(id)).fragment); } catch { addNotice("error", "Fragment is unavailable for this asset."); } };
-  return <section className="workspace laboratory" aria-labelledby="laboratory-title">
-    <header className="workspace__head"><div><p className="eyebrow">Stable Gateway assets</p><h1 className="page-title" id="laboratory-title">Laboratory</h1></div></header>
-    <section className="settings-section"><h2>Create asset</h2><p className="muted">Private is the safe default. Public modes require the global switch and an explicitly public resource classification.</p><form className="laboratory-form" onSubmit={(event) => void createAsset(event)}><label>Resource ID<input value={resourceId} onChange={(event) => setResourceId(event.target.value)} required /></label><label>Mode<select value={mode} onChange={(event) => setMode(event.target.value as LaboratoryAssetInfo["mode"])}><option value="private">Private</option><option value="public_immutable">Public immutable</option><option value="public_alias">Public mutable alias</option></select></label><label>Label<input value={assetLabel} onChange={(event) => setAssetLabel(event.target.value)} placeholder="Defaults to filename" /></label><label>Disposition<select value={disposition} onChange={(event) => setDisposition(event.target.value as LaboratoryAssetInfo["disposition"])}><option value="attachment">Attachment</option><option value="inline">Inline</option></select></label><button className="button button--primary" type="submit" disabled={pending}>Create asset</button></form>{fragment === undefined ? null : <div className="fragment-panel" role="status"><label>Gateway fragment<textarea value={fragment} readOnly rows={4} /></label><button className="button" type="button" onClick={() => void navigator.clipboard.writeText(fragment)}>Copy</button></div>}</section>
-    <section className="settings-section"><h2>Assets</h2><div className="share-list">{assets.length===0?<p className="empty-state">No Laboratory assets.</p>:assets.map((asset)=><article className="laboratory-row" key={asset.id}><div><strong>{asset.label}</strong><span>{asset.mode} · {asset.state}</span><small>{asset.id} · {asset.publicFilename}{asset.pinnedVersionId===undefined?"":" · pinned"}</small></div><div className="inline-actions"><button className="button" type="button" onClick={() => void showFragment(asset.id)} disabled={asset.state!=="active"}>Fragment</button><button className="button button--danger" type="button" onClick={() => void disableAsset(asset.id)} disabled={pending||asset.state!=="active"}>Disable</button></div></article>)}</div></section>
-    <section className="settings-section"><h2>Private Laboratory clients</h2><p className="muted">Tokens can read private asset URLs only. They cannot list Drive, mutate assets or access Storage Box.</p><form className="laboratory-client-form" onSubmit={(event) => void createClient(event)}><label>Client name<input value={clientName} onChange={(event) => setClientName(event.target.value)} required /></label><button className="button button--primary" type="submit" disabled={pending}>Create token</button></form>{token===undefined?null:<div className="one-time-code" role="status"><span>Copy this Bearer token now</span><strong>{token}</strong><small>Only an HMAC verifier is persisted.</small></div>}<div className="share-list">{clients.length===0?<p className="empty-state">No Laboratory clients.</p>:clients.map((client)=><article className="laboratory-row" key={client.id}><div><strong>{client.name}</strong><span>{client.state}</span><small>{client.lastUsedAt===undefined?"Never used":`Last used ${new Date(client.lastUsedAt).toLocaleString()}`}</small></div><div className="inline-actions"><button className="button" type="button" onClick={() => void rotateClient(client.id)} disabled={pending||client.state!=="active"}>Rotate</button><button className="button button--danger" type="button" onClick={() => void revokeClient(client.id)} disabled={pending||client.state!=="active"}>Revoke</button></div></article>)}</div></section>
+function CardHandle({ label, draggable, onKeyDown, onDragStart, onDragEnd }: {
+  readonly label: string;
+  readonly draggable: boolean;
+  readonly onKeyDown: (event: ReactKeyboardEvent<HTMLButtonElement>) => void;
+  readonly onDragStart?: ((event: DragEvent<HTMLButtonElement>) => void) | undefined;
+  readonly onDragEnd?: (() => void) | undefined;
+}) {
+  return <button className="card-handle" type="button" draggable={draggable} aria-label={label} aria-keyshortcuts="Alt+ArrowUp Alt+ArrowDown" title="Drag card · Alt+↑/↓" onKeyDown={onKeyDown} onDragStart={onDragStart} onDragEnd={onDragEnd}><span aria-hidden="true"><i /><i /><i /><i /></span></button>;
+}
+
+function UniversalCard({ ordinal, title, className = "", style, children, draggable = false, handleLabel, onHandleKeyDown, onDragStart, onDragOver, onDrop, onDragEnd }: {
+  readonly ordinal: number;
+  readonly title?: string;
+  readonly className?: string;
+  readonly style?: CSSProperties;
+  readonly children: ReactNode;
+  readonly draggable?: boolean;
+  readonly handleLabel?: string;
+  readonly onHandleKeyDown?: (event: ReactKeyboardEvent<HTMLButtonElement>) => void;
+  readonly onDragStart?: (event: DragEvent<HTMLButtonElement>) => void;
+  readonly onDragOver?: (event: DragEvent<HTMLElement>) => void;
+  readonly onDrop?: (event: DragEvent<HTMLElement>) => void;
+  readonly onDragEnd?: () => void;
+}) {
+  return <article className={`universal-card ${title === undefined ? "" : "universal-card--titled"} ${className}`} style={style} onDragOver={onDragOver} onDrop={onDrop}>
+    <header className="universal-card__head"><span className="universal-card__ordinal">{String(ordinal).padStart(2, "0")}</span>{title === undefined ? null : <h2>{title}</h2>}<CardHandle label={handleLabel ?? `Reorder card ${String(ordinal)}`} draggable={draggable} onKeyDown={onHandleKeyDown ?? (() => undefined)} onDragStart={onDragStart} onDragEnd={onDragEnd} /></header>
+    <div className="universal-card__body">{children}</div>
+  </article>;
+}
+
+function metricPercent(metric: OperatorOverview["cpu"] | OperatorOverview["ram"] | OperatorOverview["disk"]): number | undefined {
+  return metric.state === "available" ? Math.min(100, Math.max(0, metric.percent)) : undefined;
+}
+
+function isOperatorOverview(value: unknown): value is OperatorOverview {
+  if (typeof value !== "object" || value === null) return false;
+  const record = value as Record<string, unknown>;
+  return typeof record.sampledAt === "string"
+    && typeof record.cpu === "object" && record.cpu !== null
+    && typeof record.ram === "object" && record.ram !== null
+    && typeof record.disk === "object" && record.disk !== null
+    && typeof record.uptime === "object" && record.uptime !== null
+    && typeof record.storage === "object" && record.storage !== null
+    && typeof record.transfers === "object" && record.transfers !== null
+    && Array.isArray((record.transfers as Record<string, unknown>).tasks);
+}
+
+function formatUptime(seconds: number): string {
+  const days = Math.floor(seconds / 86_400);
+  const hours = Math.floor(seconds % 86_400 / 3_600);
+  const minutes = Math.floor(seconds % 3_600 / 60);
+  return `${String(days)}d ${String(hours).padStart(2, "0")}h ${String(minutes).padStart(2, "0")}m`;
+}
+
+const DASHBOARD_CARD_LAYOUT: Readonly<Record<DashboardCardName, { readonly columns: 1 | 2 | 4; readonly rows: 1 | 2 }>> = {
+  cpu: { columns: 2, rows: 1 },
+  ram: { columns: 2, rows: 1 },
+  disk: { columns: 2, rows: 1 },
+  uptime: { columns: 2, rows: 1 },
+  storage: { columns: 4, rows: 1 },
+  drop: { columns: 1, rows: 1 },
+  reachability: { columns: 1, rows: 1 },
+  tasks: { columns: 4, rows: 2 },
+};
+
+function dashboardPlacements(order: readonly DashboardCardName[]): ReadonlyMap<DashboardCardName, CSSProperties> {
+  const placements = new Map<DashboardCardName, CSSProperties>();
+  const oneColumnStarts = [1, 3, 5, 7] as const;
+  const oneColumnEnds = [2, 4, 6, 8] as const;
+  let row = 1;
+  let unit = 0;
+  for (const id of order) {
+    const layout = DASHBOARD_CARD_LAYOUT[id];
+    if (layout.columns === 4) {
+      if (unit > 0) { row += 1; unit = 0; }
+      placements.set(id, { gridColumn: "1 / 8", gridRow: `${String(row)} / span ${String(layout.rows)}` });
+      row += layout.rows;
+      continue;
+    }
+    if (layout.columns === 2) {
+      if (unit === 1 || unit === 3 || unit > 2) { row += 1; unit = 0; }
+      placements.set(id, { gridColumn: unit === 0 ? "1 / 4" : "5 / 8", gridRow: String(row) });
+      unit += 2;
+    } else {
+      placements.set(id, { gridColumn: `${String(oneColumnStarts[unit] ?? 1)} / ${String(oneColumnEnds[unit] ?? 2)}`, gridRow: String(row) });
+      unit += 1;
+    }
+    if (unit >= 4) { row += 1; unit = 0; }
+  }
+  return placements;
+}
+
+function formatRate(bytesPerSecond: number | undefined): string {
+  return bytesPerSecond === undefined ? "Sampling…" : `${formatBytes(Math.max(0, Math.round(bytesPerSecond)))}/s`;
+}
+
+const TRANSFER_STATE_LABELS: Readonly<Record<OperatorOverview["transfers"]["tasks"][number]["state"], string>> = {
+  queued: "Queued",
+  uploading: "Uploading",
+  verifying: "Verifying",
+  committing: "Committing",
+  waiting_retry: "Waiting retry",
+  downloading: "Downloading",
+  completed: "Completed",
+  failed: "Failed",
+};
+
+function TransferTasksBody({ overview }: { readonly overview: OperatorOverview | undefined }) {
+  const transfers = overview?.transfers;
+  const tasks = transfers?.tasks ?? [];
+  return <div className="transfer-panel">
+    <div className="transfer-flow" aria-label="Aggregate transfer flow">
+      <div><span>Upload flow</span><strong>{formatRate(transfers?.uploadBytesPerSecond)}</strong></div>
+      <div><span>Download flow</span><strong>{formatRate(transfers?.downloadBytesPerSecond)}</strong></div>
+      <div><span>Active</span><strong>{transfers === undefined ? "Unavailable" : String(transfers.activeCount)}</strong></div>
+      <div><span>Queued</span><strong>{transfers === undefined ? "Unavailable" : String(transfers.queuedCount)}</strong></div>
+    </div>
+    <div className="transfer-list" aria-live="polite">
+      {transfers === undefined ? <p className="transfer-empty">Transfer telemetry unavailable.</p> : tasks.length === 0 ? <p className="transfer-empty">No active or queued file transfers.</p> : tasks.map((task) => <article className="transfer-task" key={`${task.direction}:${task.id}`}>
+        <div className="transfer-task__identity"><span>{task.direction === "upload" ? "UPLOAD" : "DOWNLOAD"}</span><strong title={task.filename}>{task.filename}</strong></div>
+        <div className="transfer-task__state"><span>{TRANSFER_STATE_LABELS[task.state]}{task.queuePosition === undefined ? "" : ` · #${String(task.queuePosition)}`}</span><strong>{task.percent.toFixed(1)}%</strong></div>
+        <div className="transfer-task__progress"><progress max={100} value={task.percent} aria-label={`${task.filename} ${task.percent.toFixed(1)}%`} /><span>{formatBytes(task.transferredBytes)} / {formatBytes(task.totalBytes)}</span></div>
+        <strong className="transfer-task__rate">{formatRate(task.bytesPerSecond)}</strong>
+      </article>)}
+    </div>
+    <time className="transfer-sampled" dateTime={overview?.sampledAt}>{overview === undefined ? "No current sample" : `Updated ${new Date(overview.sampledAt).toLocaleTimeString()}`}</time>
+  </div>;
+}
+
+async function copyText(value: string): Promise<boolean> {
+  const clipboard = Reflect.get(navigator, "clipboard") as Clipboard | undefined;
+  try {
+    if (clipboard !== undefined) {
+      await clipboard.writeText(value);
+      return true;
+    }
+  } catch {
+    // Fall through to the selection-based copy path for restrictive browser contexts.
+  }
+  const textarea = document.createElement("textarea");
+  textarea.value = value;
+  textarea.readOnly = true;
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  textarea.style.pointerEvents = "none";
+  document.body.append(textarea);
+  textarea.select();
+  const execute = Reflect.get(document, "execCommand") as ((command: string) => boolean) | undefined;
+  try { return execute?.call(document, "copy") ?? false; }
+  catch { return false; }
+  finally { textarea.remove(); }
+}
+
+function beginClipboardWrite(challenge: Promise<{ readonly code: string }>): Promise<boolean> | undefined {
+  const clipboard = Reflect.get(navigator, "clipboard") as Clipboard | undefined;
+  if (clipboard === undefined || typeof ClipboardItem === "undefined") return undefined;
+  try {
+    const item = new ClipboardItem({
+      "text/plain": challenge.then((value) => new Blob([value.code], { type: "text/plain" })),
+    });
+    return clipboard.write([item]).then(() => true).catch(() => false);
+  } catch {
+    return undefined;
+  }
+}
+
+function DropCodeButton({ addNotice }: { readonly addNotice: (kind: Notice["kind"], message: string) => void }) {
+  const [pending, setPending] = useState(false);
+  const [issued, setIssued] = useState<{ readonly code: string; readonly expiresAt: string; readonly copied: boolean } | undefined>();
+
+  const create = async () => {
+    if (pending) return;
+    setPending(true);
+    try {
+      const challengeRequest = api.createDropCode();
+      const earlyCopy = beginClipboardWrite(challengeRequest);
+      const challenge = await challengeRequest;
+      const copiedEarly = earlyCopy === undefined ? false : await earlyCopy;
+      const copied = copiedEarly || await copyText(challenge.code);
+      setIssued({ ...challenge, copied });
+      addNotice(copied ? "success" : "error", copied
+        ? "Drop point code created and copied to the clipboard."
+        : "Drop point code created, but the browser blocked clipboard access. Copy it from the card.");
+    } catch {
+      addNotice("error", "Drop point code could not be created.");
+    } finally {
+      setPending(false);
+    }
+  };
+
+  const detail = issued === undefined
+    ? "Create a shared temporary upload code"
+    : `${issued.copied ? "Copied" : "Copy manually"} · expires ${new Date(issued.expiresAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
+  return <button className="metric metric--action" type="button" aria-label="Create and copy Drop point code" disabled={pending} onClick={() => void create()}>
+    <span className="metric__title" role="heading" aria-level={2}>Drop point code</span>
+    <strong>{pending ? "Creating…" : issued?.code ?? "Create & copy"}</strong>
+    <span>{detail}</span>
+  </button>;
+}
+
+function DashboardView({ storageHealth, preferences, setPreferences, addNotice }: {
+  readonly storageHealth: GatewayState;
+  readonly preferences: Omit<OwnerPreferences, "updatedAt">;
+  readonly setPreferences: (value: Omit<OwnerPreferences, "updatedAt">) => void;
+  readonly addNotice: (kind: Notice["kind"], message: string) => void;
+}) {
+  const [overview, setOverview] = useState<OperatorOverview | undefined>();
+  const [dragging, setDragging] = useState<DashboardCardName | undefined>();
+  const [dropTarget, setDropTarget] = useState<DashboardCardName | undefined>();
+  const load = useCallback(async () => {
+    try { const value: unknown = await api.overview(); setOverview(isOperatorOverview(value) ? value : undefined); }
+    catch { setOverview(undefined); }
+  }, []);
+  useEffect(() => {
+    void load();
+    const timer = window.setInterval(() => { if (!document.hidden) void load(); }, 2_000);
+    const visible = () => { if (!document.hidden) void load(); };
+    document.addEventListener("visibilitychange", visible);
+    return () => { window.clearInterval(timer); document.removeEventListener("visibilitychange", visible); };
+  }, [load]);
+  const persist = async (next: readonly DashboardCardName[]) => {
+    const previous = preferences;
+    const candidate = { ...preferences, dashboardOrder: next };
+    setPreferences(candidate);
+    try { setPreferences(ownerPreferences(await api.updatePreferences(candidate))); }
+    catch { setPreferences(previous); addNotice("error", "Dashboard order could not be saved."); }
+  };
+  const move = (source: DashboardCardName, target: DashboardCardName) => {
+    if (source === target) return;
+    const next = preferences.dashboardOrder.filter((item) => item !== source);
+    next.splice(next.indexOf(target), 0, source);
+    void persist(next);
+  };
+  const keyMove = (event: ReactKeyboardEvent<HTMLButtonElement>, item: DashboardCardName) => {
+    if (!event.altKey || !["ArrowUp", "ArrowDown"].includes(event.key)) return;
+    event.preventDefault();
+    const index = preferences.dashboardOrder.indexOf(item);
+    const target = preferences.dashboardOrder[index + (event.key === "ArrowUp" ? -1 : 1)];
+    if (target !== undefined) move(item, target);
+  };
+  const placements = useMemo(() => dashboardPlacements(preferences.dashboardOrder), [preferences.dashboardOrder]);
+  const content: Record<DashboardCardName, ReactNode> = {
+    cpu: <DashboardMetricBody title="CPU Usage" value={overview?.cpu.state === "available" ? `${overview.cpu.percent.toFixed(1)}%  [ ${String(overview.cpu.logicalCores)} logical cores ]` : "Unavailable"} percent={overview === undefined ? undefined : metricPercent(overview.cpu)} detail="Current API process utilization" />,
+    ram: <DashboardMetricBody title="RAM Usage" value={overview?.ram.state === "available" ? `${overview.ram.percent.toFixed(1)}%  [ ${formatBytes(overview.ram.usedBytes)} / ${formatBytes(overview.ram.totalBytes)} ]` : "Unavailable"} percent={overview === undefined ? undefined : metricPercent(overview.ram)} detail={overview?.ram.state === "available" ? `API process ${formatBytes(overview.ram.processBytes)}` : "No reliable sample"} />,
+    disk: <DashboardMetricBody title="Disk Usage" value={overview?.disk.state === "available" ? `${overview.disk.percent.toFixed(1)}%  [ ${formatBytes(overview.disk.usedBytes)} / ${formatBytes(overview.disk.totalBytes)} ]` : "Unavailable"} percent={overview === undefined ? undefined : metricPercent(overview.disk)} detail={overview?.disk.state !== "available" ? overview?.disk.reason ?? "No reliable sample" : "Local volume hosting the API"} />,
+    uptime: <DashboardMetricBody title="Uptime" value={overview?.uptime.state === "available" ? formatUptime(overview.uptime.seconds) : "Unavailable"} detail="Current API process" />,
+    storage: <DashboardMetricBody title="Storage" value={overview?.storage.state === "available" ? formatBytes(overview.storage.indexedBytes) : "Unavailable"} detail={overview?.storage.state === "available" ? `${String(overview.storage.fileCount)} indexed files · Gateway catalog usage` : overview?.storage.reason ?? "No reliable sample"} />,
+    drop: <DropCodeButton addNotice={addNotice} />,
+    reachability: <DashboardMetricBody title="Storage Reachability" value={storageHealth === "ready" ? "Available" : storageHealth === "checking" ? "Checking" : "Unavailable"} detail="SFTP storage readiness check" tone={storageHealth === "ready" ? "success" : "danger"} />,
+    tasks: <TransferTasksBody overview={overview} />,
+  };
+  return <section className="workspace" aria-labelledby="dashboard-title">
+    <PageHeader title="dashboard" id="dashboard-title" />
+    <div className="card-grid card-grid--dashboard">
+      {preferences.dashboardOrder.map((id, index) => <UniversalCard
+        ordinal={index + 1}
+        {...(id === "tasks" ? { title: "Tasks" } : {})}
+        className={`${id === "tasks" ? "dashboard-card--tasks" : "universal-card--metric"} dashboard-card--${String(DASHBOARD_CARD_LAYOUT[id].columns)}x${String(DASHBOARD_CARD_LAYOUT[id].rows)}${dropTarget === id ? " universal-card--drop-target" : ""}`}
+        style={placements.get(id) ?? {}}
+        draggable
+        handleLabel={`Reorder ${id} card`}
+        onHandleKeyDown={(event) => keyMove(event, id)}
+        onDragStart={(event) => { setDragging(id); event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", id); }}
+        onDragOver={(event) => { if (dragging !== undefined && dragging !== id) { event.preventDefault(); setDropTarget(id); } }}
+        onDrop={(event) => { event.preventDefault(); if (dragging !== undefined) move(dragging, id); setDragging(undefined); setDropTarget(undefined); }}
+        onDragEnd={() => { setDragging(undefined); setDropTarget(undefined); }}
+        key={id}
+      >{content[id]}</UniversalCard>)}
+    </div>
   </section>;
+}
+
+function DashboardMetricBody({ title, value, percent, detail, tone }: { readonly title: string; readonly value: string; readonly percent?: number | undefined; readonly detail: string; readonly tone?: "success" | "danger" }) {
+  return <div className={`metric${tone === undefined ? "" : ` metric--${tone}`}`}><h2>{title}</h2><strong>{value}</strong><span>{detail}</span>{percent === undefined ? null : <div className="metric__progress" role="meter" aria-label={`${title} ${percent.toFixed(1)}%`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={percent}><i style={{ width: `${String(percent)}%` }} /></div>}</div>;
+}
+
+function PageHeader({ eyebrow, title, id }: { readonly eyebrow?: string; readonly title: string; readonly id: string }) {
+  return <header className="workspace__head"><div>{eyebrow === undefined ? null : <p className="eyebrow">{eyebrow}</p>}<h1 className="page-title" id={id}>{title}</h1></div></header>;
+}
+
+function DocumentationView() {
+  return <section className="workspace" aria-labelledby="documentation-title">
+    <PageHeader eyebrow="Saturn operator reference" title="Documentation" id="documentation-title" />
+    <div className="documentation-content">
+      <UniversalCard ordinal={1} title="Storage model"><p>All storage access passes through Saturn Gateway. The owner UI never receives Storage Box credentials.</p><p>Preinstalled root folders are rename-only; ordinary root folders remain fully manageable.</p></UniversalCard>
+      <UniversalCard ordinal={2} title="Access model"><p>The owner workspace uses one Access Key. Drop sessions, shared links, devices and backup producers use separate scoped capabilities.</p></UniversalCard>
+      <UniversalCard ordinal={3} title="Operations"><p>Implementation, verification and recovery runbooks are maintained in the project documentation directory on the Saturn host.</p></UniversalCard>
+      <UniversalCard ordinal={4} title="Changing storage"><p>Settings → Security can validate and select an independent SFTP target after recent owner proof. Saturn migrates zero file bytes, rebuilds the visible catalog and revokes capabilities that belonged to the previous file set.</p><p>The previous storage remains untouched. Selecting it again requires its credential and performs another validated index rebuild.</p></UniversalCard>
+    </div>
+  </section>;
+}
+
+function StatusRow({ label, state, detail }: { readonly label: string; readonly state: "ready" | "unavailable" | "busy"; readonly detail?: string | undefined }) {
+  return <div className="status-row"><span>{label}</span><span className={`semantic-status semantic-status--${state}`}>{detail ?? (state === "ready" ? "Service Reachability" : state === "busy" ? "Busy" : "Unavailable")}<i aria-hidden="true" /></span></div>;
 }
 
 function SettingsView({ preferences, setPreferences, addNotice, onAnonymous }: {
@@ -743,12 +1794,33 @@ function SettingsView({ preferences, setPreferences, addNotice, onAnonymous }: {
   readonly addNotice: (kind: Notice["kind"], message: string) => void;
   readonly onAnonymous: () => void;
 }) {
-  const [draft, setDraft] = useState(preferences);
+  const [accentDraft, setAccentDraft] = useState(preferences.accentColor);
   const [accessKey, setAccessKey] = useState("");
   const [pending, setPending] = useState(false);
   const [reauthed, setReauthed] = useState(false);
   const [revokeDialog, setRevokeDialog] = useState(false);
+  const [accessKeyDialog, setAccessKeyDialog] = useState(false);
+  const [accessKeyChange, setAccessKeyChange] = useState({ currentAccessKey: "", newAccessKey: "", confirmation: "" });
+  const [kernelTokenDialog, setKernelTokenDialog] = useState(false);
+  const [kernelToken, setKernelToken] = useState("");
+  const [kernel, setKernel] = useState<KernelStatus | undefined>();
+  const [kernelUrl, setKernelUrl] = useState("");
+  const [recovery, setRecovery] = useState<RecoveryStatus | undefined>();
+  const [restoreDialog, setRestoreDialog] = useState(false);
+  const [restoreCandidate, setRestoreCandidate] = useState<RecoveryRestoreCandidate | undefined>();
+  const [restoreResult, setRestoreResult] = useState<RecoveryRestoreResult | undefined>();
+  const [restoreStage, setRestoreStage] = useState<"idle" | "uploading" | "validating" | "ready" | "applying" | "complete" | "error">("idle");
+  const [restoreProgress, setRestoreProgress] = useState(0);
+  const [restoreConfirmed, setRestoreConfirmed] = useState(false);
+  const [restoreError, setRestoreError] = useState("");
+  const restoreInput = useRef<HTMLInputElement>(null);
+  const [updates, setUpdates] = useState<UpdateStatus | undefined>();
+  const [updateDialog, setUpdateDialog] = useState(false);
+  const [events, setEvents] = useState<readonly AuditEventInfo[]>([]);
+  const [draggingCard, setDraggingCard] = useState<SettingsCardName | undefined>();
+  const [dropCard, setDropCard] = useState<SettingsCardName | undefined>();
   const [telegram, setTelegram] = useState<TelegramStatus | undefined>();
+  const [dropBuffer, setDropBuffer] = useState<{ readonly capacity?: NonNullable<DropSessionInfo["buffer"]>; readonly sessionTtlMs: number; readonly continuationTtlMs: number; readonly workers: number; readonly intervalMs: number } | undefined>();
   const [linkCode, setLinkCode] = useState<{ readonly code: string; readonly expiresAt: string } | undefined>();
   const [unlinkDialog, setUnlinkDialog] = useState(false);
   const [devices, setDevices] = useState<readonly DeviceInfo[]>([]);
@@ -759,26 +1831,115 @@ function SettingsView({ preferences, setPreferences, addNotice, onAnonymous }: {
   const [backupName, setBackupName] = useState("");
   const [backupSlug, setBackupSlug] = useState("");
   const [backupToken, setBackupToken] = useState<string | undefined>();
+  const [storage, setStorage] = useState<StorageConnectionStatus | undefined>();
+  const [storageDialog, setStorageDialog] = useState(false);
+  const [storageDraft, setStorageDraft] = useState<StorageConnectionInput>({ host: "", port: 22, username: "", root: ".", hostFingerprint: "", authMode: "password_file", credential: "" });
+  const [storageTested, setStorageTested] = useState(false);
+  const [storageConfirmed, setStorageConfirmed] = useState(false);
+  const [storageStage, setStorageStage] = useState<"idle" | "testing" | "tested" | "switching">("idle");
+
+  useEffect(() => { setAccentDraft(preferences.accentColor); }, [preferences.accentColor]);
+  useEffect(() => {
+    document.documentElement.style.setProperty("--accent", /^#[0-9a-fA-F]{6}$/.test(accentDraft) ? accentDraft : preferences.accentColor);
+    return () => { document.documentElement.style.setProperty("--accent", preferences.accentColor); };
+  }, [accentDraft, preferences.accentColor]);
+
+  const loadKernel = async () => {
+    try { const value = await api.kernelStatus(); setKernel(value); setKernelUrl(value.url ?? ""); }
+    catch { setKernel(undefined); }
+  };
+  const loadRecovery = async () => { try { setRecovery(await api.recoveryStatus()); } catch { setRecovery(undefined); } };
+  const loadUpdates = async () => { try { setUpdates(await api.updateStatus()); } catch { setUpdates(undefined); } };
+  const loadEvents = async () => {
+    try {
+      const latest = await api.activity(undefined, 100);
+      setEvents((current) => {
+        const merged = new Map([...current, ...latest].map((item) => [item.id, item]));
+        return [...merged.values()].sort((left, right) => right.sequence - left.sequence).slice(0, 200);
+      });
+    } catch { /* The visible unavailable state remains honest. */ }
+  };
   const loadTelegram = async () => { try { setTelegram(await api.telegramStatus()); } catch { addNotice("error", "Telegram status could not be loaded."); } };
+  const loadDropBuffer = async () => { try { setDropBuffer(await api.dropBuffer()); } catch { setDropBuffer(undefined); } };
   const loadDevices = async () => { try { setDevices(await api.devices()); } catch { addNotice("error", "Device list could not be loaded."); } };
   const loadBackupServices = async () => { try { setBackupServices(await api.backupServices()); } catch { addNotice("error", "Backup producer dashboard could not be loaded."); } };
-  useEffect(() => { void loadTelegram(); void loadDevices(); void loadBackupServices(); }, []);
-  const saveAppearance = async (event: SyntheticEvent<HTMLFormElement>) => {
-    event.preventDefault(); setPending(true);
-    try { const saved = await api.updatePreferences(draft); setPreferences(appearancePreferences(saved)); addNotice("success", "Appearance updated across the owner workspace."); }
-    catch { addNotice("error", "Appearance could not be saved."); }
+  const loadStorage = async () => { try { setStorage(await api.storageStatus()); } catch { setStorage(undefined); } };
+  useEffect(() => {
+    void Promise.all([loadKernel(), loadRecovery(), loadUpdates(), loadEvents(), loadTelegram(), loadDropBuffer(), loadDevices(), loadBackupServices(), loadStorage()]);
+    const timer = window.setInterval(() => { if (!document.hidden) void loadEvents(); }, 5_000);
+    const visible = () => { if (!document.hidden) void loadEvents(); };
+    document.addEventListener("visibilitychange", visible);
+    return () => { window.clearInterval(timer); document.removeEventListener("visibilitychange", visible); };
+  }, []);
+
+  const persistPreferences = async (candidate: Omit<OwnerPreferences, "updatedAt">, message: string) => {
+    const previous = preferences;
+    setPreferences(candidate);
+    try { setPreferences(ownerPreferences(await api.updatePreferences(candidate))); addNotice("success", message); }
+    catch { setPreferences(previous); addNotice("error", "Preferences could not be saved."); }
+  };
+  const applyAccent = async (event: SyntheticEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!/^#[0-9a-fA-F]{6}$/.test(accentDraft)) { addNotice("error", "Accent must be a six-digit hexadecimal color."); return; }
+    setPending(true);
+    try { await persistPreferences({ ...preferences, accentColor: accentDraft.toLowerCase() }, "Accent color applied."); }
     finally { setPending(false); }
+  };
+  const changeSidebarMode = (sidebarMode: OwnerPreferences["sidebarMode"]) => {
+    if (sidebarMode !== preferences.sidebarMode) void persistPreferences({ ...preferences, sidebarMode }, "Sidebar behavior updated.");
+  };
+  const persistSettingsOrder = async (next: readonly SettingsCardName[]) => {
+    await persistPreferences({ ...preferences, settingsOrder: next }, "Settings order updated.");
+  };
+  const moveSettingsCard = (source: SettingsCardName, target: SettingsCardName) => {
+    if (source === target) return;
+    const next = preferences.settingsOrder.filter((item) => item !== source);
+    next.splice(next.indexOf(target), 0, source);
+    void persistSettingsOrder(next);
+  };
+  const moveSettingsCardByKeyboard = (event: ReactKeyboardEvent<HTMLButtonElement>, item: SettingsCardName) => {
+    if (!event.altKey || !["ArrowUp", "ArrowDown"].includes(event.key)) return;
+    event.preventDefault();
+    const index = preferences.settingsOrder.indexOf(item);
+    const target = preferences.settingsOrder[index + (event.key === "ArrowUp" ? -1 : 1)];
+    if (target !== undefined) moveSettingsCard(item, target);
   };
   const reauthenticate = async (event: SyntheticEvent<HTMLFormElement>) => {
     event.preventDefault(); if (!accessKey) return; setPending(true);
     try { await api.reauthenticate(accessKey); setAccessKey(""); setReauthed(true); addNotice("success", "Recent owner proof accepted; the session was rotated."); }
-    catch { setAccessKey(""); addNotice("error", "Re-authentication failed."); }
+    catch { setAccessKey(""); setReauthed(false); addNotice("error", "Re-authentication failed."); }
+    finally { setPending(false); }
+  };
+  const changeOwnerAccessKey = async (event: SyntheticEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (accessKeyChange.newAccessKey !== accessKeyChange.confirmation) { addNotice("error", "Replacement Access Key entries do not match."); return; }
+    setPending(true);
+    try {
+      if (!reauthed) await api.reauthenticate(accessKeyChange.currentAccessKey);
+      const result = await api.changeAccessKey(accessKeyChange);
+      setAccessKeyChange({ currentAccessKey: "", newAccessKey: "", confirmation: "" });
+      setAccessKeyDialog(false); setReauthed(true);
+      addNotice("success", `Access Key changed; ${String(result.revokedSessions)} other session(s) revoked.`);
+    } catch { setAccessKeyChange({ currentAccessKey: "", newAccessKey: "", confirmation: "" }); addNotice("error", "Access Key change was rejected; the previous key remains active."); }
+    finally { setPending(false); }
+  };
+  const changeKernelUrl = async () => {
+    if (!kernelUrl || kernelUrl === kernel?.url || pending) return;
+    setPending(true);
+    try { const value = await api.changeKernelUrl(kernelUrl); setKernel(value); setKernelUrl(value.url ?? ""); addNotice("success", "Kernel URL validated and activated."); }
+    catch { setKernelUrl(kernel?.url ?? ""); addNotice("error", "Kernel validation failed; the previous URL remains active."); }
+    finally { setPending(false); }
+  };
+  const rotateKernelToken = async (event: SyntheticEvent<HTMLFormElement>) => {
+    event.preventDefault(); if (!kernelToken) return; setPending(true);
+    try { const value = await api.rotateKernelToken(kernelToken); setKernel(value); setKernelToken(""); setKernelTokenDialog(false); addNotice("success", "Kernel token validated and activated."); }
+    catch { setKernelToken(""); addNotice("error", "Kernel token validation failed; the previous token remains active."); }
     finally { setPending(false); }
   };
   const revoke = async () => {
     setPending(true);
     try { const result = await api.revokeSessions(); addNotice("info", `${String(result.revoked)} owner session(s) revoked.`); onAnonymous(); }
-    catch { addNotice("error", reauthed ? "Session revocation failed." : "Re-authenticate before revoking all sessions."); setRevokeDialog(false); }
+    catch { addNotice("error", "Session revocation requires recent owner proof."); setRevokeDialog(false); }
     finally { setPending(false); }
   };
   const createLink = async () => {
@@ -815,71 +1976,181 @@ function SettingsView({ preferences, setPreferences, addNotice, onAnonymous }: {
   };
   const rotateBackupService = async (id: string) => { setPending(true); try { const rotated = await api.rotateBackupService(id); setBackupToken(rotated.token); await loadBackupServices(); addNotice("success", "Producer token rotated with a bounded overlap window."); } catch { addNotice("error", "Producer token rotation requires recent owner proof."); } finally { setPending(false); } };
   const revokeBackupService = async (id: string) => { setPending(true); try { await api.revokeBackupService(id); await loadBackupServices(); addNotice("success", "Producer access revoked; committed backups were preserved."); } catch { addNotice("error", "Producer revoke requires recent owner proof."); } finally { setPending(false); } };
-  return (
-    <section className="workspace settings" aria-labelledby="settings-title">
-      <header className="workspace__head"><div><p className="eyebrow">Owner controls</p><h1 className="page-title" id="settings-title">Settings</h1></div></header>
-      <section className="settings-section">
-        <h2>Appearance</h2><p className="muted">Exactly three theme inputs drive login and authenticated views.</p>
-        <form className="theme-form" onSubmit={(event) => void saveAppearance(event)}>
-          {(["darkColor", "lightColor", "accentColor"] as const).map((field) => (
-            <label key={field}>{field === "darkColor" ? "Dark" : field === "lightColor" ? "Light" : "Accent"}<span><input type="color" value={draft[field]} onChange={(event) => setDraft({ ...draft, [field]: event.target.value })} /><input value={draft[field]} onChange={(event) => setDraft({ ...draft, [field]: event.target.value })} pattern="#[0-9a-fA-F]{6}" /></span></label>
-          ))}
-          <div className="inline-actions"><button className="button" type="button" onClick={() => setDraft(defaultPreferences)}>Reset</button><button className="button button--primary" type="submit" disabled={pending}>Save appearance</button></div>
-        </form>
-      </section>
-      <section className="settings-section">
-        <h2>Telegram and Drop</h2>
-        <p className="muted">Provider: {telegram?.provider.state ?? "checking"}. Bound identity: {telegram?.binding === undefined ? "none" : telegram.binding.displayName ?? telegram.binding.userId}.</p>
-        {linkCode === undefined ? null : <div className="one-time-code" role="status"><span>Send to the bot</span><strong>/link {linkCode.code}</strong><small>Expires {new Date(linkCode.expiresAt).toLocaleTimeString()}. It is not stored in the browser.</small></div>}
-        <div className="inline-actions">
-          <button className="button" type="button" onClick={() => void loadTelegram()} disabled={pending}>Refresh</button>
-          <button className="button button--primary" type="button" onClick={() => void createLink()} disabled={pending || !reauthed}>Create link code</button>
-          <button className="button button--danger" type="button" onClick={() => setUnlinkDialog(true)} disabled={pending || !reauthed || telegram?.binding === undefined}>Unlink</button>
+  const openStorageDialog = () => {
+    setStorageDraft({ host: storage?.host ?? "", port: storage?.port ?? 22, username: storage?.username ?? "", root: storage?.root ?? ".", hostFingerprint: storage?.hostFingerprint ?? "", authMode: storage?.authMode ?? "password_file", credential: "" });
+    setStorageTested(false); setStorageConfirmed(false); setStorageStage("idle"); setStorageDialog(true);
+  };
+  const updateStorageDraft = (patch: Partial<StorageConnectionInput>) => { setStorageDraft((current) => ({ ...current, ...patch })); setStorageTested(false); setStorageStage("idle"); };
+  const testStorage = async () => {
+    if (pending || !storageDraft.credential) return;
+    setPending(true); setStorageStage("testing");
+    try { await api.testStorage(storageDraft); setStorageTested(true); setStorageStage("tested"); addNotice("success", "Storage identity, root and credential were verified."); }
+    catch { setStorageTested(false); setStorageStage("idle"); addNotice("error", "Storage validation failed. The active profile was not changed."); }
+    finally { setPending(false); }
+  };
+  const switchStorage = async () => {
+    if (pending || !storageTested || !storageConfirmed || !storageDraft.credential) return;
+    setPending(true); setStorageStage("switching");
+    try {
+      const result = await api.switchStorage(storageDraft);
+      setStorage(result); setStorageDraft((current) => ({ ...current, credential: "" })); setStorageDialog(false);
+      addNotice("success", `Storage switched: ${String(result.indexed?.files ?? 0)} files indexed, 0 bytes migrated.`);
+      window.setTimeout(() => window.location.assign("/files"), 250);
+    } catch { setStorageStage("tested"); addNotice("error", "Storage switch failed; the previous profile and catalog remain active."); }
+    finally { setPending(false); }
+  };
+  const createRecoverySnapshot = async () => {
+    if (pending) return;
+    setPending(true);
+    try {
+      const result = await downloadRecoverySnapshot();
+      addNotice("success", `${result.filename} created${result.createdAt === undefined ? "" : ` at ${new Date(result.createdAt).toLocaleString("ru-RU")}`} and downloaded.`);
+    } catch {
+      addNotice("error", "Snapshot creation failed. No incomplete archive was downloaded; retry is safe.");
+    } finally {
+      setPending(false);
+      await loadRecovery();
+    }
+  };
+  const openRestore = () => {
+    setRestoreDialog(true); setRestoreCandidate(undefined); setRestoreResult(undefined); setRestoreStage("idle"); setRestoreProgress(0); setRestoreConfirmed(false); setRestoreError("");
+  };
+  const chooseRestore = async (file: File | undefined) => {
+    if (file === undefined) return;
+    if (recovery !== undefined && file.size > recovery.maxArchiveBytes) {
+      setRestoreStage("error"); setRestoreError(`Archive exceeds the ${formatBytes(recovery.maxArchiveBytes)} compressed-size limit.`); return;
+    }
+    setRestoreCandidate(undefined); setRestoreResult(undefined); setRestoreProgress(0); setRestoreConfirmed(false); setRestoreError(""); setRestoreStage("uploading");
+    try {
+      const candidate = await uploadRecoverySnapshot(
+        file,
+        (progress) => { setRestoreProgress(progress); if (progress >= 1) setRestoreStage("validating"); },
+        recovery?.maxChunkBytes,
+      );
+      setRestoreCandidate(candidate); setRestoreStage("ready");
+    } catch {
+      setRestoreStage("error"); setRestoreError("The archive was rejected before mutation. Select a complete compatible Saturn ZIP and try again.");
+    } finally {
+      if (restoreInput.current !== null) restoreInput.current.value = "";
+    }
+  };
+  const discardRestore = async () => {
+    const id = restoreCandidate?.id;
+    if (id !== undefined) await api.cancelRecoveryRestore(id).catch(() => undefined);
+    setRestoreDialog(false); setRestoreCandidate(undefined); setRestoreResult(undefined); setRestoreStage("idle"); setRestoreProgress(0); setRestoreConfirmed(false); setRestoreError("");
+  };
+  const applyRestore = async () => {
+    if (restoreCandidate === undefined || !restoreConfirmed || restoreStage !== "ready") return;
+    setRestoreStage("applying"); setRestoreError("");
+    try {
+      const result = await api.applyRecoveryRestore(restoreCandidate.id);
+      setRestoreResult(result); setRestoreStage("complete"); setRestoreConfirmed(false);
+      addNotice("success", `Snapshot restored and verified in ${String(result.measuredRtoMs)} ms. Sign in again before continuing.`);
+    } catch (error) {
+      setRestoreStage("error");
+      setRestoreError(error instanceof ApiError && error.status === 500
+        ? "Restore failed. Saturn attempted the verified pre-restore rollback; inspect Logs before retrying."
+        : "Restore could not start. Live state was not reported as restored.");
+    } finally {
+      await loadRecovery().catch(() => undefined);
+    }
+  };
+
+  const cards: Record<SettingsCardName, ReactNode> = {
+    appearance: <div className="settings-groups">
+      <form className="settings-group appearance-form" onSubmit={(event) => void applyAccent(event)}>
+        <div><h3>Color correction</h3><p>Accent changes preview immediately. Only Apply color persists the value.</p></div>
+        <div className="color-control"><input aria-label="Accent color picker" type="color" value={/^#[0-9a-fA-F]{6}$/.test(accentDraft) ? accentDraft : preferences.accentColor} onChange={(event) => setAccentDraft(event.target.value)} /><input aria-label="Accent color" value={accentDraft} onChange={(event) => setAccentDraft(event.target.value)} onBlur={() => setAccentDraft(/^#[0-9a-fA-F]{6}$/.test(accentDraft) ? accentDraft.toLowerCase() : preferences.accentColor)} pattern="#[0-9a-fA-F]{6}" /><button className="button" type="button" onClick={() => setAccentDraft("#00a8ff")}>Reset color</button><button className="button button--primary" type="submit" disabled={pending}>Apply color</button></div>
+      </form>
+      <fieldset className="settings-group sidebar-mode-fieldset"><legend>Left menu position</legend><p>Reveal the sidebar from the edge or keep it fixed on wide screens.</p><label><input type="checkbox" checked={preferences.sidebarMode === "auto-hide"} onChange={(event) => changeSidebarMode(event.target.checked ? "auto-hide" : "fixed")} />Auto-hide the left menu on wide screens</label></fieldset>
+    </div>,
+    security: <div className="settings-groups">
+      <section className="settings-group settings-group--access"><h3>Changing Access Key</h3><p>Replacement is atomic and revokes every other active browser session.</p><button className="button settings-action" type="button" disabled={pending} onClick={() => setAccessKeyDialog(true)}>Start Access Key change</button></section>
+      <section className="settings-group settings-group--kernel"><h3>Connection with Kernel</h3><form className="kernel-url-form" onSubmit={(event) => { event.preventDefault(); void changeKernelUrl(); }}><input aria-label="Kernel URL" title="Press Enter or leave the field to validate a changed endpoint" type="url" value={kernelUrl} onChange={(event) => setKernelUrl(event.target.value)} onBlur={() => void changeKernelUrl()} placeholder="https://kernel.example.net" /><StatusRow label={`${kernel?.identity ?? "Kernel Core"} · revision ${String(kernel?.revision ?? 0)}`} state={kernel === undefined ? "busy" : kernel.reachability === "ready" ? "ready" : "unavailable"} detail={kernel === undefined ? "Checking" : kernel.reachability === "ready" ? "Service Reachability" : kernel.configured ? "Unreachable" : "Not configured"} /></form><button className="button button--wide" type="button" disabled={pending || !reauthed || !kernelUrl} onClick={() => setKernelTokenDialog(true)}>Change secure Kernel access token</button></section>
+      <details className="settings-group auxiliary-settings security-advanced"><summary>Advanced security and owner proof</summary><div className="settings-subgroups">
+        <section className="settings-subgroup"><h3>Recent owner proof</h3><p>Unlocks Kernel, storage, device and session mutations for a short bounded window. The field always opens empty.</p><form className="reauth-form" onSubmit={(event) => void reauthenticate(event)}><label>Current Access Key<input type="password" value={accessKey} onChange={(event) => setAccessKey(event.target.value)} autoComplete="current-password" required /></label><button className="button" type="submit" disabled={pending || !accessKey}>Verify owner</button></form></section>
+        <section className="settings-subgroup storage-connection"><h3>Storage connection</h3><p>The active SFTP profile is Gateway-only. Credentials are write-only and are never returned to this page.</p><StatusRow label={storage === undefined ? "Storage profile" : `${storage.username}@${storage.host}:${String(storage.port)} · ${storage.root}`} state={storage === undefined ? "busy" : storage.reachability === "ready" ? "ready" : "unavailable"} detail={storage === undefined ? "Checking" : `${storage.source} · revision ${String(storage.revision)}`} /><p className="setting-meta">Changing this profile does not migrate files. Saturn validates and indexes the target as an independent file set.</p><button className="button settings-action" type="button" disabled={pending || !reauthed} onClick={openStorageDialog}>Configure storage</button></section>
+        <section className="settings-subgroup"><h3>Drop upload buffer</h3><p>Public and in-house uploads are accepted locally, verified and drained to Storage Box by bounded workers.</p><StatusRow label="Local upload buffer" state={dropBuffer?.capacity?.state === "available" || dropBuffer?.capacity?.state === "warning" ? "ready" : "unavailable"} detail={dropBuffer?.capacity === undefined ? "Unavailable" : `${dropBuffer.capacity.state} · ${formatBytes(dropBuffer.capacity.reservedBytes)} / ${formatBytes(dropBuffer.capacity.maxBytes)}`} /><p className="setting-meta">{dropBuffer === undefined ? "Status unavailable" : `${String(dropBuffer.workers)} workers · ${String(Math.round(dropBuffer.sessionTtlMs / 60_000))} min absolute session`}</p><button className="button settings-action" type="button" onClick={() => void loadDropBuffer()} disabled={pending}>Refresh buffer</button></section>
+        <section className="settings-subgroup"><h3>Scoped device access</h3><form className="device-form" onSubmit={(event) => void createDevice(event)}><label>Device name<input value={deviceName} onChange={(event) => setDeviceName(event.target.value)} maxLength={80} required /></label><fieldset><legend>Allowed roots</legend>{[{ id: MASTERMIND_RESOURCE_ID, label: "Mastermind" }, { id: SYNC_RESOURCE_ID, label: "Sync" }, { id: VOLT_RESOURCE_ID, label: "Volt" }].map(({ id, label }) => <label key={id}><input type="checkbox" checked={deviceScopes.includes(id)} onChange={() => toggleDeviceScope(id)} />{label}</label>)}</fieldset><button className="button settings-action" type="submit" disabled={pending || !reauthed || deviceScopes.length === 0}>Create device password</button></form>{deviceToken === undefined ? null : <div className="one-time-code" role="status"><span>Copy this WebDAV password now</span><strong>{deviceToken}</strong><small>It is held only in page memory.</small></div>}<div className="compact-list">{devices.map((device) => <article key={device.id}><div><strong>{device.name}</strong><span>{device.state} · {device.scopeIds.length} root(s)</span></div><button className="button button--danger" type="button" disabled={pending || device.state !== "active"} onClick={() => void revokeDevice(device.id)}>Revoke</button></article>)}</div></section>
+        <section className="settings-subgroup settings-group--danger"><h3>Sessions</h3><p>Revoke every active browser session, including this one. Stored files remain unchanged.</p><button className="button button--danger settings-action" type="button" disabled={!reauthed || pending} onClick={() => setRevokeDialog(true)}>Revoke all sessions</button></section>
+      </div></details>
+    </div>,
+    telegram: <div className="settings-groups">
+      <section className="settings-group"><h3>Bot provider</h3><p>Provider credentials stay on the Gateway. Saturn returns only public bot identity and reachability.</p><StatusRow label={telegram?.provider.bot?.username === undefined ? "Telegram provider" : `@${telegram.provider.bot.username}`} state={telegram === undefined ? "busy" : telegram.provider.state === "ready" ? "ready" : "unavailable"} detail={telegram?.provider.state ?? "Checking"} /><button className="button settings-action" type="button" onClick={() => void loadTelegram()} disabled={pending}>Refresh status</button></section>
+      <section className="settings-group"><h3>Operator binding</h3><p>The bot may activate Saturn's internal Drop-code mechanism; Drop-code issuance itself remains a Gateway capability.</p><p className="setting-meta">Bound identity: <strong>{telegram?.binding === undefined ? "none" : telegram.binding.displayName ?? telegram.binding.userId}</strong></p>{linkCode === undefined ? null : <div className="one-time-code" role="status"><span>Send this command to the bot</span><strong>/link {linkCode.code}</strong><small>Expires {new Date(linkCode.expiresAt).toLocaleTimeString()}.</small></div>}<div className="inline-actions"><button className="button" type="button" onClick={() => void createLink()} disabled={pending || !reauthed || telegram?.provider.state !== "ready"}>Create link code</button><button className="button button--danger" type="button" onClick={() => setUnlinkDialog(true)} disabled={pending || !reauthed || telegram?.binding === undefined}>Unlink Telegram</button></div><p className="setting-meta">Binding changes require recent owner proof from Security.</p></section>
+    </div>,
+    backup: <div className="settings-groups">
+      <section className="settings-group"><h3>System snapshot</h3><p>Logical snapshots contain authoritative state and personalization, but no plaintext passwords or service tokens.</p><button className="button settings-action" type="button" disabled={pending || !recovery?.exportEnabled} title={recovery?.reason} onClick={() => void createRecoverySnapshot()}>{pending ? "Creating snapshot…" : "Create and download snapshot"}</button></section>
+      <section className="settings-group"><h3>Restore snapshot</h3><p>Restore validates the complete archive, creates a pre-restore snapshot, blocks concurrent writes and rolls back if post-restore health fails.</p><button className="button settings-action" type="button" disabled={pending || !recovery?.restoreEnabled} title={recovery?.reason} onClick={openRestore}>Restore snapshot</button>{recovery?.reason === undefined ? <p className="setting-meta">Ready · compressed archive limit {formatBytes(recovery?.maxArchiveBytes ?? 0)}</p> : <p className="setting-meta">{recovery.reason}</p>}</section>
+      <details className="settings-group auxiliary-settings"><summary>Backup producer identities</summary><p>Producers upload only to Gateway-derived namespaces and cannot list or read backup bytes.</p><form className="backup-service-form" onSubmit={(event) => void createBackupService(event)}><label>Service name<input value={backupName} onChange={(event) => setBackupName(event.target.value)} maxLength={100} required /></label><label>Immutable slug<input value={backupSlug} onChange={(event) => setBackupSlug(event.target.value.toLowerCase())} pattern="[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?" maxLength={63} required /></label><button className="button" type="submit" disabled={pending || !reauthed}>Create token</button></form>{backupToken === undefined ? null : <div className="one-time-code" role="status"><span>Copy this producer token now</span><strong>{backupToken}</strong><small>It is held only in page memory.</small></div>}<div className="compact-list">{backupServices.map((service) => <article key={service.id}><div><strong>{service.name}</strong><span>{service.slug} · {service.state} · {service.fresh ? "fresh" : "stale/no success"} · {formatBytes(service.usage.storedBytes)}</span></div><div className="inline-actions"><button className="button" type="button" disabled={pending || service.state !== "active"} onClick={() => void rotateBackupService(service.id)}>Rotate</button><button className="button button--danger" type="button" disabled={pending || service.state !== "active"} onClick={() => void revokeBackupService(service.id)}>Revoke</button></div></article>)}</div></details>
+    </div>,
+    updates: <div className="settings-groups"><section className="settings-group"><h3>Update pipeline</h3><p>Release discovery comes from the approved registry; replacement and rollback are performed only by the privileged local updater.</p><p>Current installed version: <strong className="accent-text">v{updates?.installedVersion ?? "unknown"}</strong></p><div className="settings-status-stack"><StatusRow label="Local updater agent" state={updates === undefined ? "busy" : updates.updater.state} detail={updates?.updater.reason ?? (updates === undefined ? "Checking" : undefined)} /><StatusRow label="Kernel / approved release registry" state={updates === undefined ? "busy" : updates.registry.state} detail={updates?.registry.reason ?? (updates === undefined ? "Checking" : undefined)} /></div><button className="button settings-action" type="button" onClick={() => { setUpdateDialog(true); void loadUpdates(); }}>Check for updates</button></section></div>,
+    logs: <div className="settings-groups"><section className="settings-group logs-group"><div className="logs-actions"><p>Compact ordered audit stream. The browser keeps at most 200 visible events.</p><a className="button" href="/api/v1/activity/export?limit=10000" download>Download archived logs</a></div><div className="log-table" role="log" aria-live="polite"><div className="log-row log-row--head"><span>TYPE</span><span>BODY</span><span>TIME</span></div>{events.length === 0 ? <p className="empty-state">No retained events are available.</p> : events.map((item) => <div className="log-row" key={item.id}><strong className={item.outcome === "success" ? "log-type--success" : "log-type--failure"}>/{item.outcome.toUpperCase()}</strong><span title={item.correlationId}>{item.action}{item.resourceId === undefined ? "" : ` · ${item.resourceId}`}</span><time dateTime={item.occurredAt}>{new Date(item.occurredAt).toLocaleString("ru-RU")}</time></div>)}</div><button className="button settings-action" type="button" disabled={events.length === 0} onClick={() => { const before = events.at(-1)?.sequence; if (before !== undefined) void api.activity(before, 100).then((older) => setEvents((current) => [...current, ...older].slice(0, 200))); }}>Load older</button></section></div>,
+  };
+
+  return <section className="workspace settings" aria-labelledby="settings-title">
+    <PageHeader title="settings" id="settings-title" />
+    <div className="card-grid card-grid--settings">
+      {preferences.settingsOrder.map((id, index) => <UniversalCard ordinal={index + 1} title={SETTINGS_CARD_TITLES[id]} className={`settings-card settings-card--${id}${dropCard === id ? " universal-card--drop-target" : ""}`} draggable handleLabel={`Reorder ${id} settings card`} onHandleKeyDown={(event) => moveSettingsCardByKeyboard(event, id)} onDragStart={(event) => { setDraggingCard(id); event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", id); }} onDragOver={(event) => { if (draggingCard !== undefined && draggingCard !== id) { event.preventDefault(); setDropCard(id); } }} onDrop={(event) => { event.preventDefault(); if (draggingCard !== undefined) moveSettingsCard(draggingCard, id); setDraggingCard(undefined); setDropCard(undefined); }} onDragEnd={() => { setDraggingCard(undefined); setDropCard(undefined); }} key={id}>{cards[id]}</UniversalCard>)}
+    </div>
+    {accessKeyDialog ? <Dialog title="Change Access Key" description="Enter the current key, then the replacement twice. No field is preloaded." onClose={() => { setAccessKeyDialog(false); setAccessKeyChange({ currentAccessKey: "", newAccessKey: "", confirmation: "" }); }}><form className="dialog-form" onSubmit={(event) => void changeOwnerAccessKey(event)}><label>Current Access Key<input type="password" autoComplete="current-password" value={accessKeyChange.currentAccessKey} onChange={(event) => setAccessKeyChange({ ...accessKeyChange, currentAccessKey: event.target.value })} required /></label><label>New Access Key<input type="password" autoComplete="new-password" minLength={32} value={accessKeyChange.newAccessKey} onChange={(event) => setAccessKeyChange({ ...accessKeyChange, newAccessKey: event.target.value })} required /></label><label>Confirm new Access Key<input type="password" autoComplete="new-password" minLength={32} value={accessKeyChange.confirmation} onChange={(event) => setAccessKeyChange({ ...accessKeyChange, confirmation: event.target.value })} required /></label><div className="dialog__actions"><button className="button" type="button" onClick={() => { setAccessKeyDialog(false); setAccessKeyChange({ currentAccessKey: "", newAccessKey: "", confirmation: "" }); }}>Cancel</button><button className="button button--primary" type="submit" disabled={pending || accessKeyChange.newAccessKey.length < 32 || accessKeyChange.confirmation !== accessKeyChange.newAccessKey}>Change Access Key</button></div></form></Dialog> : null}
+    {kernelTokenDialog ? <Dialog title="Change Kernel token" description="The replacement is write-only and activates only after authenticated validation." onClose={() => { setKernelTokenDialog(false); setKernelToken(""); }}><form className="dialog-form" onSubmit={(event) => void rotateKernelToken(event)}><label>Replacement Kernel token<input type="password" autoComplete="new-password" value={kernelToken} minLength={32} onChange={(event) => setKernelToken(event.target.value)} required /></label><div className="dialog__actions"><button className="button" type="button" onClick={() => { setKernelTokenDialog(false); setKernelToken(""); }}>Cancel</button><button className="button button--primary" type="submit" disabled={pending || kernelToken.length < 32}>Validate and rotate</button></div></form></Dialog> : null}
+    {storageDialog ? <Dialog title="Configure storage" description="Connect an independent SFTP file set. No files are copied from or deleted in the current storage." dismissible={false} onClose={() => undefined}>
+      <form className="dialog-form storage-dialog" onSubmit={(event) => { event.preventDefault(); void testStorage(); }} autoComplete="off">
+        <div className="storage-dialog__grid">
+          <label>Host<input value={storageDraft.host} maxLength={255} onChange={(event) => updateStorageDraft({ host: event.target.value })} required /></label>
+          <label>Port<input type="number" min={1} max={65_535} value={storageDraft.port} onChange={(event) => updateStorageDraft({ port: Number(event.target.value) })} required /></label>
+          <label>User<input value={storageDraft.username} maxLength={255} onChange={(event) => updateStorageDraft({ username: event.target.value })} required /></label>
+          <label>Root<input value={storageDraft.root} maxLength={1_024} onChange={(event) => updateStorageDraft({ root: event.target.value })} required /></label>
+          <label className="storage-dialog__wide">Pinned host fingerprint<input value={storageDraft.hostFingerprint} placeholder="SHA256:…" pattern="SHA256:[A-Za-z0-9+/]{43}=?" onChange={(event) => updateStorageDraft({ hostFingerprint: event.target.value })} required /></label>
+          <label>Authentication<select value={storageDraft.authMode} onChange={(event) => updateStorageDraft({ authMode: event.target.value as StorageConnectionInput["authMode"], credential: "" })}><option value="password_file">Password</option><option value="private_key_file">Private key</option></select></label>
+          <label className="storage-dialog__wide">{storageDraft.authMode === "password_file" ? "New storage password" : "Private key PEM"}{storageDraft.authMode === "password_file" ? <input type="password" autoComplete="new-password" value={storageDraft.credential} onChange={(event) => updateStorageDraft({ credential: event.target.value })} required /> : <textarea autoComplete="off" rows={6} value={storageDraft.credential} onChange={(event) => updateStorageDraft({ credential: event.target.value })} required />}</label>
         </div>
-      </section>
-      <section className="settings-section">
-        <h2>Recent owner proof</h2><p className="muted">Required before purge, KeePass access, secret rotation and revoking all sessions. The field always opens empty.</p>
-        <form className="reauth-form" onSubmit={(event) => void reauthenticate(event)}>
-          <label>Owner access key<input type="password" value={accessKey} onChange={(event) => setAccessKey(event.target.value)} autoComplete="current-password" required /></label>
-          <button className="button" type="submit" disabled={pending || !accessKey}>Re-authenticate</button>
-        </form>
-      </section>
-      <section className="settings-section">
-        <h2>WebDAV devices</h2><p className="muted">Each client receives a separate revocable password and only the roots selected below. Storage Box credentials are never disclosed.</p>
-        <form className="device-form" onSubmit={(event) => void createDevice(event)}>
-          <label>Device name<input value={deviceName} onChange={(event) => setDeviceName(event.target.value)} maxLength={80} required /></label>
-          <fieldset><legend>Allowed roots</legend>{[{ id: MASTERMIND_RESOURCE_ID, label: "Mastermind" }, { id: SYNC_RESOURCE_ID, label: "Sync" }, { id: VOLT_RESOURCE_ID, label: "KeePass / Volt" }].map(({ id, label }) => <label key={id}><input type="checkbox" checked={deviceScopes.includes(id)} onChange={() => toggleDeviceScope(id)} />{label}</label>)}</fieldset>
-          <button className="button button--primary" type="submit" disabled={pending || !reauthed || deviceScopes.length === 0}>Create device password</button>
-        </form>
-        {deviceToken === undefined ? null : <div className="one-time-code" role="status"><span>Copy this WebDAV password now</span><strong>{deviceToken}</strong><small>Endpoint: /dav/ · username may be the device name. This password is held only in page memory.</small></div>}
-        <div className="share-list">{devices.length === 0 ? <p className="empty-state">No device records.</p> : devices.map((device) => <article className="share-row" key={device.id}><div><strong>{device.name}</strong><span>{device.state} · {device.scopeIds.length} scoped root(s)</span><small>{device.lastUsedAt === undefined ? "Never used" : `Last used ${new Date(device.lastUsedAt).toLocaleString()}`}</small></div><button className="button button--danger" type="button" disabled={pending || device.state !== "active"} onClick={() => void revokeDevice(device.id)}>Revoke</button></article>)}</div>
-      </section>
-      <section className="settings-section">
-        <h2>Backup producers</h2><p className="muted">Each internal service uploads only encrypted, resumable backups to its Gateway-derived namespace. Producer tokens cannot list, read or delete backups.</p>
-        <form className="backup-service-form" onSubmit={(event) => void createBackupService(event)}>
-          <label>Service name<input value={backupName} onChange={(event) => setBackupName(event.target.value)} maxLength={100} required /></label>
-          <label>Immutable slug<input value={backupSlug} onChange={(event) => setBackupSlug(event.target.value.toLowerCase())} pattern="[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?" maxLength={63} required /></label>
-          <button className="button button--primary" type="submit" disabled={pending || !reauthed}>Create producer token</button>
-        </form>
-        {backupToken === undefined ? null : <div className="one-time-code" role="status"><span>Copy this producer Bearer token now</span><strong>{backupToken}</strong><small>It is held only in page memory. Storage Box credentials and historical backup bytes are never exposed.</small></div>}
-        <div className="share-list">{backupServices.length === 0 ? <p className="empty-state">No backup producers enabled.</p> : backupServices.map((service) => <article className="backup-service-row" key={service.id}><div><strong>{service.name}</strong><span>{service.slug} · {service.state} · {service.fresh ? "fresh" : "stale/no success"}</span><small>{formatBytes(service.usage.storedBytes)} stored · {String(service.usage.activeRuns)} active · {String(service.usage.failedRuns)} failed · restore {service.lastRestoreTest?.outcome ?? "not tested"}</small></div><div className="inline-actions"><button className="button" type="button" disabled={pending || service.state !== "active"} onClick={() => void rotateBackupService(service.id)}>Rotate</button><button className="button button--danger" type="button" disabled={pending || service.state !== "active"} onClick={() => void revokeBackupService(service.id)}>Revoke</button></div></article>)}</div>
-      </section>
-      <section className="settings-section settings-section--danger">
-        <h2>Sessions</h2><p className="muted">Revoke every active browser session, including this one. Stored files and Storage Box access are unchanged.</p>
-        <button className="button button--danger" type="button" onClick={() => setRevokeDialog(true)}>Revoke all sessions</button>
-      </section>
-      {revokeDialog ? <ConfirmDialog title="Revoke all owner sessions" description="Every browser session is invalidated server-side. Files remain stored and the bootstrap access key remains available for a new login." confirmLabel="Revoke sessions" danger pending={pending} onConfirm={() => void revoke()} onClose={() => setRevokeDialog(false)} /> : null}
-      {unlinkDialog ? <ConfirmDialog title="Unlink Telegram" description="The stable Telegram binding, pending Drop codes and all active Drop sessions are revoked. Committed Drop Point files remain unchanged." confirmLabel="Unlink and revoke Drop" danger pending={pending} onConfirm={() => void unlink()} onClose={() => setUnlinkDialog(false)} /> : null}
-    </section>
-  );
+        <p className="setting-meta">The credential begins empty, is sent only for this action and is never readable through the API.</p>
+        {storageStage === "testing" ? <p role="status" className="accent-text">Testing pinned host identity, authentication and root…</p> : null}
+        {storageStage === "tested" ? <p role="status" className="storage-test-success">Connection verified. Changing any field requires another test.</p> : null}
+        <label className="storage-switch-confirm"><input type="checkbox" checked={storageConfirmed} onChange={(event) => setStorageConfirmed(event.target.checked)} />Use the target as an independent file set. Rebuild the active index, revoke shares and devices, clear pending transfers, and migrate zero file bytes.</label>
+        <div className="dialog__actions"><button className="button" type="button" disabled={pending} onClick={() => { setStorageDialog(false); setStorageDraft((current) => ({ ...current, credential: "" })); setStorageTested(false); setStorageConfirmed(false); }}>Cancel and discard credential</button><button className="button" type="submit" disabled={pending || !storageDraft.credential}>{storageStage === "testing" ? "Testing…" : "Test connection"}</button><button className="button button--danger" type="button" disabled={pending || !storageTested || !storageConfirmed} onClick={() => void switchStorage()}>{storageStage === "switching" ? "Indexing and switching…" : "Switch without migration"}</button></div>
+      </form>
+    </Dialog> : null}
+    {restoreDialog ? <Dialog title="Restore snapshot" description="Select a local Saturn ZIP. The complete archive is bounded and validated before replacement can begin." dismissible={["idle", "error", "complete"].includes(restoreStage)} onClose={() => { if (["idle", "error", "complete"].includes(restoreStage)) void discardRestore(); }}>
+      <div className="restore-workflow" aria-live="polite">
+        {restoreStage === "idle" ? <><p>No file has been selected. The operating-system picker opens from the control below.</p><label className="button restore-file-button">Choose snapshot<input ref={restoreInput} type="file" accept=".zip,application/zip" onChange={(event) => void chooseRestore(event.target.files?.[0])} /></label></> : null}
+        {["uploading", "validating"].includes(restoreStage) ? <div className="restore-progress"><p>{restoreStage === "uploading" ? `Uploading protected local copy · ${(restoreProgress * 100).toFixed(1)}%` : "Validating manifest, bounds and every member checksum…"}</p><progress aria-label="Restore archive preparation" max={1} value={restoreStage === "validating" ? 1 : restoreProgress} /></div> : null}
+        {restoreStage === "ready" && restoreCandidate !== undefined ? <>
+          <dl className="restore-metadata"><div><dt>File</dt><dd>{restoreCandidate.filename}</dd></div><div><dt>Size</dt><dd>{formatBytes(restoreCandidate.archiveBytes)}</dd></div><div><dt>Format</dt><dd>{restoreCandidate.schema}</dd></div><div><dt>Created</dt><dd>{new Date(restoreCandidate.createdAt).toLocaleString("ru-RU")}</dd></div><div><dt>Members</dt><dd>{restoreCandidate.memberCount}</dd></div><div><dt>Digest</dt><dd title={restoreCandidate.archiveSha256}>{restoreCandidate.archiveSha256.slice(0, 16)}…</dd></div></dl>
+          <label className="restore-confirm"><input type="checkbox" checked={restoreConfirmed} onChange={(event) => setRestoreConfirmed(event.target.checked)} />Replace Saturn control-plane state with this snapshot. Current state is first saved to a verified pre-restore archive; user-file bytes in Storage Box are not replaced.</label>
+          <div className="dialog__actions"><button className="button" type="button" onClick={() => void discardRestore()}>Discard selected archive</button><button className="button button--danger" type="button" disabled={!restoreConfirmed} onClick={() => void applyRestore()}>Restore and replace</button></div>
+        </> : null}
+        {restoreStage === "applying" ? <div className="restore-progress"><p>Pre-restore snapshot → write barrier → transactional database restore → migrations → health verification.</p><progress aria-label="Restore in progress" /></div> : null}
+        {restoreStage === "error" ? <><p className="restore-error" role="alert">{restoreError}</p><div className="dialog__actions"><button className="button" type="button" onClick={() => void discardRestore()}>Close</button><label className="button restore-file-button">Choose another snapshot<input ref={restoreInput} type="file" accept=".zip,application/zip" onChange={(event) => void chooseRestore(event.target.files?.[0])} /></label></div></> : null}
+        {restoreStage === "complete" && restoreResult !== undefined ? <><p className="restore-success" role="status">Restore complete. Database invariants passed in {restoreResult.measuredRtoMs} ms.</p><dl className="restore-metadata">{Object.entries(restoreResult.verification).map(([name, count]) => <div key={name}><dt>{name}</dt><dd>{count}</dd></div>)}</dl><p className="muted">Owner browser sessions are deliberately absent from snapshots. Sign in again to continue against the restored state.</p><div className="dialog__actions"><button className="button button--primary" type="button" onClick={onAnonymous}>Return to login</button></div></> : null}
+      </div>
+    </Dialog> : null}
+    {updateDialog ? <Dialog title="Check for updates" description="Discovery never starts installation." onClose={() => setUpdateDialog(false)}><div className="update-discovery"><p>Installed: <strong className="accent-text">v{updates?.installedVersion ?? "unknown"}</strong></p><StatusRow label="Local updater agent" state={updates?.updater.state ?? "unavailable"} detail={updates?.updater.reason} /><StatusRow label="Approved registry" state={updates?.registry.state ?? "unavailable"} detail={updates?.registry.reason} />{updates?.discoveryEnabled ? <p>Discovery is ready.</p> : <p className="muted">Discovery is unavailable until both trusted dependencies are configured. No update has been started.</p>}</div></Dialog> : null}
+    {revokeDialog ? <ConfirmDialog title="Revoke all owner sessions" description="Every browser session is invalidated server-side. Files and storage credentials are unchanged." confirmLabel="Revoke sessions" danger pending={pending} onConfirm={() => void revoke()} onClose={() => setRevokeDialog(false)} /> : null}
+    {unlinkDialog ? <ConfirmDialog title="Unlink Telegram" description="The Telegram binding and Telegram-backed Drop access are revoked. Owner-issued codes and sessions remain independent; committed files remain unchanged." confirmLabel="Unlink Telegram" danger pending={pending} onConfirm={() => void unlink()} onClose={() => setUnlinkDialog(false)} /> : null}
+  </section>;
 }
 
-function AuthenticatedApp({ health, onAnonymous }: { readonly health: GatewayState; readonly onAnonymous: () => void }) {
-  const [view, setView] = useState<ViewName>("files");
+function SidebarBrand() {
+  return <div className="sidebar__brand"><img className="sidebar__planet" src={saturnPlanet} alt="" aria-hidden="true" /><strong>saturn</strong></div>;
+}
+
+function AuthenticatedApp({ health, onAnonymous }: { readonly health: GatewayHealth; readonly onAnonymous: () => void }) {
+  const [route, setRoute] = useState<OwnerRoute>(() => ownerRouteFromPathname(window.location.pathname));
   const [mobileMenu, setMobileMenu] = useState(false);
+  const [narrowViewport, setNarrowViewport] = useState(() => typeof window.matchMedia === "function" && window.matchMedia("(max-width: 720px)").matches);
+  const [sidebarReveal, setSidebarReveal] = useState(false);
+  const [dragging, setDragging] = useState<PrimaryViewName | undefined>();
+  const [dropTarget, setDropTarget] = useState<{ readonly id: PrimaryViewName; readonly edge: "before" | "after" } | undefined>();
+  const [navigationSaving, setNavigationSaving] = useState(false);
+  const [navigationAnnouncement, setNavigationAnnouncement] = useState("");
   const [notices, setNotices] = useState<readonly Notice[]>([]);
   const [preferences, setPreferences] = useState<Omit<OwnerPreferences, "updatedAt">>(defaultPreferences);
+  const [shareCapabilities, setShareCapabilities] = useState<Readonly<Record<string, string>>>({});
   const quickUpload = useRef<HTMLInputElement>(null);
+  const mobileMenuButton = useRef<HTMLButtonElement>(null);
   const [quickPending, setQuickPending] = useState(false);
   const addNotice = (kind: Notice["kind"], message: string) => {
     const id = crypto.randomUUID();
@@ -887,15 +2158,56 @@ function AuthenticatedApp({ health, onAnonymous }: { readonly health: GatewaySta
     if (kind !== "error") window.setTimeout(() => setNotices((current) => current.filter((item) => item.id !== id)), 4_500);
   };
   useEffect(() => {
-    void api.preferences().then((value) => setPreferences(appearancePreferences(value))).catch(() => undefined);
+    void api.preferences().then((value) => setPreferences(ownerPreferences(value))).catch(() => undefined);
   }, []);
   useEffect(() => {
+    const canonical = ownerRouteUrl(ownerRouteFromPathname(window.location.pathname));
+    if ((window.location.pathname.replace(/\/+$/, "") || "/") !== canonical) window.history.replaceState({}, "", canonical);
+    const restoreRoute = () => setRoute(ownerRouteFromPathname(window.location.pathname));
+    window.addEventListener("popstate", restoreRoute);
+    return () => window.removeEventListener("popstate", restoreRoute);
+  }, []);
+  useEffect(() => {
+    if (typeof window.matchMedia !== "function") return;
+    const query = window.matchMedia("(max-width: 720px)");
+    const update = () => { setNarrowViewport(query.matches); if (!query.matches) setMobileMenu(false); };
+    query.addEventListener("change", update);
+    return () => query.removeEventListener("change", update);
+  }, []);
+  useEffect(() => {
+    if (!mobileMenu) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      setMobileMenu(false);
+      mobileMenuButton.current?.focus();
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [mobileMenu]);
+  useEffect(() => {
     const root = document.documentElement;
-    root.style.setProperty("--dark", preferences.darkColor);
-    root.style.setProperty("--light", preferences.lightColor);
     root.style.setProperty("--accent", preferences.accentColor);
   }, [preferences]);
-  const navigate = (next: ViewName) => { setView(next); setMobileMenu(false); };
+  const commitRoute = useCallback((next: OwnerRoute, replace = false) => {
+    window.history[replace ? "replaceState" : "pushState"]({}, "", ownerRouteUrl(next));
+    setRoute(next);
+  }, []);
+  const navigate = (next: ViewName) => {
+    commitRoute({ view: next, folderSegments: [] });
+    setMobileMenu(false);
+  };
+  const navigateFilesPath = useCallback((folderSegments: readonly string[], replace = false) => {
+    commitRoute({ view: "files", folderSegments }, replace);
+  }, [commitRoute]);
+  const navigateInboxPath = useCallback((folderSegments: readonly string[], replace = false) => {
+    commitRoute({ view: "inbox", folderSegments }, replace);
+  }, [commitRoute]);
+  const rememberShareCapability = useCallback((id: string, url: string) => {
+    setShareCapabilities((current) => ({ ...current, [id]: url }));
+  }, []);
+  const forgetShareCapability = useCallback((id: string) => {
+    setShareCapabilities((current) => Object.fromEntries(Object.entries(current).filter(([shareId]) => shareId !== id)));
+  }, []);
   const runQuickUpload = async (files: readonly File[]) => {
     if (files.length === 0) return;
     setQuickPending(true);
@@ -906,35 +2218,91 @@ function AuthenticatedApp({ health, onAnonymous }: { readonly health: GatewaySta
   const logout = async () => {
     try { await api.logout(); } finally { onAnonymous(); }
   };
-  const nav: ReadonlyArray<{ readonly id: ViewName; readonly label: string; readonly marker: string }> = [
-    { id: "files", label: "Files", marker: "01" },
-    { id: "laboratory", label: "Laboratory", marker: "02" },
-    { id: "inbox", label: "Drop Point", marker: "03" },
-    { id: "shared", label: "Shared", marker: "04" },
-    { id: "trash", label: "Trash", marker: "05" },
-    { id: "activity", label: "Activity", marker: "06" },
-    { id: "settings", label: "Settings", marker: "07" },
-  ];
+  const persistNavigationOrder = async (nextOrder: readonly PrimaryViewName[]) => {
+    if (navigationSaving || nextOrder.every((item, index) => preferences.navigationOrder[index] === item)) return;
+    const previous = preferences;
+    const candidate = { ...preferences, navigationOrder: nextOrder };
+    setPreferences(candidate);
+    setNavigationSaving(true);
+    try {
+      const saved = await api.updatePreferences(candidate);
+      setPreferences(ownerPreferences(saved));
+      setNavigationAnnouncement(`Navigation order updated. ${NAV_ITEMS[nextOrder[0] ?? "files"].label} is first.`);
+    } catch {
+      setPreferences(previous);
+      addNotice("error", "Navigation order could not be saved.");
+    } finally {
+      setNavigationSaving(false);
+    }
+  };
+  const reorderNavigation = (source: PrimaryViewName, target: PrimaryViewName, edge: "before" | "after") => {
+    if (source === target) return;
+    const next = preferences.navigationOrder.filter((item) => item !== source) as PrimaryViewName[];
+    const targetIndex = next.indexOf(target);
+    next.splice(targetIndex + (edge === "after" ? 1 : 0), 0, source);
+    void persistNavigationOrder(next);
+  };
+  const moveNavigationByKeyboard = (event: ReactKeyboardEvent<HTMLButtonElement>, item: PrimaryViewName) => {
+    if (!event.altKey || (event.key !== "ArrowUp" && event.key !== "ArrowDown")) return;
+    event.preventDefault();
+    const current = preferences.navigationOrder.indexOf(item);
+    const nextIndex = current + (event.key === "ArrowUp" ? -1 : 1);
+    if (nextIndex < 0 || nextIndex >= preferences.navigationOrder.length) return;
+    const target = preferences.navigationOrder[nextIndex];
+    if (target !== undefined) reorderNavigation(item, target, event.key === "ArrowUp" ? "before" : "after");
+  };
+  const sidebarVisible = narrowViewport
+    ? mobileMenu
+    : preferences.sidebarMode === "fixed" || sidebarReveal;
   return (
-    <div className="app-shell">
-      <button className="mobile-menu-button" type="button" onClick={() => setMobileMenu((value) => !value)} aria-expanded={mobileMenu} aria-controls="primary-navigation">Menu</button>
-      <aside className={`sidebar ${mobileMenu ? "sidebar--open" : ""}`} id="primary-navigation">
-        <div className="sidebar__brand"><span aria-hidden="true">S</span><strong>Saturn</strong></div>
-        <HealthLabel state={health} />
+    <div className={`app-shell ${preferences.sidebarMode === "auto-hide" ? "app-shell--auto-hide" : ""}`}>
+      <button ref={mobileMenuButton} className="mobile-menu-button" type="button" onClick={() => setMobileMenu((value) => !value)} aria-expanded={mobileMenu} aria-controls="primary-navigation"><span aria-hidden="true">☰</span> Menu</button>
+      <button className="sidebar-activation-strip" type="button" aria-label="Reveal navigation" onMouseEnter={() => setSidebarReveal(true)} onFocus={() => setSidebarReveal(true)} onClick={() => setSidebarReveal(true)} />
+      {mobileMenu ? <button className="sidebar-backdrop" type="button" aria-label="Close navigation" onClick={() => { setMobileMenu(false); mobileMenuButton.current?.focus(); }} /> : null}
+      <aside
+        className={`sidebar ${mobileMenu ? "sidebar--open" : ""} ${sidebarReveal ? "sidebar--revealed" : ""}`}
+        id="primary-navigation"
+        aria-hidden={!sidebarVisible}
+        inert={!sidebarVisible ? true : undefined}
+        onMouseEnter={() => setSidebarReveal(true)}
+        onMouseLeave={() => setSidebarReveal(false)}
+        onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) setSidebarReveal(false); }}
+      >
+        <SidebarBrand />
         <nav aria-label="Primary">
-          {nav.map((item) => <button type="button" aria-label={item.label} aria-current={view === item.id ? "page" : undefined} className={view === item.id ? "nav-item nav-item--active" : "nav-item"} key={item.id} onClick={() => navigate(item.id)}><span aria-hidden="true">{item.marker}</span>{item.label}</button>)}
+          {preferences.navigationOrder.map((id) => {
+            const item = NAV_ITEMS[id];
+            const targetClass = dropTarget?.id === id ? ` nav-item--drop-${dropTarget.edge}` : "";
+            return <button
+              type="button"
+              aria-label={item.label}
+              aria-current={route.view === id ? "page" : undefined}
+              aria-keyshortcuts="Alt+ArrowUp Alt+ArrowDown"
+              className={`${route.view === id ? "nav-item nav-item--active" : "nav-item"}${targetClass}`}
+              draggable={!navigationSaving}
+              key={id}
+              title="Drag to reorder · Alt+↑/↓"
+              onClick={() => navigate(id)}
+              onKeyDown={(event) => moveNavigationByKeyboard(event, id)}
+              onDragStart={(event: DragEvent<HTMLButtonElement>) => { setDragging(id); event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", id); }}
+              onDragOver={(event: DragEvent<HTMLButtonElement>) => { if (dragging === undefined || dragging === id) return; event.preventDefault(); const box = event.currentTarget.getBoundingClientRect(); setDropTarget({ id, edge: event.clientY < box.top + box.height / 2 ? "before" : "after" }); }}
+              onDrop={(event: DragEvent<HTMLButtonElement>) => { event.preventDefault(); if (dragging !== undefined && dropTarget !== undefined) reorderNavigation(dragging, dropTarget.id, dropTarget.edge); setDragging(undefined); setDropTarget(undefined); }}
+              onDragEnd={() => { setDragging(undefined); setDropTarget(undefined); }}
+            ><span className="nav-item__label">{item.label}</span><span className="nav-item__ordinal" aria-hidden="true">{item.ordinal}</span></button>;
+          })}
         </nav>
-        <div className="sidebar__bottom"><a href="/docs" aria-disabled="true">Documentation</a><button type="button" onClick={() => void logout()}>Logout</button></div>
+        <p className="sr-only" aria-live="polite">{navigationAnnouncement}</p>
+        <div className="sidebar__bottom"><button type="button" aria-current={route.view === "documentation" ? "page" : undefined} onClick={() => navigate("documentation")}>Documentation</button><button type="button" onClick={() => void logout()}>Logout</button></div>
       </aside>
       <main className="content" id="main-content">
-        <div className="global-actions"><button className="button button--primary" type="button" disabled={quickPending} onClick={() => quickUpload.current?.click()}>{quickPending ? "Uploading…" : "Quick upload"}</button><input ref={quickUpload} aria-label="Choose files for quick upload" className="visually-hidden-input" type="file" multiple onChange={(event) => void runQuickUpload([...event.target.files ?? []])} /></div>
-        {view === "files" ? <FilesView initialFolderId={ROOT_RESOURCE_ID} title="Files" addNotice={addNotice} onUnauthorized={onAnonymous} /> : null}
-        {view === "laboratory" ? <LaboratoryView addNotice={addNotice} /> : null}
-        {view === "inbox" ? <FilesView initialFolderId={DROP_POINT_RESOURCE_ID} title="Drop Point" addNotice={addNotice} onUnauthorized={onAnonymous} /> : null}
-        {view === "shared" ? <SharedView addNotice={addNotice} onAnonymous={onAnonymous} /> : null}
-        {view === "trash" ? <TrashView addNotice={addNotice} onUnauthorized={onAnonymous} /> : null}
-        {view === "activity" ? <ActivityView onUnauthorized={onAnonymous} /> : null}
-        {view === "settings" ? <SettingsView preferences={preferences} setPreferences={setPreferences} addNotice={addNotice} onAnonymous={onAnonymous} /> : null}
+        {route.view !== "documentation" ? null : <div className="global-actions"><button className="button button--primary" type="button" disabled={quickPending} onClick={() => quickUpload.current?.click()}>{quickPending ? "Uploading…" : "Quick upload"}</button><input ref={quickUpload} aria-label="Choose files for quick upload" className="visually-hidden-input" type="file" multiple onChange={(event) => void runQuickUpload([...event.target.files ?? []])} /></div>}
+        {route.view === "dashboard" ? <DashboardView storageHealth={health.storage} preferences={preferences} setPreferences={setPreferences} addNotice={addNotice} /> : null}
+        {route.view === "files" ? <FilesView initialFolderId={ROOT_RESOURCE_ID} title="Storage" routeSegments={route.folderSegments} onPathChange={navigateFilesPath} shareCapabilities={shareCapabilities} onShareCapabilityCreated={rememberShareCapability} onShareCapabilityRevoked={forgetShareCapability} addNotice={addNotice} onUnauthorized={onAnonymous} /> : null}
+        {route.view === "inbox" ? <InHouseDropView health={health.gateway} routeSegments={route.folderSegments} onPathChange={navigateInboxPath} shareCapabilities={shareCapabilities} onShareCapabilityCreated={rememberShareCapability} onShareCapabilityRevoked={forgetShareCapability} addNotice={addNotice} onUnauthorized={onAnonymous} /> : null}
+        {route.view === "shared" ? <SharedView shareCapabilities={shareCapabilities} onShareCapabilityRevoked={forgetShareCapability} addNotice={addNotice} onAnonymous={onAnonymous} /> : null}
+        {route.view === "trash" ? <TrashView addNotice={addNotice} onUnauthorized={onAnonymous} /> : null}
+        {route.view === "settings" ? <SettingsView preferences={preferences} setPreferences={setPreferences} addNotice={addNotice} onAnonymous={onAnonymous} /> : null}
+        {route.view === "documentation" ? <DocumentationView /> : null}
       </main>
       <NoticeStack notices={notices} dismiss={(id) => setNotices((current) => current.filter((item) => item.id !== id))} />
     </div>
@@ -950,12 +2318,12 @@ function OwnerApp() {
     return () => { active = false; };
   }, []);
   if (auth === "checking") return <main className="boot-state" role="status">Opening Saturn…</main>;
-  if (auth === "anonymous") return <LoginView health={health} onAuthenticated={() => setAuth("authenticated")} />;
+  if (auth === "anonymous") return <LoginView health={health.gateway} onAuthenticated={() => setAuth("authenticated")} />;
   return <AuthenticatedApp health={health} onAnonymous={() => setAuth("anonymous")} />;
 }
 
 function DropApp() {
-  return <DropView health={useGatewayHealth()} />;
+  return <DropView health={useGatewayHealth().gateway} />;
 }
 
 export function App() {

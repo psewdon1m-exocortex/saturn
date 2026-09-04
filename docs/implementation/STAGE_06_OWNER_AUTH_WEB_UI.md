@@ -43,7 +43,13 @@ keyboard-operable responsive Web UI.
   recovery-restore invalidation semantics.
 - Every cookie-authenticated mutation requires a matching CSRF header and
   same-origin request.
-- Files, Drop Point, Activity, Settings, versions and trash are usable from the UI.
+- Files, Drop Point, Settings, versions and trash are usable from the UI. The
+  former Activity and Laboratory owner-Web destinations were removed from the
+  current left-menu scope in migration `0016`.
+- Files folder location is canonical browser state: `/files/<encoded logical
+  path>`. Drop Point follows the same rule below `/inbox`. Direct navigation,
+  refresh and browser Back/Forward resolve the path to stable resource IDs
+  through the authenticated Gateway API.
 - Upload, create folder, move/rename, copy, download, overwrite, trash and
   restore complete through `FileService`; no UI-only mutation exists.
 - Preview is inline only for an explicit MIME allow-list; HTML, SVG, archives,
@@ -84,9 +90,16 @@ replace the proof mechanism without changing session or CSRF boundaries.
 
 - exact user-editable theme inputs: dark, light and accent, defaulting to
   `#000000`, `#ffffff`, `#00a8ff`;
+- owner destinations have canonical SPA routes: `/files`, `/inbox`, `/shared`,
+  `/trash` and `/settings`; folder names are encoded one URL segment at a time;
+- `GET /api/v1/folders/resolve` is owner-authenticated, accepts a logical path
+  plus its allowed root ID and returns the canonical folder resource chain;
+  storage credentials and physical SFTP access remain server-only; its query is
+  redacted from API request logs;
 - monospace typography, square single-layer workspaces, no decorative card
   nesting;
-- 242 px desktop sidebar and explicit mobile menu at 720 px;
+- 250 px desktop sidebar, server-persisted fixed/auto-hide behavior and an
+  explicit mobile overlay menu at 720 px; see `SIDEBAR_UI_UX.md`;
 - sticky collection command bar with search first, count, secondary action and
   one primary action;
 - custom dialogs for delete/restore/logout-all; no native alert/confirm;

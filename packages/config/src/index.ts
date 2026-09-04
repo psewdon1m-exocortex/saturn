@@ -3,6 +3,23 @@ import path from "node:path";
 import { z } from "zod";
 
 const booleanText = z.enum(["true", "false"]).transform((value) => value === "true");
+const commandArguments = z.string().default("[]").transform((value, context): readonly string[] => {
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (!Array.isArray(parsed)) throw new Error("expected an array");
+    const result: string[] = [];
+    for (const item of parsed as unknown[]) {
+      if (typeof item !== "string" || item.length === 0 || containsControlCharacter(item)) {
+        throw new Error("expected a JSON array of non-empty strings");
+      }
+      result.push(item);
+    }
+    return result;
+  } catch {
+    context.addIssue({ code: "custom", message: "must be a JSON array of non-empty command arguments" });
+    return z.NEVER;
+  }
+});
 const placeholder = /change[-_ ]?me|replace|example|vault-dev-only/i;
 
 function containsControlCharacter(value: string): boolean {
@@ -22,6 +39,9 @@ const environmentSchema = z.object({
   DATABASE_URL: z.string().min(1),
   DATABASE_PASSWORD_FILE: z.string().default(""),
   OWNER_BOOTSTRAP_TOKEN_FILE: z.string().min(1),
+  KERNEL_URL: z.string().default(""),
+  KERNEL_TOKEN_FILE: z.string().default(""),
+  KERNEL_TIMEOUT_MS: z.coerce.number().int().min(500).max(10_000).default(3_000),
   STORAGE_HOST: z.string().min(1),
   STORAGE_PORT: z.coerce.number().int().min(1).max(65_535).default(22),
   STORAGE_USER: z.string().min(1),
@@ -30,6 +50,7 @@ const environmentSchema = z.object({
   STORAGE_AUTH_MODE: z.enum(["password_file", "private_key_file"]),
   STORAGE_PASSWORD_FILE: z.string().default(""),
   STORAGE_PRIVATE_KEY_FILE: z.string().default(""),
+  STORAGE_RUNTIME_CONFIG_DIR: z.string().min(1).default("data/storage-runtime"),
   STORAGE_OPERATION_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(120_000).default(60_000),
   STORAGE_HEALTH_TIMEOUT_MS: z.coerce.number().int().min(500).max(5_000).default(3_000),
   STORAGE_MAX_CONNECTIONS: z.coerce.number().int().min(1).max(8).default(8),
@@ -55,6 +76,9 @@ const environmentSchema = z.object({
   RECOVERY_BACKUP_INTERVAL_MS: z.coerce.number().int().min(60_000).max(7 * 24 * 60 * 60 * 1_000).default(6 * 60 * 60 * 1_000),
   PG_DUMP_BIN: z.string().min(1).default("pg_dump"),
   PG_RESTORE_BIN: z.string().min(1).default("pg_restore"),
+  PG_DUMP_PREFIX_ARGS: commandArguments,
+  PG_RESTORE_PREFIX_ARGS: commandArguments,
+  PG_COMMAND_CONNECTION_ARGS: commandArguments,
   AUTH_PEPPER_FILE: z.string().min(1),
   AUTH_SESSION_IDLE_TTL_MS: z.coerce.number().int().min(60_000).max(24 * 60 * 60 * 1_000).default(15 * 60 * 1_000),
   AUTH_SESSION_ABSOLUTE_TTL_MS: z.coerce.number().int().min(5 * 60 * 1_000).max(7 * 24 * 60 * 60 * 1_000).default(12 * 60 * 60 * 1_000),
@@ -62,11 +86,20 @@ const environmentSchema = z.object({
   AUTH_FAILURE_LIMIT: z.coerce.number().int().min(1).max(100).default(5),
   AUTH_FAILURE_WINDOW_MS: z.coerce.number().int().min(60_000).max(24 * 60 * 60 * 1_000).default(15 * 60 * 1_000),
   DROP_PEPPER_FILE: z.string().min(1),
-  DROP_CODE_TTL_MS: z.coerce.number().int().min(60_000).max(60 * 60 * 1_000).default(5 * 60 * 1_000),
+  DROP_CODE_TTL_MS: z.coerce.number().int().min(60_000).max(60 * 60 * 1_000).default(30 * 60 * 1_000),
   DROP_LINK_CODE_TTL_MS: z.coerce.number().int().min(60_000).max(60 * 60 * 1_000).default(5 * 60 * 1_000),
-  DROP_SESSION_TTL_MS: z.coerce.number().int().min(60_000).max(24 * 60 * 60 * 1_000).default(15 * 60 * 1_000),
-  DROP_MAX_FILES: z.coerce.number().int().min(1).max(100).default(20),
-  DROP_MAX_BYTES: z.coerce.number().int().min(1).max(Number.MAX_SAFE_INTEGER).default(20 * 1024 * 1024 * 1024),
+  DROP_SESSION_TTL_MS: z.coerce.number().int().min(60_000).max(24 * 60 * 60 * 1_000).default(30 * 60 * 1_000),
+  DROP_MAX_FILES: z.coerce.number().int().min(1).max(10_000).default(1_000),
+  DROP_MAX_BYTES: z.coerce.number().int().min(1).max(Number.MAX_SAFE_INTEGER).default(100 * 1024 * 1024 * 1024),
+  DROP_BUFFER_DIRECTORY: z.string().min(1).default("data/drop-buffer"),
+  DROP_BUFFER_MAX_BYTES: z.coerce.number().int().min(1024 * 1024).max(Number.MAX_SAFE_INTEGER).default(110 * 1024 * 1024 * 1024),
+  DROP_BUFFER_MIN_FREE_BYTES: z.coerce.number().int().min(0).max(Number.MAX_SAFE_INTEGER).default(10 * 1024 * 1024 * 1024),
+  DROP_BUFFER_WARNING_RATIO: z.coerce.number().min(0.1).max(0.95).default(0.7),
+  DROP_BUFFER_CRITICAL_RATIO: z.coerce.number().min(0.2).max(0.98).default(0.85),
+  DROP_BUFFER_REFUSAL_RATIO: z.coerce.number().min(0.3).max(0.99).default(0.92),
+  DROP_DRAIN_WORKERS: z.coerce.number().int().min(1).max(4).default(2),
+  DROP_DRAIN_INTERVAL_MS: z.coerce.number().int().min(250).max(60_000).default(1_000),
+  DROP_CONTINUATION_TTL_MS: z.coerce.number().int().min(60_000).max(7 * 24 * 60 * 60 * 1_000).default(24 * 60 * 60 * 1_000),
   DROP_FAILURE_LIMIT: z.coerce.number().int().min(1).max(100).default(5),
   DROP_GLOBAL_FAILURE_LIMIT: z.coerce.number().int().min(1).max(10_000).default(100),
   DROP_FAILURE_WINDOW_MS: z.coerce.number().int().min(60_000).max(24 * 60 * 60 * 1_000).default(15 * 60 * 1_000),
@@ -184,6 +217,12 @@ const environmentSchema = z.object({
       message: "Drop batch limit cannot exceed the aggregate per-file upload bound",
     });
   }
+  if (!(value.DROP_BUFFER_WARNING_RATIO < value.DROP_BUFFER_CRITICAL_RATIO && value.DROP_BUFFER_CRITICAL_RATIO < value.DROP_BUFFER_REFUSAL_RATIO)) {
+    context.addIssue({ code: "custom", path: ["DROP_BUFFER_WARNING_RATIO"], message: "Drop buffer watermarks must increase from warning to critical to refusal" });
+  }
+  if (value.DROP_MAX_BYTES > value.DROP_BUFFER_MAX_BYTES) {
+    context.addIssue({ code: "custom", path: ["DROP_MAX_BYTES"], message: "One Drop channel cannot reserve more than the local buffer budget" });
+  }
   if (value.TELEGRAM_ENABLED && (!value.TELEGRAM_BOT_TOKEN_FILE || !value.TELEGRAM_WEBHOOK_SECRET_FILE)) {
     context.addIssue({
       code: "custom",
@@ -224,6 +263,8 @@ const environmentSchema = z.object({
       ["DATABASE_URL", value.DATABASE_URL],
       ["DATABASE_PASSWORD_FILE", value.DATABASE_PASSWORD_FILE],
       ["OWNER_BOOTSTRAP_TOKEN_FILE", value.OWNER_BOOTSTRAP_TOKEN_FILE],
+      ...(value.KERNEL_URL === "" ? [] : [["KERNEL_URL", value.KERNEL_URL]] as const),
+      ...(value.KERNEL_TOKEN_FILE === "" ? [] : [["KERNEL_TOKEN_FILE", value.KERNEL_TOKEN_FILE]] as const),
       ["AUTH_PEPPER_FILE", value.AUTH_PEPPER_FILE],
       ["DROP_PEPPER_FILE", value.DROP_PEPPER_FILE],
       ["SHARE_PEPPER_FILE", value.SHARE_PEPPER_FILE],
@@ -244,6 +285,9 @@ const environmentSchema = z.object({
     if (value.TELEGRAM_ENABLED && new URL(value.TELEGRAM_API_BASE_URL).protocol !== "https:") {
       context.addIssue({ code: "custom", path: ["TELEGRAM_API_BASE_URL"], message: "Production Telegram API must use HTTPS" });
     }
+    if (value.KERNEL_URL !== "" && new URL(value.KERNEL_URL).protocol !== "https:") {
+      context.addIssue({ code: "custom", path: ["KERNEL_URL"], message: "Production Kernel URL must use HTTPS" });
+    }
   }
 });
 
@@ -261,6 +305,11 @@ export interface SaturnConfig {
   readonly databaseUrl: string;
   readonly databasePasswordFile?: string;
   readonly ownerBootstrapTokenFile: string;
+  readonly kernel: {
+    readonly urlSeed?: string;
+    readonly tokenFile?: string;
+    readonly timeoutMs: number;
+  };
   readonly auth: {
     readonly pepperFile: string;
     readonly sessionIdleTtlMs: number;
@@ -276,6 +325,15 @@ export interface SaturnConfig {
     readonly sessionTtlMs: number;
     readonly maxFiles: number;
     readonly maxBytes: number;
+    readonly bufferDirectory: string;
+    readonly bufferMaxBytes: number;
+    readonly bufferMinFreeBytes: number;
+    readonly bufferWarningRatio: number;
+    readonly bufferCriticalRatio: number;
+    readonly bufferRefusalRatio: number;
+    readonly drainWorkers: number;
+    readonly drainIntervalMs: number;
+    readonly continuationTtlMs: number;
     readonly failureLimit: number;
     readonly globalFailureLimit: number;
     readonly failureWindowMs: number;
@@ -342,6 +400,7 @@ export interface SaturnConfig {
     readonly healthTimeoutMs: number;
     readonly maxConnections: number;
   };
+  readonly storageRuntimeConfigDirectory: string;
   readonly readinessRequireStorage: boolean;
   readonly readinessTimeoutMs: number;
   readonly limits: {
@@ -356,6 +415,9 @@ export interface SaturnConfig {
     readonly archiveDirectory: string;
     readonly pgDumpExecutable: string;
     readonly pgRestoreExecutable: string;
+    readonly pgDumpPrefixArgs: readonly string[];
+    readonly pgRestorePrefixArgs: readonly string[];
+    readonly pgCommandConnectionArgs: readonly string[];
     readonly backupIntervalMs: number;
     readonly limits: {
       readonly maxArchiveBytes: number;
@@ -399,6 +461,7 @@ export function loadEnvironment(
   const databasePasswordFile = optionalResolved(value.DATABASE_PASSWORD_FILE, baseDirectory);
   const telegramBotTokenFile = optionalResolved(value.TELEGRAM_BOT_TOKEN_FILE, baseDirectory);
   const telegramWebhookSecretFile = optionalResolved(value.TELEGRAM_WEBHOOK_SECRET_FILE, baseDirectory);
+  const kernelTokenFile = optionalResolved(value.KERNEL_TOKEN_FILE, baseDirectory);
   return {
     environment: value.NODE_ENV,
     publicOrigin: value.PUBLIC_ORIGIN,
@@ -413,6 +476,11 @@ export function loadEnvironment(
     databaseUrl: databaseUrlWithPassword(value.DATABASE_URL, databasePasswordFile),
     ...(databasePasswordFile === undefined ? {} : { databasePasswordFile }),
     ownerBootstrapTokenFile: path.resolve(baseDirectory, value.OWNER_BOOTSTRAP_TOKEN_FILE),
+    kernel: {
+      ...(value.KERNEL_URL === "" ? {} : { urlSeed: new URL(value.KERNEL_URL).toString() }),
+      ...(kernelTokenFile === undefined ? {} : { tokenFile: kernelTokenFile }),
+      timeoutMs: value.KERNEL_TIMEOUT_MS,
+    },
     auth: {
       pepperFile: path.resolve(baseDirectory, value.AUTH_PEPPER_FILE),
       sessionIdleTtlMs: value.AUTH_SESSION_IDLE_TTL_MS,
@@ -428,6 +496,15 @@ export function loadEnvironment(
       sessionTtlMs: value.DROP_SESSION_TTL_MS,
       maxFiles: value.DROP_MAX_FILES,
       maxBytes: value.DROP_MAX_BYTES,
+      bufferDirectory: path.resolve(baseDirectory, value.DROP_BUFFER_DIRECTORY),
+      bufferMaxBytes: value.DROP_BUFFER_MAX_BYTES,
+      bufferMinFreeBytes: value.DROP_BUFFER_MIN_FREE_BYTES,
+      bufferWarningRatio: value.DROP_BUFFER_WARNING_RATIO,
+      bufferCriticalRatio: value.DROP_BUFFER_CRITICAL_RATIO,
+      bufferRefusalRatio: value.DROP_BUFFER_REFUSAL_RATIO,
+      drainWorkers: value.DROP_DRAIN_WORKERS,
+      drainIntervalMs: value.DROP_DRAIN_INTERVAL_MS,
+      continuationTtlMs: value.DROP_CONTINUATION_TTL_MS,
       failureLimit: value.DROP_FAILURE_LIMIT,
       globalFailureLimit: value.DROP_GLOBAL_FAILURE_LIMIT,
       failureWindowMs: value.DROP_FAILURE_WINDOW_MS,
@@ -494,6 +571,7 @@ export function loadEnvironment(
       healthTimeoutMs: value.STORAGE_HEALTH_TIMEOUT_MS,
       maxConnections: value.STORAGE_MAX_CONNECTIONS,
     },
+    storageRuntimeConfigDirectory: path.resolve(baseDirectory, value.STORAGE_RUNTIME_CONFIG_DIR),
     limits: {
       uploadMaxBytes: value.UPLOAD_MAX_BYTES,
       uploadChunkMaxBytes: value.UPLOAD_CHUNK_MAX_BYTES,
@@ -506,6 +584,9 @@ export function loadEnvironment(
       archiveDirectory: path.resolve(baseDirectory, value.RECOVERY_ARCHIVE_DIR),
       pgDumpExecutable: value.PG_DUMP_BIN,
       pgRestoreExecutable: value.PG_RESTORE_BIN,
+      pgDumpPrefixArgs: value.PG_DUMP_PREFIX_ARGS,
+      pgRestorePrefixArgs: value.PG_RESTORE_PREFIX_ARGS,
+      pgCommandConnectionArgs: value.PG_COMMAND_CONNECTION_ARGS,
       backupIntervalMs: value.RECOVERY_BACKUP_INTERVAL_MS,
       limits: {
         maxArchiveBytes: value.RECOVERY_MAX_ARCHIVE_BYTES,
@@ -540,6 +621,14 @@ export function publicConfig(config: SaturnConfig): Record<string, unknown> {
       sessionTtlMs: config.drop.sessionTtlMs,
       maxFiles: config.drop.maxFiles,
       maxBytes: config.drop.maxBytes,
+      bufferMaxBytes: config.drop.bufferMaxBytes,
+      bufferMinFreeBytes: config.drop.bufferMinFreeBytes,
+      bufferWarningRatio: config.drop.bufferWarningRatio,
+      bufferCriticalRatio: config.drop.bufferCriticalRatio,
+      bufferRefusalRatio: config.drop.bufferRefusalRatio,
+      drainWorkers: config.drop.drainWorkers,
+      drainIntervalMs: config.drop.drainIntervalMs,
+      continuationTtlMs: config.drop.continuationTtlMs,
       failureLimit: config.drop.failureLimit,
       globalFailureLimit: config.drop.globalFailureLimit,
       failureWindowMs: config.drop.failureWindowMs,

@@ -121,12 +121,21 @@ describe("SaturnBackupService restore boundary", () => {
     const database = new FakeDatabase();
     database.failNextVerification = true;
     const service = new SaturnBackupService({ spoolRoot: path.join(directory, "spool"), limits, database, metadata: fakeMetadata() });
+    let barrierCalls = 0;
+    let barrierActive = false;
     await expect(service.restore({
       archivePath: input,
       mode: "replace",
       snapshotOutputPath: path.join(directory, "snapshot.zip"),
       snapshotInput: { publicConfiguration: {}, deploymentManifestPath: compose, migrationsDirectory: migrations },
+    }, undefined, async (action) => {
+      barrierCalls += 1;
+      barrierActive = true;
+      try { return await action(); }
+      finally { barrierActive = false; }
     })).rejects.toThrow(/injected post-restore failure/);
+    expect(barrierCalls).toBe(1);
+    expect(barrierActive).toBe(false);
     expect(database.restores).toBe(2);
     expect(database.value).toBe("original");
     await expect(fs.stat(path.join(directory, "snapshot.zip"))).resolves.toBeDefined();

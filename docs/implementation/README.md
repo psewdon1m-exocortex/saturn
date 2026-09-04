@@ -311,11 +311,13 @@ Status: `COMPLETE` — see `STAGE_07_TELEGRAM_DROP.md` and the accepted
 
 - only the bound stable Telegram identity can request Drop access;
 - a Drop session can upload but cannot list, read, overwrite or delete;
-- link codes and Drop codes are distinct, short-lived and single-use.
+- link codes remain single-use. Drop codes are distinct, short-lived
+  multi-client admission capabilities whose clients share one upload-only
+  channel, absolute lifetime, quota and real-time queue.
 
 **Verification**
 
-- concurrent one-time-code consumption;
+- concurrent same-code channel admission and cross-channel isolation;
 - forged identity/webhook, brute-force, replay and revoke tests;
 - complete Drop E2E with interrupted upload;
 - log and backup secret scans.
@@ -500,6 +502,46 @@ Status: `BLOCKED` on external production inputs; local implementation is
 
 - previous immutable application version, configuration lock and verified logical backup remain available until new health and recovery checks pass.
 
+### Stage 14 — Storage, Share and buffered Drop experience
+
+Status: `COMPLETE_WITH_ISOLATED_DECISIONS` — see
+`STAGE_14_STORAGE_SHARE_DROP_EXPERIENCE.md`.
+
+**Entry state**
+
+- the Stage 13 local release gate is green and DEV storage is reachable;
+- Storage, Share, Trash and Drop already have authoritative Gateway services.
+
+**Work**
+
+- align Storage, Shared, Trash, public Share and public/in-house Drop with the
+  new Saturn templates and the Part I interaction contract;
+- add sortable collections, URL breadcrumbs, full context operations,
+  responsive public states and owner folder ZIP download;
+- replace direct public Drop streaming with the bounded local buffer, durable
+  upload states, resumable offsets and checksum-verifying drain workers;
+- expose Telegram connection and Drop buffer status in Settings.
+
+**Exit state**
+
+- public and in-house Drop share the same buffered pipeline;
+- Share password, expiry, descendants, individual download, package download
+  and revoke behavior are authoritative and smoke-tested;
+- pending historical-capability and root-file policy decisions remain isolated
+  and do not alter existing security or storage-root contracts.
+
+**Verification**
+
+- aggregate lint, typecheck, 98 tests and production builds;
+- real DEV SFTP buffer/checksum/download, owner folder ZIP and public Share E2E;
+- desktop/narrow public browser checks and real Access Key paste event.
+
+**Rollback**
+
+- stop new Drop reservations, preserve or drain staged files, and roll back the
+  application/database only after the migration guard confirms no uncommitted
+  buffered upload exists.
+
 ## 4. Release boundaries
 
 | Release | Required stages | Meaning |
@@ -507,7 +549,7 @@ Status: `BLOCKED` on external production inputs; local implementation is
 | Storage feasibility | 0-1 | Hetzner transport assumptions are measured |
 | Private alpha | 0-6 | Safe owner-only file system with tested recovery |
 | Personal production | 0-10 | External access, sync and backup ingest are production-capable |
-| Complete Saturn | 0-13 | Full documented scope, DR and provider exit are verified |
+| Complete Saturn | 0-15 | Full documented scope, current Saturn UX, DR and runtime target selection are verified |
 
 ## 5. Current state
 
@@ -527,5 +569,23 @@ Status: `BLOCKED` on external production inputs; local implementation is
 | 11 | `COMPLETE` |
 | 12 | `COMPLETE` |
 | 13 | `BLOCKED` — external PROD activation inputs required |
+| 14 | `COMPLETE_WITH_ISOLATED_DECISIONS` |
+| 15 | `COMPLETE_LOCAL` — production target switch remains an operator deployment action |
 
 Stage state changes are recorded in `VERIFICATION_MATRIX.md` with evidence.
+
+### Stage 15 — Runtime storage profile
+
+Status: `COMPLETE_LOCAL` — see `STAGE_15_RUNTIME_STORAGE_SWITCHING.md` and
+`RUNTIME_STORAGE_SWITCHING.md`.
+
+**Entry state:** one bootstrap SFTP profile, stable canonical root IDs and a
+working exclusive maintenance barrier.
+
+**Exit state:** Settings can validate and atomically select an independent SFTP
+target; API/worker converge through a protected shared runtime profile; visible
+catalog and storage metrics are rebuilt from that target; zero file bytes are
+migrated.
+
+**Rollback:** select the previous target again with its write-only credential.
+The previous storage contents are never removed by the switch.

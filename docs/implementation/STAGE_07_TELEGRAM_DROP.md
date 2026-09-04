@@ -29,12 +29,16 @@ read, list, overwrite, move or delete capability.
 - `BOUND`: one Telegram `from.id` and its private `chat.id` are bound
   transactionally. Usernames are display metadata and never identity.
 - `DROP_CHALLENGE_ACTIVE`: `/drop` from the bound identity creates one
-  Crockford Base32 code. Its raw value exists only in the provider message.
-- `DROP_SESSION_ACTIVE`: redeem atomically consumes the challenge and creates
-  separate HttpOnly and CSRF cookies with a 15-minute absolute expiry.
+  Crockford Base32 code and one shared Drop channel. Its raw value exists only
+  in the provider message and remains redeemable during the bounded admission
+  window so several devices can join the same channel.
+- `DROP_SESSION_ACTIVE`: every successful redemption creates independent
+  HttpOnly and CSRF credentials for that client. All clients joined with the
+  same code share the channel's absolute expiry, upload list and quota.
 - `UPLOAD_RESERVED`: a file slot and its declared bytes are reserved before a
   core upload is created. Reservation is rolled back if creation fails.
-- `UPLOADING`: only the session's mapped upload ID may be inspected or resumed.
+- `UPLOADING`: only upload IDs mapped to the authenticated Drop channel may be
+  listed, inspected, resumed or cancelled.
 - `COMPLETED`: `FileService` has atomically committed and checksummed the file
   under `drop point/YYYY-MM-DD`; the completion is idempotent.
 - `REVOKED_OR_EXPIRED`: the Drop cookie, every active session and every pending
@@ -47,9 +51,10 @@ read, list, overwrite, move or delete capability.
 - Only the currently bound stable Telegram identity in a private chat can use
   `/drop`, `/revoke` or `/status`.
 - Link and Drop codes have different alphabets/lengths, HMAC domains, database
-  purpose values and redemption functions; neither can be replayed or swapped.
-- A Drop session can create, resume, inspect and complete only its own uploads,
-  with at most 20 files and 20 GiB declared bytes in total.
+  purpose values and redemption functions. Link codes remain single-use; a
+  Drop code deliberately admits multiple clients only until its code TTL.
+- A Drop client can create, resume, inspect and complete only its channel's
+  uploads. File and byte quotas are atomic and shared by that whole channel.
 - Drop routes expose no resource IDs beyond the session's upload mappings and
   no list, read, overwrite, rename, move, copy, trash or restore operation.
 - Invalid redeem attempts are bounded per source and globally in a 15-minute
@@ -70,22 +75,27 @@ POST   /internal/telegram/webhook             Telegram secret header
 
 POST   /api/v1/drop/redeem                    code + same-origin POST
 GET    /api/v1/drop/session                   Drop cookie; quota state only
+GET    /api/v1/drop/events                    Drop cookie; channel upload SSE
+GET    /api/v1/drop/uploads                   Drop cookie; channel uploads only
 POST   /api/v1/drop/uploads                   Drop cookie + CSRF
-GET    /api/v1/drop/uploads/{id}/status       own mapped upload only
-PATCH  /api/v1/drop/uploads/{id}              own mapped upload only
-POST   /api/v1/drop/complete                  own mapped upload only
+GET    /api/v1/drop/uploads/{id}/status       channel-mapped upload only
+PATCH  /api/v1/drop/uploads/{id}              channel-mapped upload only
+POST   /api/v1/drop/complete                  channel-mapped upload only
 POST   /api/v1/drop/logout                    revoke current Drop session
 ```
 
 `/drop` is a public, non-indexable page. The code is accepted only in the POST
-body. The browser stores no code or token in local/session storage.
+body. The browser stores no code or token in local/session storage. A non-secret
+channel UUID in the tab's History state prevents another tab's same-origin
+cookie from silently switching that tab to a different Drop channel.
 
 ## Defaults and hard bounds
 
 - link code: 12 Crockford Base32 characters, 5-minute TTL, single use;
-- Drop code: 8 Crockford Base32 characters, 5-minute TTL, single use;
-- Drop session: 15-minute absolute TTL;
-- maximum 20 files and 20 GiB declared bytes per session;
+- Drop code: 8 Crockford Base32 characters, 30-minute multi-client admission window;
+- Drop channel and every client session: the same absolute expiry, exactly 30
+  minutes after code issue; a late redemption never extends it;
+- maximum 1,000 files and 100 GiB declared bytes per channel;
 - invalid redeem limit: 5 per hashed source and 100 globally per 15 minutes;
 - webhook JSON body: 64 KiB; accepted update type: `message` only;
 - provider request timeout: 10 seconds; no bot token is included in surfaced
@@ -105,14 +115,14 @@ provider harness.
 
 1. Migration `0006_telegram_drop` apply/down/apply.
 2. Distinct link/Drop lifecycle, expiry, purpose swapping and concurrent
-   consumption.
+   multi-client redemption into one shared channel.
 3. Bound/unbound/forged Telegram identities, private-chat enforcement, webhook
    secret mismatch, update replay and provider retry behavior.
 4. Per-source and global brute-force boundaries, session expiry and `/revoke`.
 5. Complete browser Drop E2E: redeem, interrupted chunk upload, resume,
    checksum commit and owner Drop Point visibility.
 6. Negative privilege matrix against owner list/read/overwrite/delete routes
-   and another Drop session's upload IDs.
+   and another Drop channel's upload IDs.
 7. File-count and byte quota concurrency tests with reservation rollback.
 8. Telegram provider `getMe`, `setWebhook` and `sendMessage` contract through a
    local HTTP server, including timeout/error redaction.

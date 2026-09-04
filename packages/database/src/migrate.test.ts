@@ -23,6 +23,16 @@ describe("migration manifest", () => {
       "0012_root_storage_layout",
       "0013_root_folder_policy",
       "0014_remove_resource_graph",
+      "0015_sidebar_preferences",
+      "0016_remove_activity_laboratory_navigation",
+      "0017_ui_unification",
+      "0018_dashboard_transfer_tasks",
+      "0019_internal_drop_codes",
+      "0020_buffered_drop",
+      "0021_folder_aggregate_sizes",
+      "0022_drop_shared_channels",
+      "0023_telegram_settings_section",
+      "0024_runtime_storage_profiles",
     ]);
     for (const pair of pairs) {
       await expect(fs.readFile(pair.up, "utf8")).resolves.toMatch(/\S/);

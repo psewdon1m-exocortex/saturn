@@ -124,6 +124,8 @@ Operator entry points:
 - `pnpm recovery validate <archive>`
 - `pnpm recovery restore-clean <archive>`
 - `pnpm recovery restore-replace <archive> --confirm-replace`
+- Settings → Backup and `/api/v1/operator/recovery/*`; the web state, safety
+  gates and live DEV evidence are specified in `WEB_RECOVERY_WORKFLOW.md`.
 
 ## Rollback and recovery sequence
 

@@ -11,6 +11,7 @@ export interface WorkerDatabasePort {
     readonly startedAt: Date;
     readonly seenAt?: Date;
   }): Promise<void>;
+  withSharedMaintenance?<T>(action: () => Promise<T>): Promise<T>;
   close(): Promise<void>;
 }
 
@@ -23,6 +24,7 @@ export interface WorkerJobsPort {
   purge?(): Promise<void>;
   backup?(): Promise<void>;
   maintain?(): Promise<void>;
+  drain?(): Promise<unknown>;
   close?(): Promise<void>;
 }
 
@@ -59,6 +61,10 @@ export function buildWorker(
   let heartbeatTimer: NodeJS.Timeout | undefined;
   let reconciliationTimer: NodeJS.Timeout | undefined;
   let backupTimer: NodeJS.Timeout | undefined;
+  let dropDrainTimer: NodeJS.Timeout | undefined;
+  let dropDrainRunning = false;
+
+  const runMutation = <T>(action: () => Promise<T>): Promise<T> => database.withSharedMaintenance?.(action) ?? action();
 
   const heartbeat = async (): Promise<void> => {
     await database.upsertWorkerHeartbeat({ role: "primary", instanceId, startedAt });
@@ -90,6 +96,7 @@ export function buildWorker(
     if (heartbeatTimer !== undefined) clearInterval(heartbeatTimer);
     if (reconciliationTimer !== undefined) clearInterval(reconciliationTimer);
     if (backupTimer !== undefined) clearInterval(backupTimer);
+    if (dropDrainTimer !== undefined) clearInterval(dropDrainTimer);
     await jobs?.close?.();
     await database.close();
   });
@@ -108,18 +115,30 @@ export function buildWorker(
     startBackgroundJobs: () => {
       if (jobs === undefined) return;
       reconciliationTimer = setInterval(() => {
-        void jobs.reconcile().then(async () => jobs.purge?.()).then(async () => jobs.maintain?.()).catch((error: unknown) => {
+        void runMutation(async () => { await jobs.reconcile(); await jobs.purge?.(); await jobs.maintain?.(); }).catch((error: unknown) => {
           app.log.error({ error }, "scheduled reconciliation failed");
         });
       }, config.worker.reconciliationIntervalMs);
       reconciliationTimer.unref();
       if (jobs.backup !== undefined) {
         backupTimer = setInterval(() => {
-          void jobs.backup?.().catch((error: unknown) => {
+          void runMutation(async () => jobs.backup?.()).catch((error: unknown) => {
             app.log.error({ error }, "scheduled Saturn backup failed");
           });
         }, config.recovery.backupIntervalMs);
         backupTimer.unref();
+      }
+      if (jobs.drain !== undefined) {
+        const drain = () => {
+          if (dropDrainRunning) return;
+          dropDrainRunning = true;
+          void runMutation(async () => jobs.drain?.()).catch((error: unknown) => {
+            app.log.error({ error }, "Drop buffer drain failed");
+          }).finally(() => { dropDrainRunning = false; });
+        };
+        drain();
+        dropDrainTimer = setInterval(drain, config.drop.drainIntervalMs);
+        dropDrainTimer.unref();
       }
     },
   };

@@ -5,6 +5,8 @@ import type { SaturnConfig } from "@saturn/config";
 import type { FastifyRequest } from "fastify";
 import { describe, expect, it, vi } from "vitest";
 import { OwnerTokenGuard } from "./owner-token.guard.js";
+import { FileController } from "./file.controller.js";
+import { ShareOwnerController } from "./share.controller.js";
 
 vi.mock("@fastify/cookie", () => ({
   fastifyCookie: {
@@ -64,5 +66,24 @@ describe("OwnerTokenGuard", () => {
   it("keeps an invalid session as unauthorized", async () => {
     await expect(guardFor(new OwnerAuthenticationError("invalid_session")).guard.canActivate(context()))
       .rejects.toBeInstanceOf(UnauthorizedException);
+  });
+
+  it("allows an authenticated owner session to create and revoke shares without recent proof", () => {
+    // Decorator metadata is attached to the handler functions themselves.
+    // eslint-disable-next-line @typescript-eslint/unbound-method
+    const create = ShareOwnerController.prototype.create;
+    // eslint-disable-next-line @typescript-eslint/unbound-method
+    const update = ShareOwnerController.prototype.update;
+    // eslint-disable-next-line @typescript-eslint/unbound-method
+    const revoke = ShareOwnerController.prototype.revoke;
+    expect(Reflect.getMetadata("vault:recent-reauthentication", create)).toBeUndefined();
+    expect(Reflect.getMetadata("vault:recent-reauthentication", revoke)).toBeUndefined();
+    expect(Reflect.getMetadata("vault:recent-reauthentication", update)).toBe(true);
+  });
+
+  it("allows permanent Trash deletion in an authenticated owner session", () => {
+    // eslint-disable-next-line @typescript-eslint/unbound-method
+    const purge = FileController.prototype.purgeTrashFile;
+    expect(Reflect.getMetadata("vault:recent-reauthentication", purge)).toBeUndefined();
   });
 });

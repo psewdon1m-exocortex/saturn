@@ -83,6 +83,10 @@ export interface FileRepository {
     readonly parentId: string;
     readonly name: string;
   }): Promise<Resource>;
+  purgeTrashFile(record: {
+    readonly operationId: string;
+    readonly resourceId: string;
+  }): Promise<Resource>;
   commitVersionRestore(record: CommitVersionRestoreRecord): Promise<Resource>;
 }
 

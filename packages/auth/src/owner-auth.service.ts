@@ -1,10 +1,11 @@
-import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomBytes, scrypt, timingSafeEqual } from "node:crypto";
 import type { AuditSink } from "@saturn/audit";
 import { v7 as uuidv7 } from "uuid";
 import type {
   NewOwnerSession,
   OwnerAuthOptions,
   OwnerAuthRepository,
+  OwnerCredentialVerifier,
   OwnerPreferences,
   OwnerSession,
   SessionValidationInput,
@@ -29,6 +30,18 @@ function secureEqual(left: string, right: string): boolean {
   return timingSafeEqual(leftDigest, rightDigest);
 }
 
+function scryptVerifier(value: string, salt: Buffer): Promise<Buffer> {
+  return new Promise((resolve, reject) => scrypt(value, salt, 32, { N: 32_768, r: 8, p: 1, maxmem: 64 * 1024 * 1024 }, (error, derived) => {
+    if (error === null) resolve(derived);
+    else reject(error);
+  }));
+}
+
+async function createCredentialVerifier(value: string): Promise<Omit<OwnerCredentialVerifier, "revision">> {
+  const salt = randomBytes(16);
+  return { algorithm: "scrypt-v1", saltHex: salt.toString("hex"), verifierHex: (await scryptVerifier(value, salt)).toString("hex") };
+}
+
 function validOpaqueToken(value: string): boolean {
   return /^[A-Za-z0-9_-]{43}$/.test(value);
 }
@@ -39,6 +52,7 @@ export class OwnerAuthService {
   readonly #pepper: Buffer;
   readonly #options: OwnerAuthOptions;
   readonly #audit: AuditSink | undefined;
+  #credentialVerifier: OwnerCredentialVerifier | undefined;
 
   constructor(input: {
     readonly repository: OwnerAuthRepository;
@@ -56,8 +70,17 @@ export class OwnerAuthService {
     this.#audit = input.audit;
   }
 
-  verifyBootstrap(candidate: string): boolean {
-    return secureEqual(candidate, this.#ownerAccessKey);
+  async initialize(): Promise<void> {
+    const existing = await this.#repository.getCredentialVerifier();
+    this.#credentialVerifier = existing ?? await this.#repository.initializeCredentialVerifier(await createCredentialVerifier(this.#ownerAccessKey));
+  }
+
+  async verifyBootstrap(candidate: string): Promise<boolean> {
+    const verifier = this.#credentialVerifier ?? await this.#repository.getCredentialVerifier();
+    if (verifier === undefined) return secureEqual(candidate, this.#ownerAccessKey);
+    this.#credentialVerifier = verifier;
+    const derived = await scryptVerifier(candidate, Buffer.from(verifier.saltHex, "hex"));
+    return timingSafeEqual(derived, Buffer.from(verifier.verifierHex, "hex"));
   }
 
   #fieldHash(label: string, value: string, maximumLength: number): string {
@@ -111,7 +134,7 @@ export class OwnerAuthService {
       await this.#auditEvent("owner.login", "denied", `login-rate:${uuidv7()}`, { reason: "rate_limited" });
       throw new OwnerAuthenticationError("rate_limited");
     }
-    if (!this.verifyBootstrap(accessKey)) {
+    if (!await this.verifyBootstrap(accessKey)) {
       await this.#repository.recordAttempt(sourceIpHash, "failure", now);
       await this.#auditEvent("owner.login", "denied", `login-failure:${uuidv7()}`, { reason: "invalid_credentials" });
       throw new OwnerAuthenticationError("invalid_credentials");
@@ -164,7 +187,7 @@ export class OwnerAuthService {
     readonly userAgent: string;
     readonly now?: Date;
   }): Promise<NewOwnerSession> {
-    if (!this.verifyBootstrap(input.accessKey)) throw new OwnerAuthenticationError("invalid_credentials");
+    if (!await this.verifyBootstrap(input.accessKey)) throw new OwnerAuthenticationError("invalid_credentials");
     const now = input.now ?? new Date();
     const replacement = this.#newSession(input.sourceIp, input.userAgent, now, input.previous.expiresAt);
     await this.#repository.rotateSession(sha256(input.previousToken), replacement.session);
@@ -186,14 +209,50 @@ export class OwnerAuthService {
     return count;
   }
 
+  async changeAccessKey(input: {
+    readonly previous: OwnerSession;
+    readonly previousToken: string;
+    readonly currentAccessKey: string;
+    readonly newAccessKey: string;
+    readonly confirmation: string;
+    readonly sourceIp: string;
+    readonly userAgent: string;
+    readonly now?: Date;
+  }): Promise<NewOwnerSession & { readonly revokedSessions: number }> {
+    if (!await this.verifyBootstrap(input.currentAccessKey)) throw new OwnerAuthenticationError("invalid_credentials");
+    if (!secureEqual(input.newAccessKey, input.confirmation)
+      || input.newAccessKey.length < 32
+      || input.newAccessKey.length > 512
+      || /[\r\n]/.test(input.newAccessKey)
+      || secureEqual(input.currentAccessKey, input.newAccessKey)) {
+      throw new OwnerAuthenticationError("invalid_credentials");
+    }
+    const verifier = this.#credentialVerifier;
+    if (verifier === undefined) throw new Error("Owner credential verifier is not initialized");
+    const now = input.now ?? new Date();
+    const replacement = this.#newSession(input.sourceIp, input.userAgent, now, input.previous.expiresAt);
+    const result = await this.#repository.replaceCredentialVerifier({
+      expectedRevision: verifier.revision,
+      verifier: await createCredentialVerifier(input.newAccessKey),
+      previousTokenHash: sha256(input.previousToken),
+      replacementSession: replacement.session,
+      now,
+    });
+    this.#credentialVerifier = result.verifier;
+    await this.#auditEvent("owner.access-key.changed", "success", `access-key:${replacement.session.id}`, {
+      sessionId: replacement.session.id,
+      revokedSessions: result.revokedSessions,
+      credentialRevision: result.verifier.revision,
+    });
+    return { ...replacement, revokedSessions: result.revokedSessions };
+  }
+
   getPreferences(): Promise<OwnerPreferences> {
     return this.#repository.getPreferences();
   }
 
   updatePreferences(input: Omit<OwnerPreferences, "updatedAt">): Promise<OwnerPreferences> {
-    for (const color of [input.darkColor, input.lightColor, input.accentColor]) {
-      if (!/^#[0-9a-fA-F]{6}$/.test(color)) throw new Error("Appearance color is invalid");
-    }
+    if (!/^#[0-9a-fA-F]{6}$/.test(input.accentColor)) throw new Error("Appearance color is invalid");
     return this.#repository.updatePreferences(input);
   }
 

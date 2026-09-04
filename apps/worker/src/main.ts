@@ -10,8 +10,8 @@ import {
   PurgeService,
   ReconciliationService,
 } from "@saturn/protection";
-import { SftpStorageAdapter } from "@saturn/storage";
-import { SftpHealthProbe } from "@saturn/storage-health";
+import { RuntimeStorageManager } from "@saturn/storage";
+import { AdapterStorageHealthProbe } from "@saturn/storage-health";
 import {
   DatabaseMetadataExporter,
   PostgresCommandToolchain,
@@ -20,20 +20,24 @@ import {
 } from "@saturn/recovery";
 import { buildWorker } from "./worker.js";
 import { PostgresShareRepository } from "@saturn/shares";
+import { DropBufferStore, DropDrainService, PostgresDropRepository } from "@saturn/drop";
+import { FileService, PostgresFileRepository } from "@saturn/file-core";
 
 const config = loadEnvironment();
-const database = new Database(config.databaseUrl, { max: 5 });
-const storage = new SftpStorageAdapter(config.storage);
+const database = new Database(config.databaseUrl, { max: 5, maintenanceBarrier: true });
+const storage = new RuntimeStorageManager(config.storage, config.storageRuntimeConfigDirectory);
+await storage.initialize();
+const audit = new AuditService(database);
 const reconciliation = new ReconciliationService(
   new PostgresReconciliationRepository(database),
   storage,
-  new AuditService(database),
+  audit,
 );
 const purge = new PurgeService(
   new PostgresPurgeRepository(database),
   storage,
   config.protection.purgeEnabled,
-  new AuditService(database),
+  audit,
 );
 const knownSecrets = [
   await fs.readFile(config.ownerBootstrapTokenFile, "utf8").then((value) => value.trim()),
@@ -50,6 +54,9 @@ const recovery = new SaturnBackupService({
     database,
     pgDumpExecutable: config.recovery.pgDumpExecutable,
     pgRestoreExecutable: config.recovery.pgRestoreExecutable,
+    pgDumpPrefixArgs: config.recovery.pgDumpPrefixArgs,
+    pgRestorePrefixArgs: config.recovery.pgRestorePrefixArgs,
+    ...(config.recovery.pgCommandConnectionArgs.length === 0 ? {} : { commandConnectionArgs: config.recovery.pgCommandConnectionArgs }),
     maximumDumpBytes: config.recovery.limits.maxMemberBytes,
   }),
   metadata: new DatabaseMetadataExporter(database),
@@ -58,7 +65,23 @@ const recovery = new SaturnBackupService({
   storage,
 });
 const shareRepository = new PostgresShareRepository(database);
-const runtime = buildWorker(config, database, new SftpHealthProbe(config.storage), {
+const dropRepository = new PostgresDropRepository(database);
+const dropBuffer = new DropBufferStore({
+  root: config.drop.bufferDirectory,
+  maxBytes: config.drop.bufferMaxBytes,
+  minFreeBytes: config.drop.bufferMinFreeBytes,
+  warningRatio: config.drop.bufferWarningRatio,
+  criticalRatio: config.drop.bufferCriticalRatio,
+  refusalRatio: config.drop.bufferRefusalRatio,
+});
+await dropBuffer.initialize();
+const dropDrain = new DropDrainService({
+  repository: dropRepository,
+  buffer: dropBuffer,
+  files: new FileService(new PostgresFileRepository(database), storage, { ...config.limits, auditSink: audit }),
+  workers: config.drop.drainWorkers,
+});
+const runtime = buildWorker(config, database, new AdapterStorageHealthProbe(storage), {
   reconcile: async () => { await reconciliation.run("metadata"); },
   purge: async () => { await purge.run(); },
   backup: async () => {
@@ -66,7 +89,7 @@ const runtime = buildWorker(config, database, new SftpHealthProbe(config.storage
     const outputPath = path.join(config.recovery.archiveDirectory, `saturn-${new Date().toISOString().replaceAll(":", "-")}.zip`);
     const created = await recovery.createBackup({
       outputPath,
-      publicConfiguration: publicConfig(config),
+      publicConfiguration: publicConfig({ ...config, storage: storage.current().config }),
       deploymentManifestPath: path.resolve("compose.yaml"),
       migrationsDirectory: path.resolve("packages/database/migrations"),
       kind: "scheduled",
@@ -80,6 +103,7 @@ const runtime = buildWorker(config, database, new SftpHealthProbe(config.storage
       await shareRepository.markPackageExpired(item.id);
     }
   },
+  drain: async () => dropDrain.drain(),
   close: async () => { await storage.close(); },
 });
 await runtime.startHeartbeat();

@@ -4,6 +4,7 @@ import type { AuditSink } from "@saturn/audit";
 import { DROP_POINT_RESOURCE_ID } from "@saturn/file-core";
 import { normalizeStorageName } from "@saturn/storage";
 import { v7 as uuidv7 } from "uuid";
+import type { DropBufferStore } from "./buffer-store.js";
 import type {
   DropCompletion,
   DropFileGateway,
@@ -86,6 +87,7 @@ export class DropService {
   readonly #pepper: Buffer;
   readonly #options: DropOptions;
   readonly #audit: AuditSink | undefined;
+  readonly #buffer: DropBufferStore | undefined;
   #notifications: DropNotificationSink | undefined;
 
   constructor(input: {
@@ -95,6 +97,7 @@ export class DropService {
     readonly options: DropOptions;
     readonly audit?: AuditSink;
     readonly notifications?: DropNotificationSink;
+    readonly buffer?: DropBufferStore;
   }) {
     if (input.pepper.length < 32 || /[\r\n]/.test(input.pepper)) throw new Error("Drop pepper is invalid");
     this.#repository = input.repository;
@@ -103,6 +106,7 @@ export class DropService {
     this.#options = input.options;
     this.#audit = input.audit;
     this.#notifications = input.notifications;
+    this.#buffer = input.buffer;
   }
 
   setNotificationSink(value: DropNotificationSink): void {
@@ -149,19 +153,32 @@ export class DropService {
     return result;
   }
 
-  async issueDropCode(identity: TelegramIdentity, now = new Date()): Promise<{ readonly code: string; readonly expiresAt: Date }> {
+  issueDropCode(now = new Date()): Promise<{ readonly code: string; readonly expiresAt: Date }> {
+    return this.#issueDropCode(undefined, now);
+  }
+
+  issueDropCodeForTelegram(identity: TelegramIdentity, now = new Date()): Promise<{ readonly code: string; readonly expiresAt: Date }> {
     validateIdentity(identity);
+    return this.#issueDropCode(identity, now);
+  }
+
+  async #issueDropCode(identity: TelegramIdentity | undefined, now: Date): Promise<{ readonly code: string; readonly expiresAt: Date }> {
     const raw = code(8);
     const expiresAt = new Date(now.getTime() + this.#options.codeTtlMs);
     const created = await this.#repository.createDropChallenge({
       id: uuidv7(),
       codeHash: this.#hmac("drop-code", raw),
-      identity,
+      ...(identity === undefined ? {} : { identity }),
       createdAt: now,
       expiresAt,
+      maxFiles: this.#options.maxFiles,
+      maxBytes: this.#options.maxBytes,
     });
     if (!created) throw new DropServiceError("not_bound");
-    await this.#auditEvent("drop.challenge.created", "success", `drop-code:${uuidv7()}`, { telegramUserId: identity.userId });
+    await this.#auditEvent("drop.challenge.created", "success", `drop-code:${uuidv7()}`, {
+      source: identity === undefined ? "owner" : "telegram",
+      ...(identity === undefined ? {} : { telegramUserId: identity.userId }),
+    });
     return { code: displayCode(raw), expiresAt };
   }
 
@@ -220,11 +237,14 @@ export class DropService {
 
   async validateSession(input: DropSessionValidationInput): Promise<DropSession> {
     if (!opaqueToken(input.token)) throw new DropServiceError("invalid_session");
-    const value = await this.#repository.touchDropSession(
+    let value = await this.#repository.touchDropSession(
       sha256(input.token),
       this.#userAgentHash(input.userAgent),
       input.now ?? new Date(),
     );
+    if (value === undefined && input.allowExpiredUploadId !== undefined && this.#repository.getContinuationSession !== undefined) {
+      value = await this.#repository.getContinuationSession(sha256(input.token), this.#userAgentHash(input.userAgent), input.allowExpiredUploadId, input.now ?? new Date());
+    }
     if (value === undefined) throw new DropServiceError("invalid_session");
     if (input.isMutation) {
       let origin: string;
@@ -264,20 +284,42 @@ export class DropService {
     }
     if (expectedSha256 !== undefined && !/^[a-f0-9]{64}$/.test(expectedSha256)) throw new Error("Drop upload checksum is invalid");
     const now = input.now ?? new Date();
+    if (this.#buffer !== undefined && this.#repository.bufferReservedBytes !== undefined) {
+      await this.#buffer.initialize();
+      const capacity = await this.#buffer.capacity(await this.#repository.bufferReservedBytes(), input.expectedSize);
+      if (capacity.state === "refusing") throw new DropServiceError("quota_exhausted");
+    }
     const reservation = await this.#repository.reserveUpload({
       id: uuidv7(),
       sessionId: session.id,
+      channelId: session.channelId,
       clientKeyHash: this.#hmac("drop-upload-idempotency", validateIdempotencyKey(input.idempotencyKey)),
       filename,
       expectedSize: input.expectedSize,
       ...(expectedSha256 === undefined ? {} : { expectedSha256 }),
       now,
+      ...(this.#buffer === undefined ? {} : {
+        continuationUntil: new Date(now.getTime() + (this.#options.continuationTtlMs ?? 24 * 60 * 60 * 1_000)),
+        globalMaxBytes: this.#buffer.reservationLimitBytes,
+      }),
     }).catch((error: unknown) => {
       if (error instanceof Error && /quota/i.test(error.message)) throw new DropServiceError("quota_exhausted");
       throw error;
     });
     let mapping = reservation.value;
     try {
+      if (this.#buffer !== undefined && this.#repository.initializeBufferedUpload !== undefined) {
+        const localPath = this.#buffer.relativePath(mapping.id);
+        if (reservation.created) await this.#buffer.create(localPath);
+        mapping = await this.#repository.initializeBufferedUpload(
+          session.channelId,
+          mapping.id,
+          localPath,
+          new Date(now.getTime() + (this.#options.continuationTtlMs ?? 24 * 60 * 60 * 1_000)),
+          now,
+        );
+        return this.#bufferStatus(mapping, session.expiresAt);
+      }
       const parentId = await this.#dateFolder(now, session.id);
       const core = await this.#files.createUpload({
         parentId,
@@ -287,50 +329,94 @@ export class DropService {
         idempotencyKey: `drop:${mapping.id}`,
         auditActor: { type: "drop_session", id: session.id },
       });
-      mapping = await this.#repository.attachUpload(session.id, mapping.id, core.id);
+      mapping = await this.#repository.attachUpload(session.channelId, mapping.id, core.id);
       return await this.#status(mapping);
     } catch (error) {
-      if (reservation.created && mapping.uploadId === undefined) await this.#repository.releaseUploadReservation(session.id, mapping.id).catch(() => undefined);
+      if (reservation.created && mapping.uploadId === undefined) {
+        await this.#repository.releaseUploadReservation(session.channelId, mapping.id).catch(() => undefined);
+        if (this.#buffer !== undefined) await this.#buffer.delete(this.#buffer.relativePath(mapping.id)).catch(() => undefined);
+      }
       throw error;
     }
   }
 
   async inspectUpload(session: DropSession, id: string): Promise<DropUploadStatus> {
-    const mapping = await this.#mapped(session.id, id);
+    const mapping = await this.#mapped(session.channelId, id);
+    if (this.#buffer !== undefined && mapping.localPath !== undefined) return this.#bufferStatus(mapping, session.expiresAt);
     return this.#status(mapping);
   }
 
+  async listUploads(session: DropSession): Promise<readonly DropUploadStatus[]> {
+    if (this.#repository.listDropUploads === undefined) return [];
+    return (await this.#repository.listDropUploads(session.channelId)).map((mapping) => this.#bufferStatus(mapping, session.expiresAt));
+  }
+
+  async bufferCapacity() {
+    if (this.#buffer === undefined || this.#repository.bufferReservedBytes === undefined) return undefined;
+    return this.#buffer.capacity(await this.#repository.bufferReservedBytes());
+  }
+
   async appendUpload(session: DropSession, id: string, offset: number, contentLength: number, source: Readable): Promise<DropUploadStatus> {
-    const mapping = await this.#mapped(session.id, id);
+    const mapping = await this.#mapped(session.channelId, id);
+    if (this.#buffer !== undefined && mapping.localPath !== undefined && this.#repository.advanceBufferedUpload !== undefined) {
+      if (mapping.state !== "uploading") throw new Error("Drop upload is not writable");
+      if (offset !== (mapping.receivedSize ?? 0) || offset + contentLength > mapping.expectedSize) throw new Error("Drop upload offset is invalid");
+      const written = await this.#buffer.append(mapping.localPath, offset, contentLength, source);
+      const updated = await this.#repository.advanceBufferedUpload(session.channelId, id, offset, written, new Date());
+      return this.#bufferStatus(updated, session.expiresAt);
+    }
     if (mapping.uploadId === undefined || mapping.state === "completed") throw new Error("Drop upload is not writable");
     await this.#files.appendUpload(mapping.uploadId, offset, contentLength, source);
     return this.#status(mapping);
   }
 
   async completeUpload(session: DropSession, id: string, now = new Date()): Promise<DropCompletion> {
-    const mapping = await this.#mapped(session.id, id);
+    const mapping = await this.#mapped(session.channelId, id);
+    if (this.#buffer !== undefined && mapping.localPath !== undefined && this.#repository.markUploadBuffered !== undefined) {
+      if ((mapping.receivedSize ?? 0) !== mapping.expectedSize) throw new Error("Drop upload is incomplete");
+      const digest = await this.#buffer.digest(mapping.localPath);
+      if (digest.bytes !== mapping.expectedSize || (mapping.expectedSha256 !== undefined && mapping.expectedSha256 !== digest.sha256)) {
+        await this.#repository.markUploadFailed?.(mapping.id, "checksum_mismatch", now);
+        throw new Error("Drop upload checksum did not match");
+      }
+      const buffered = await this.#repository.markUploadBuffered(session.channelId, mapping.id, digest.sha256, now);
+      await this.#auditEvent("drop.upload.buffered", "success", `drop-upload:${mapping.id}`, { sessionId: session.id, channelId: session.channelId, uploadId: mapping.id, sizeBytes: digest.bytes });
+      return { upload: this.#bufferStatus(buffered, session.expiresAt), filename: mapping.filename, sizeBytes: digest.bytes, sha256: digest.sha256 };
+    }
     if (mapping.uploadId === undefined) throw new Error("Drop upload is incomplete");
     const completed = await this.#files.completeUpload(mapping.uploadId);
-    await this.#repository.completeDropUpload(session.id, mapping.id, completed.resource.id, now);
-    const identity = { userId: session.telegramUserId, chatId: session.telegramChatId };
-    await this.#notifications?.uploadCompleted(identity, completed.resource.name, completed.resource.sizeBytes).catch(() => undefined);
+    await this.#repository.completeDropUpload(session.channelId, mapping.id, completed.resource.id, now);
+    if (session.telegramUserId !== undefined && session.telegramChatId !== undefined) {
+      const identity = { userId: session.telegramUserId, chatId: session.telegramChatId };
+      await this.#notifications?.uploadCompleted(identity, completed.resource.name, completed.resource.sizeBytes).catch(() => undefined);
+    }
     await this.#auditEvent("drop.upload.completed", "success", `drop-upload:${mapping.id}`, {
       sessionId: session.id,
+      channelId: session.channelId,
       uploadId: mapping.id,
       resourceId: completed.resource.id,
       sizeBytes: completed.resource.sizeBytes,
     });
     return {
-      upload: await this.#status(await this.#mapped(session.id, id)),
+      upload: await this.#status(await this.#mapped(session.channelId, id)),
       filename: completed.resource.name,
       sizeBytes: completed.resource.sizeBytes,
       sha256: completed.resource.sha256 ?? "",
     };
   }
 
-  async #mapped(sessionId: string, id: string) {
+  async cancelUpload(session: DropSession, id: string, now = new Date()): Promise<DropUploadStatus> {
+    if (this.#repository.cancelDropUpload === undefined) throw new Error("Buffered Drop cancellation is unavailable");
+    const current = await this.#mapped(session.channelId, id);
+    const cancelled = await this.#repository.cancelDropUpload(session.channelId, id, now);
+    if (current.localPath !== undefined) await this.#buffer?.delete(current.localPath).catch(() => undefined);
+    await this.#auditEvent("drop.upload.cancelled", "success", `drop-cancel:${id}`, { sessionId: session.id, channelId: session.channelId, uploadId: id });
+    return this.#bufferStatus(cancelled, session.expiresAt);
+  }
+
+  async #mapped(channelId: string, id: string) {
     if (!/^[0-9a-f-]{36}$/i.test(id)) throw new DropServiceError("not_found");
-    const mapping = await this.#repository.getDropUpload(sessionId, id);
+    const mapping = await this.#repository.getDropUpload(channelId, id);
     if (mapping === undefined) throw new DropServiceError("not_found");
     return mapping;
   }
@@ -344,7 +430,22 @@ export class DropService {
       expectedSize: core.expectedSize,
       receivedSize: core.receivedSize,
       expiresAt: core.expiresAt,
-      completed: mapping.state === "completed" || core.status === "active",
+      completed: mapping.state === "completed" || mapping.state === "stored" || core.status === "active",
+      filename: mapping.filename,
+      ...(mapping.failureCode === undefined ? {} : { failureCode: mapping.failureCode }),
+    };
+  }
+
+  #bufferStatus(mapping: Awaited<ReturnType<DropRepository["getDropUpload"]>> & {}, sessionExpiresAt: Date): DropUploadStatus {
+    return {
+      id: mapping.id,
+      state: mapping.state,
+      expectedSize: mapping.expectedSize,
+      receivedSize: mapping.receivedSize ?? (mapping.state === "stored" || mapping.state === "completed" ? mapping.expectedSize : 0),
+      expiresAt: mapping.continuationUntil ?? sessionExpiresAt,
+      completed: mapping.state === "stored" || mapping.state === "completed",
+      filename: mapping.filename,
+      ...(mapping.failureCode === undefined ? {} : { failureCode: mapping.failureCode }),
     };
   }
 

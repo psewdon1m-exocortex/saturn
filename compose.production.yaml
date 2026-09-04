@@ -110,6 +110,49 @@ services:
       postgres:
         condition: service_healthy
 
+  drop-buffer-init:
+    image: ${VAULT_APP_IMAGE:?set VAULT_APP_IMAGE to an immutable digest}
+    user: "0:0"
+    command: ["sh", "-c", "mkdir -p /var/lib/vault/drop-buffer && chown 1000:1000 /var/lib/vault/drop-buffer && chmod 0700 /var/lib/vault/drop-buffer"]
+    volumes:
+      - drop_buffer:/var/lib/vault/drop-buffer
+    restart: "no"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: ["ALL"]
+    cap_add: ["CHOWN", "DAC_OVERRIDE"]
+    pids_limit: 32
+
+  recovery-volume-init:
+    image: ${VAULT_APP_IMAGE:?set VAULT_APP_IMAGE to an immutable digest}
+    user: "0:0"
+    command: ["sh", "-c", "mkdir -p /var/lib/vault/spool /var/lib/vault/recovery && chown 1000:1000 /var/lib/vault/spool /var/lib/vault/recovery && chmod 0700 /var/lib/vault/spool /var/lib/vault/recovery"]
+    volumes:
+      - recovery_spool:/var/lib/vault/spool
+      - recovery_archives:/var/lib/vault/recovery
+    restart: "no"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: ["ALL"]
+    cap_add: ["CHOWN", "DAC_OVERRIDE"]
+    pids_limit: 32
+
+  storage-runtime-init:
+    image: ${VAULT_APP_IMAGE:?set VAULT_APP_IMAGE to an immutable digest}
+    user: "0:0"
+    command: ["sh", "-c", "mkdir -p /var/lib/vault/storage-runtime && chown 1000:1000 /var/lib/vault/storage-runtime && chmod 0700 /var/lib/vault/storage-runtime"]
+    volumes:
+      - storage_runtime:/var/lib/vault/storage-runtime
+    restart: "no"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: ["ALL"]
+    cap_add: ["CHOWN", "DAC_OVERRIDE"]
+    pids_limit: 32
+
   worker:
     <<: *vault-environment
     image: ${VAULT_APP_IMAGE:?set VAULT_APP_IMAGE to an immutable digest}
@@ -117,8 +160,16 @@ services:
     volumes:
       - recovery_spool:/var/lib/vault/spool
       - recovery_archives:/var/lib/vault/recovery
+      - drop_buffer:/var/lib/vault/drop-buffer
+      - storage_runtime:/var/lib/vault/storage-runtime
     depends_on:
       migrate:
+        condition: service_completed_successfully
+      drop-buffer-init:
+        condition: service_completed_successfully
+      recovery-volume-init:
+        condition: service_completed_successfully
+      storage-runtime-init:
         condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3001/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
@@ -133,9 +184,16 @@ services:
     <<: *vault-environment
     image: ${VAULT_APP_IMAGE:?set VAULT_APP_IMAGE to an immutable digest}
     command: ["node", "/app/api/dist/main.js"]
+    volumes:
+      - drop_buffer:/var/lib/vault/drop-buffer
+      - recovery_spool:/var/lib/vault/spool
+      - recovery_archives:/var/lib/vault/recovery
+      - storage_runtime:/var/lib/vault/storage-runtime
     depends_on:
       worker:
         condition: service_healthy
+      storage-runtime-init:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 10s
@@ -179,6 +237,8 @@ volumes:
   postgres_data:
   recovery_spool:
   recovery_archives:
+  drop_buffer:
+  storage_runtime:
   caddy_data:
   caddy_config:
 

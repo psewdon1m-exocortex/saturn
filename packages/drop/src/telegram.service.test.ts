@@ -62,7 +62,7 @@ describe("Telegram provider and webhook", () => {
       failTelegramUpdate: (id: string) => { states.set(id, "failed"); return Promise.resolve(); },
     } as unknown as DropRepository;
     const drop = {
-      issueDropCode: (identity: { readonly userId: string; readonly chatId: string }) => identity.userId === "42" && identity.chatId === "42"
+      issueDropCodeForTelegram: (identity: { readonly userId: string; readonly chatId: string }) => identity.userId === "42" && identity.chatId === "42"
         ? Promise.resolve({ code: "ABCD-EFGH", expiresAt: new Date("2026-08-26T01:05:00Z") })
         : Promise.reject(new Error("not bound")),
       getBinding: () => Promise.resolve({ userId: "42", chatId: "42", boundAt: new Date(), updatedAt: new Date() }),

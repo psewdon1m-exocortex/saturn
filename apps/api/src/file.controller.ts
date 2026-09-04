@@ -1,4 +1,5 @@
 import { Readable } from "node:stream";
+import archiver from "archiver";
 import {
   Body,
   Controller,
@@ -18,7 +19,7 @@ import {
   UseFilters,
   UseGuards,
 } from "@nestjs/common";
-import { ROOT_RESOURCE_ID, type FileService } from "@saturn/file-core";
+import { ROOT_RESOURCE_ID, type FileService, type Resource } from "@saturn/file-core";
 import type { SaturnConfig } from "@saturn/config";
 import type { FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
@@ -26,6 +27,7 @@ import { OwnerTokenGuard } from "./owner-token.guard.js";
 import { OWNER_SESSION, type AuthenticatedOwnerRequest } from "./owner-token.guard.js";
 import { APP_CONFIG, FILE_SERVICE } from "./tokens.js";
 import { SaturnApiExceptionFilter } from "./saturn-api-exception.filter.js";
+import { TransferMonitorService } from "./transfer-monitor.service.js";
 
 const folderSchema = z.object({
   parentId: z.uuid().optional(),
@@ -40,6 +42,10 @@ const uploadSchema = z.object({
 }).strict();
 const moveSchema = z.object({ parentId: z.uuid(), name: z.string().min(1).max(255).optional() }).strict();
 const copySchema = moveSchema;
+const resolveFolderSchema = z.object({
+  rootId: z.uuid().default(ROOT_RESOURCE_ID),
+  path: z.string().max(4_096).default(""),
+}).strict();
 
 function requiredHeader(value: string | undefined, name: string): string {
   if (value === undefined || !value.trim()) throw new Error(`${name} is invalid`);
@@ -94,7 +100,11 @@ function contentDisposition(disposition: "attachment" | "inline", filename: stri
 @UseGuards(OwnerTokenGuard)
 @UseFilters(SaturnApiExceptionFilter)
 export class FileController {
-  constructor(@Inject(FILE_SERVICE) private readonly files: FileService, @Inject(APP_CONFIG) private readonly config: SaturnConfig) {}
+  constructor(
+    @Inject(FILE_SERVICE) private readonly files: FileService,
+    @Inject(APP_CONFIG) private readonly config: SaturnConfig,
+    @Inject(TransferMonitorService) private readonly transfers: TransferMonitorService,
+  ) {}
 
   #isVolt(resource: { readonly storagePath: string }): boolean {
     return resource.storagePath === "volt" || resource.storagePath.startsWith("volt/");
@@ -106,6 +116,30 @@ export class FileController {
     if (session !== undefined && session.reauthenticatedAt.getTime() < Date.now() - this.config.auth.reauthTtlMs) {
       throw new ForbiddenException({ code: "reauth_required" });
     }
+  }
+
+  async #folderArchiveEntries(folder: Resource): Promise<{ readonly entries: readonly { readonly resource: Resource; readonly path: string }[]; readonly totalBytes: number }> {
+    const entries: Array<{ readonly resource: Resource; readonly path: string }> = [];
+    let totalBytes = 0;
+    const visit = async (parentId: string, prefix: string): Promise<void> => {
+      for (let offset = 0; ; offset += 500) {
+        const page = await this.files.listChildren(parentId, offset, 500);
+        for (const resource of page) {
+          const archivePath = `${prefix}${resource.name}${resource.type === "folder" ? "/" : ""}`;
+          entries.push({ resource, path: archivePath });
+          if (entries.length > this.config.share.packageMaxFiles) throw new Error("Folder archive exceeds the configured item limit");
+          if (resource.type === "file") {
+            totalBytes += resource.sizeBytes;
+            if (totalBytes > this.config.share.packageMaxBytes) throw new Error("Folder archive exceeds the configured size limit");
+          } else {
+            await visit(resource.id, archivePath);
+          }
+        }
+        if (page.length < 500) return;
+      }
+    };
+    await visit(folder.id, `${folder.name}/`);
+    return { entries, totalBytes };
   }
 
   @Get("resources/:id")
@@ -122,6 +156,13 @@ export class FileController {
     const offset = rawOffset === undefined ? 0 : Number(rawOffset);
     const limit = rawLimit === undefined ? 100 : Number(rawLimit);
     return this.files.listChildren(id, offset, limit);
+  }
+
+  @Get("folders/resolve")
+  resolveFolder(@Query() query: unknown) {
+    const input = resolveFolderSchema.parse(query);
+    const segments = input.path === "" ? [] : input.path.split("/");
+    return this.files.resolveFolderPath(segments, input.rootId);
   }
 
   @Get("trash")
@@ -223,7 +264,39 @@ export class FileController {
         `bytes ${String(range.offset)}-${String(range.offset + contentLength - 1)}/${String(resource.sizeBytes)}`,
       );
     }
-    reply.send(download.stream);
+    reply.send(this.transfers.trackDownload(download.stream, { filename: resource.name, totalBytes: contentLength }));
+  }
+
+  @Get("folders/:id/archive")
+  async downloadFolder(
+    @Param("id") id: string,
+    @Req() request: AuthenticatedOwnerRequest,
+    @Res() reply: FastifyReply,
+  ): Promise<void> {
+    const folder = await this.files.getResource(id);
+    if (folder.type !== "folder" || folder.status !== "active") throw new Error("Resource is not an active folder");
+    this.#requireRecentProof(folder, request);
+    const prepared = await this.#folderArchiveEntries(folder);
+    const archive = archiver("zip", { zlib: { level: 6 } });
+    reply
+      .header("Content-Type", "application/zip")
+      .header("Cache-Control", "no-store, private")
+      .header("Pragma", "no-cache")
+      .header("Content-Disposition", contentDisposition("attachment", `${folder.name}.zip`))
+      .send(this.transfers.trackDownload(archive, { filename: `${folder.name}.zip`, totalBytes: prepared.totalBytes }));
+    if (prepared.entries.length === 0) archive.append("", { name: `${folder.name}/` });
+    for (const entry of prepared.entries) {
+      if (entry.resource.type === "folder") {
+        archive.append("", { name: entry.path });
+        continue;
+      }
+      const files = this.files;
+      archive.append(Readable.from((async function* () {
+        const opened = await files.openDownload(entry.resource.id);
+        for await (const chunk of opened.stream) yield chunk;
+      })()), { name: entry.path });
+    }
+    await archive.finalize();
   }
 
   @Get("files/:id/preview")
@@ -255,7 +328,7 @@ export class FileController {
         `bytes ${String(range.offset)}-${String(range.offset + contentLength - 1)}/${String(resource.sizeBytes)}`,
       );
     }
-    reply.send(download.stream);
+    reply.send(this.transfers.trackDownload(download.stream, { filename: resource.name, totalBytes: contentLength }));
   }
 
   @Post("resources/:id/move")
@@ -300,6 +373,14 @@ export class FileController {
     @Headers("idempotency-key") idempotencyKey: string | undefined,
   ) {
     return this.files.restoreResource(id, { idempotencyKey: requiredHeader(idempotencyKey, "Idempotency-Key") });
+  }
+
+  @Delete("trash/:id")
+  purgeTrashFile(
+    @Param("id") id: string,
+    @Headers("idempotency-key") idempotencyKey: string | undefined,
+  ) {
+    return this.files.purgeTrashFile(id, { idempotencyKey: requiredHeader(idempotencyKey, "Idempotency-Key") });
   }
 
   @Get("files/:id/versions")

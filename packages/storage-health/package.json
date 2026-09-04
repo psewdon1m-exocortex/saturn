@@ -17,6 +17,7 @@
   "dependencies": {
     "@saturn/config": "workspace:*",
     "@saturn/contracts": "workspace:*",
+    "@saturn/storage": "workspace:*",
     "ssh2": "1.17.0"
   },
   "devDependencies": {

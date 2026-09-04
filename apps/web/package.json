@@ -10,6 +10,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@fontsource/space-grotesk": "5.2.8",
     "@saturn/contracts": "workspace:*",
     "react": "19.2.8",
     "react-dom": "19.2.8"

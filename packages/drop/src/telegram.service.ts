@@ -117,7 +117,7 @@ export class TelegramWebhookService {
         if (current?.userId !== identity.userId || current.chatId !== identity.chatId) {
           response = "Saturn: this Telegram identity is not authorized.";
         } else if (command === "/drop") {
-        const challenge = await this.#drop.issueDropCode(identity, now);
+        const challenge = await this.#drop.issueDropCodeForTelegram(identity, now);
         response = `Saturn Drop code: ${challenge.code}\nExpires: ${challenge.expiresAt.toISOString()}\nEnter it only at the Saturn /drop page.`;
         } else {
           const revoked = await this.#drop.revokeAccess(identity, now);

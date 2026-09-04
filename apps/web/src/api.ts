@@ -1,4 +1,4 @@
-import type { AuditEvent, BackupServiceInfo, DeviceInfo, DropSessionInfo, DropUploadStatus, FileVersion, LaboratoryAssetInfo, LaboratoryClientInfo, OwnerPreferences, Resource, ShareChild, ShareInfo, TelegramStatus } from "./types.js";
+import type { AuditEventInfo, BackupServiceInfo, DeviceInfo, DropSessionInfo, DropUploadStatus, FileVersion, KernelStatus, OperatorOverview, OwnerPreferences, RecoveryRestoreCandidate, RecoveryRestoreResult, RecoveryStatus, Resource, ShareChild, ShareInfo, StorageConnectionInput, StorageConnectionStatus, TelegramStatus, UpdateStatus } from "./types.js";
 
 export class ApiError extends Error {
   readonly status: number;
@@ -25,6 +25,16 @@ function dropCsrfToken(): string | undefined {
   return cookieToken(["vault_drop_csrf_dev", "__Host-vault_drop_csrf"]);
 }
 
+const DROP_CHANNEL_HISTORY_KEY = "saturnDropChannelId";
+
+function dropChannelHint(): string | undefined {
+  if (typeof window === "undefined") return undefined;
+  const value: unknown = window.history.state;
+  if (typeof value !== "object" || value === null || !(DROP_CHANNEL_HISTORY_KEY in value)) return undefined;
+  const channelId = (value as Record<string, unknown>)[DROP_CHANNEL_HISTORY_KEY];
+  return typeof channelId === "string" && channelId !== "" ? channelId : undefined;
+}
+
 async function request<T>(relativePath: string, options: RequestInit = {}): Promise<T> {
   const headers = new Headers(options.headers);
   const method = options.method?.toUpperCase() ?? "GET";
@@ -45,6 +55,8 @@ async function request<T>(relativePath: string, options: RequestInit = {}): Prom
 async function dropRequest<T>(relativePath: string, options: RequestInit = {}, csrf = true): Promise<T> {
   const headers = new Headers(options.headers);
   const method = options.method?.toUpperCase() ?? "GET";
+  const channelId = dropChannelHint();
+  if (channelId !== undefined) headers.set("X-Saturn-Drop-Channel", channelId);
   if (csrf && !["GET", "HEAD", "OPTIONS"].includes(method)) {
     const token = dropCsrfToken();
     if (token !== undefined) headers.set("X-Vault-CSRF", token);
@@ -81,6 +93,11 @@ export const api = {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ accessKey }),
   }),
+  changeAccessKey: (input: { readonly currentAccessKey: string; readonly newAccessKey: string; readonly confirmation: string }) => request<{ readonly state: string; readonly revokedSessions: number }>("/auth/access-key", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  }),
   revokeSessions: () => request<{ readonly revoked: number }>("/auth/sessions", { method: "DELETE" }),
   preferences: () => request<OwnerPreferences>("/auth/preferences"),
   updatePreferences: (input: Omit<OwnerPreferences, "updatedAt">) => request<OwnerPreferences>("/auth/preferences", {
@@ -88,10 +105,35 @@ export const api = {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(input),
   }),
+  overview: () => request<OperatorOverview>("/operator/overview"),
+  updateStatus: () => request<UpdateStatus>("/operator/updates"),
+  recoveryStatus: () => request<RecoveryStatus>("/operator/recovery"),
+  beginRecoveryRestore: (filename: string, expectedBytes: number) => request<{ readonly id: string; readonly filename: string; readonly archiveBytes: number; readonly state: "uploading" }>("/operator/recovery/restores", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ filename, expectedBytes }),
+  }),
+  validateRecoveryRestore: (id: string) => request<RecoveryRestoreCandidate>(`/operator/recovery/restores/${encodeURIComponent(id)}/validate`, { method: "POST" }),
+  applyRecoveryRestore: (id: string) => request<RecoveryRestoreResult>(`/operator/recovery/restores/${encodeURIComponent(id)}/apply`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ confirmation: "RESTORE" }),
+  }),
+  cancelRecoveryRestore: (id: string) => request<undefined>(`/operator/recovery/restores/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  kernelStatus: () => request<KernelStatus>("/operator/kernel"),
+  changeKernelUrl: (url: string) => request<KernelStatus>("/operator/kernel/url", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url }) }),
+  rotateKernelToken: (token: string) => request<KernelStatus>("/operator/kernel/token", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ token }) }),
+  storageStatus: () => request<StorageConnectionStatus>("/operator/storage"),
+  testStorage: (input: StorageConnectionInput) => request<Omit<StorageConnectionStatus, "profileId" | "revision" | "activatedAt" | "source">>("/operator/storage/test", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) }),
+  switchStorage: (input: StorageConnectionInput) => request<StorageConnectionStatus>("/operator/storage/switch", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...input, confirmation: "SWITCH WITHOUT MIGRATION" }) }),
+  activity: (before?: number, limit = 100) => request<readonly AuditEventInfo[]>(`/activity?limit=${String(limit)}${before === undefined ? "" : `&before=${String(before)}`}`),
   telegramStatus: () => request<TelegramStatus>("/telegram/status"),
+  createDropCode: () => request<{ readonly code: string; readonly expiresAt: string }>("/drop/codes", { method: "POST" }),
+  openInternalDropSession: () => request<DropSessionInfo>("/drop/internal/session", { method: "POST" }),
+  dropBuffer: () => request<{ readonly capacity?: NonNullable<DropSessionInfo["buffer"]>; readonly sessionTtlMs: number; readonly continuationTtlMs: number; readonly workers: number; readonly intervalMs: number }>("/drop/buffer"),
   createTelegramLinkChallenge: () => request<{ readonly code: string; readonly expiresAt: string }>("/telegram/link-challenges", { method: "POST" }),
   unlinkTelegram: () => request<{ readonly sessions: number; readonly challenges: number }>("/telegram/binding", { method: "DELETE" }),
   resource: (id: string) => request<Resource>(`/resources/${encodeURIComponent(id)}`),
+  resolveFolder: (rootId: string, segments: readonly string[]) => {
+    const query = new URLSearchParams({ rootId, path: segments.join("/") });
+    return request<readonly Resource[]>(`/folders/resolve?${query.toString()}`);
+  },
   children: async (id: string) => {
     const children: Resource[] = [];
     for (let offset = 0; ; offset += 500) {
@@ -124,12 +166,15 @@ export const api = {
     method: "POST",
     headers: { "Idempotency-Key": `web-restore-${crypto.randomUUID()}` },
   }),
+  purgeTrashFile: (id: string) => request<Resource>(`/trash/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+    headers: { "Idempotency-Key": `web-purge-${crypto.randomUUID()}` },
+  }),
   versions: (id: string) => request<readonly FileVersion[]>(`/files/${encodeURIComponent(id)}/versions?limit=100`),
   restoreVersion: (id: string, versionId: string) => request<Resource>(`/files/${encodeURIComponent(id)}/versions/${encodeURIComponent(versionId)}/restore`, {
     method: "POST",
     headers: { "Idempotency-Key": `web-version-restore-${crypto.randomUUID()}` },
   }),
-  activity: () => request<readonly AuditEvent[]>("/activity?limit=200"),
   shares: () => request<readonly ShareInfo[]>("/shares?limit=200"),
   createShare: (input: { readonly resourceId: string; readonly mode: ShareInfo["mode"]; readonly expiresAt?: string; readonly password?: string; readonly maxDownloads?: number }) => request<{ readonly token: string; readonly url: string; readonly share: ShareInfo }>("/shares", {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input),
@@ -149,25 +194,78 @@ export const api = {
   }),
   rotateBackupService: (id: string) => request<{ readonly token: string; readonly service: BackupServiceInfo }>(`/backup-services/${encodeURIComponent(id)}/rotate-token`, { method: "POST" }),
   revokeBackupService: (id: string) => request<BackupServiceInfo>(`/backup-services/${encodeURIComponent(id)}`, { method: "DELETE" }),
-  laboratoryClients: () => request<readonly LaboratoryClientInfo[]>("/laboratory/clients?limit=200"),
-  createLaboratoryClient: (name: string) => request<{ readonly client: LaboratoryClientInfo; readonly token: string }>("/laboratory/clients", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }) }),
-  rotateLaboratoryClient: (id: string) => request<{ readonly client: LaboratoryClientInfo; readonly token: string }>(`/laboratory/clients/${encodeURIComponent(id)}/rotate-token`, { method: "POST" }),
-  revokeLaboratoryClient: (id: string) => request<LaboratoryClientInfo>(`/laboratory/clients/${encodeURIComponent(id)}`, { method: "DELETE" }),
-  laboratoryAssets: () => request<readonly LaboratoryAssetInfo[]>("/laboratory/assets?limit=200"),
-  createLaboratoryAsset: (input: { readonly resourceId: string; readonly mode: LaboratoryAssetInfo["mode"]; readonly label?: string; readonly disposition?: LaboratoryAssetInfo["disposition"] }) => request<LaboratoryAssetInfo>("/laboratory/assets", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) }),
-  updateLaboratoryAsset: (id: string, input: { readonly mode?: LaboratoryAssetInfo["mode"]; readonly label?: string; readonly disposition?: LaboratoryAssetInfo["disposition"] }) => request<LaboratoryAssetInfo>(`/laboratory/assets/${encodeURIComponent(id)}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) }),
-  disableLaboratoryAsset: (id: string) => request<LaboratoryAssetInfo>(`/laboratory/assets/${encodeURIComponent(id)}`, { method: "DELETE" }),
-  laboratoryFragment: (id: string) => request<{ readonly url: string; readonly fragment: string; readonly format: string }>(`/laboratory/assets/${encodeURIComponent(id)}/fragment`),
 };
+
+function responseFilename(response: Response): string {
+  const disposition = response.headers.get("content-disposition") ?? "";
+  const encoded = /filename\*=UTF-8''([^;]+)/i.exec(disposition)?.[1];
+  if (encoded !== undefined) {
+    try { return decodeURIComponent(encoded); } catch { /* Fall through to the safe ASCII name. */ }
+  }
+  return /filename="([^"]+)"/i.exec(disposition)?.[1] ?? "saturn-snapshot.zip";
+}
+
+export async function downloadRecoverySnapshot(): Promise<{ readonly filename: string; readonly createdAt?: string }> {
+  const headers = new Headers();
+  const csrf = csrfToken();
+  if (csrf !== undefined) headers.set("X-Vault-CSRF", csrf);
+  const response = await fetch("/api/v1/operator/recovery/snapshots", { method: "POST", headers, credentials: "same-origin" });
+  if (!response.ok) {
+    const body = await response.json().catch(() => undefined) as unknown;
+    throw new ApiError(response.status, body);
+  }
+  const filename = responseFilename(response);
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  try {
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = filename;
+    link.style.display = "none";
+    document.body.append(link);
+    link.click();
+    link.remove();
+  } finally {
+    window.setTimeout(() => URL.revokeObjectURL(url), 0);
+  }
+  const createdAt = response.headers.get("x-saturn-created-at");
+  return { filename, ...(createdAt === null ? {} : { createdAt }) };
+}
+
+export async function uploadRecoverySnapshot(file: File, onProgress: (progress: number) => void, maximumChunkBytes = 8 * 1024 * 1024): Promise<RecoveryRestoreCandidate> {
+  const upload = await api.beginRecoveryRestore(file.name, file.size);
+  const chunkBytes = Math.max(1, Math.min(8 * 1024 * 1024, Math.floor(maximumChunkBytes)));
+  let offset = 0;
+  try {
+    while (offset < file.size) {
+      const chunk = file.slice(offset, Math.min(file.size, offset + chunkBytes));
+      await request<undefined>(`/operator/recovery/restores/${encodeURIComponent(upload.id)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/offset+octet-stream", "Upload-Offset": String(offset) },
+        body: chunk,
+      });
+      offset += chunk.size;
+      onProgress(offset / file.size);
+    }
+    return await api.validateRecoveryRestore(upload.id);
+  } catch (error) {
+    await api.cancelRecoveryRestore(upload.id).catch(() => undefined);
+    throw error;
+  }
+}
 
 export const publicShareApi = {
   metadata: (token: string) => publicShareRequest<ShareInfo>(token),
   unlock: (token: string, password: string) => publicShareRequest<ShareInfo>(token, "/unlock", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ password }) }),
   children: (token: string, parentId?: string) => publicShareRequest<readonly ShareChild[]>(token, `/children${parentId === undefined ? "" : `?parentId=${encodeURIComponent(parentId)}`}`),
-  preparePackage: (token: string) => publicShareRequest<{ readonly state: string }>(token, "/package", { method: "POST" }),
-  contentUrl: (token: string) => `/api/v1/public/shares/${encodeURIComponent(token)}/content`,
+  preparePackage: (token: string) => publicShareRequest<{ readonly state: string; readonly sizeBytes: number }>(token, "/package", { method: "POST" }),
+  contentUrl: (token: string, resourceId?: string) => `/api/v1/public/shares/${encodeURIComponent(token)}/content${resourceId === undefined ? "" : `/${encodeURIComponent(resourceId)}`}`,
   packageUrl: (token: string) => `/api/v1/public/shares/${encodeURIComponent(token)}/package`,
 };
+
+export function folderDownloadUrl(id: string): string {
+  return `/api/v1/folders/${encodeURIComponent(id)}/archive`;
+}
 
 export const dropApi = {
   session: () => dropRequest<DropSessionInfo>("/session"),
@@ -177,6 +275,23 @@ export const dropApi = {
     body: JSON.stringify({ code }),
   }, false),
   status: (id: string) => dropRequest<DropUploadStatus>(`/uploads/${encodeURIComponent(id)}/status`),
+  uploads: () => dropRequest<readonly DropUploadStatus[]>("/uploads"),
+  subscribeUploads: (onUploads: (uploads: readonly DropUploadStatus[]) => void): (() => void) | undefined => {
+    if (typeof EventSource === "undefined") return undefined;
+    const channelId = dropChannelHint();
+    const query = channelId === undefined ? "" : `?channelId=${encodeURIComponent(channelId)}`;
+    const source = new EventSource(`/api/v1/drop/events${query}`, { withCredentials: true });
+    source.addEventListener("uploads", (event) => {
+      try {
+        const value: unknown = JSON.parse((event as MessageEvent<string>).data);
+        if (Array.isArray(value)) onUploads(value as readonly DropUploadStatus[]);
+      } catch {
+        // A malformed event is ignored; EventSource will continue with the next authoritative snapshot.
+      }
+    });
+    return () => source.close();
+  },
+  cancel: (id: string) => dropRequest<DropUploadStatus>(`/uploads/${encodeURIComponent(id)}`, { method: "DELETE" }),
   logout: () => dropRequest<{ readonly state: string }>("/logout", { method: "POST" }),
 };
 

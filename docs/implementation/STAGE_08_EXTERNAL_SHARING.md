@@ -56,10 +56,10 @@ download count and immediate revocation.
 ## API contract
 
 ```text
-POST   /api/v1/shares                         owner + recent proof
+POST   /api/v1/shares                         owner
 GET    /api/v1/shares                         owner
 PATCH  /api/v1/shares/{id}                    owner + recent proof
-DELETE /api/v1/shares/{id}                    owner + recent proof
+DELETE /api/v1/shares/{id}                    owner
 PATCH  /api/v1/resources/{id}/classification owner + recent proof
 
 GET    /api/v1/public/shares/{token}
@@ -73,6 +73,15 @@ GET    /api/v1/public/shares/{token}/package
 The canonical browser URL is `/s/<token>`. The browser submits a password only
 in a POST body. Tokens/passwords never enter logs, audit details or portable
 metadata exports.
+
+Creating a share, including a password-protected share, relies on the active
+owner session and does not request the Owner Access Key again. In `browse`
+mode folder navigation remains available, while individual downloads are hidden
+and the visible `Download all` control is disabled. The public warning explicitly
+states that the link has no download permission. The owner-facing Shared list
+shows the effective access mode on every collapsed record. In `download_folder`
+mode one UI action prepares the bounded package and starts its download; the
+POST/GET split remains an internal API detail.
 
 ## Defaults and hard bounds
 
