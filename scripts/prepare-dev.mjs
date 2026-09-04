@@ -24,6 +24,7 @@ const hostKeyFile = path.join(sftpDirectory, "ssh_host_ed25519_key");
 const clientKeyFile = path.join(sftpDirectory, "dev_client_ed25519");
 const usersFile = path.join(sftpDirectory, "users.conf");
 const runtimeEnvironmentFile = path.join(temporaryDirectory, "dev-runtime.env");
+const sshKeygenCommand = process.platform === "win32" ? "ssh-keygen.exe" : "ssh-keygen";
 
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, {
@@ -93,14 +94,14 @@ export async function prepareDevelopmentEnvironment() {
   try {
     await fs.access(hostKeyFile);
   } catch {
-    run("ssh-keygen.exe", ["-q", "-t", "ed25519", "-N", "", "-C", "vault-dev-only", "-f", hostKeyFile]);
+    run(sshKeygenCommand, ["-q", "-t", "ed25519", "-N", "", "-C", "vault-dev-only", "-f", hostKeyFile]);
   }
   try {
     await fs.access(clientKeyFile);
   } catch {
-    run("ssh-keygen.exe", ["-q", "-t", "ed25519", "-N", "", "-C", "vault-dev-client", "-f", clientKeyFile]);
+    run(sshKeygenCommand, ["-q", "-t", "ed25519", "-N", "", "-C", "vault-dev-client", "-f", clientKeyFile]);
   }
-  const fingerprintOutput = run("ssh-keygen.exe", ["-l", "-E", "sha256", "-f", `${hostKeyFile}.pub`]);
+  const fingerprintOutput = run(sshKeygenCommand, ["-l", "-E", "sha256", "-f", `${hostKeyFile}.pub`]);
   const hostFingerprint = fingerprintOutput.split(/\s+/)[1];
   if (!/^SHA256:[A-Za-z0-9+/]{43}=?$/.test(hostFingerprint ?? "")) {
     throw new Error("Could not derive the local SFTP host fingerprint");
