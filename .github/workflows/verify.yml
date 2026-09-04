@@ -59,5 +59,6 @@ jobs:
         with:
           name: saturn-pre-push-gate-${{ github.sha }}
           path: .pre-push-gate-report.json
+          include-hidden-files: true
           if-no-files-found: error
           retention-days: 14
