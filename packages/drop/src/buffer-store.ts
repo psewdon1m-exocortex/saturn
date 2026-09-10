@@ -6,7 +6,7 @@ import type { Readable } from "node:stream";
 
 export interface DropBufferStoreOptions {
   readonly root: string;
-  readonly maxBytes: number;
+  readonly maxBytes: number | (() => Promise<number>);
   readonly minFreeBytes: number;
   readonly warningRatio: number;
   readonly criticalRatio: number;
@@ -32,8 +32,8 @@ export class DropBufferStore {
     await mkdir(this.#options.root, { recursive: true, mode: 0o700 });
   }
 
-  get reservationLimitBytes(): number {
-    return Math.floor(this.#options.maxBytes * this.#options.refusalRatio);
+  async reservationLimitBytes(): Promise<number> {
+    return Math.floor(await this.#maximumBytes() * this.#options.refusalRatio);
   }
 
   relativePath(uploadId: string): string {
@@ -43,10 +43,11 @@ export class DropBufferStore {
 
   async capacity(reservedBytes: number, additionalBytes = 0): Promise<DropBufferCapacity> {
     if (!Number.isSafeInteger(reservedBytes) || reservedBytes < 0 || !Number.isSafeInteger(additionalBytes) || additionalBytes < 0) throw new Error("Drop buffer reservation is invalid");
+    const maxBytes = await this.#maximumBytes();
     const stats = await statfs(this.#options.root);
     const freeBytes = stats.bavail * stats.bsize;
     const projected = reservedBytes + additionalBytes;
-    const ratio = projected / this.#options.maxBytes;
+    const ratio = projected / maxBytes;
     const state = ratio >= this.#options.refusalRatio || freeBytes - additionalBytes < this.#options.minFreeBytes
       ? "refusing"
       : ratio >= this.#options.criticalRatio
@@ -54,7 +55,7 @@ export class DropBufferStore {
         : ratio >= this.#options.warningRatio
           ? "warning"
           : "available";
-    return { state, reservedBytes, maxBytes: this.#options.maxBytes, freeBytes, ratio };
+    return { state, reservedBytes, maxBytes, freeBytes, ratio };
   }
 
   async create(relativePath: string): Promise<void> {
@@ -104,6 +105,12 @@ export class DropBufferStore {
 
   async delete(relativePath: string): Promise<void> {
     await rm(this.#absolute(relativePath), { force: true });
+  }
+
+  async #maximumBytes(): Promise<number> {
+    const value = typeof this.#options.maxBytes === "number" ? this.#options.maxBytes : await this.#options.maxBytes();
+    if (!Number.isSafeInteger(value) || value < 1) throw new Error("Drop buffer maximum is invalid");
+    return value;
   }
 
   #absolute(relativePath: string): string {

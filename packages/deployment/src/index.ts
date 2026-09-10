@@ -12,7 +12,7 @@ const placeholder = /change[-_ ]?me|replace|example|invalid|vault-dev-only/i;
 const secretFields = [
   "DATABASE_PASSWORD_FILE", "OWNER_BOOTSTRAP_TOKEN_FILE", "AUTH_PEPPER_FILE", "DROP_PEPPER_FILE",
   "SHARE_PEPPER_FILE", "DEVICE_PEPPER_FILE", "BACKUP_PEPPER_FILE", "LABORATORY_PEPPER_FILE",
-  "STORAGE_PRIVATE_KEY_FILE",
+  "STORAGE_PRIVATE_KEY_FILE", "GRYPHON_SERVICE_TOKEN_FILE",
 ] as const;
 
 export interface ProductionValidationResult {
@@ -105,12 +105,6 @@ export function validateProductionDeployment(
     const valueHash = inspectSecret(file, field === "STORAGE_PRIVATE_KEY_FILE");
     if (hashes.has(valueHash)) throw new Error("Production secret files must contain distinct values");
     hashes.add(valueHash);
-  }
-  if (input.TELEGRAM_ENABLED === "true") {
-    for (const field of ["TELEGRAM_BOT_TOKEN_FILE", "TELEGRAM_WEBHOOK_SECRET_FILE"] as const) {
-      const file = hostSecretPath(required(input, field), secretRoot); mapped[field] = file;
-      const valueHash = inspectSecret(file, false); if (hashes.has(valueHash)) throw new Error("Production secret files must contain distinct values"); hashes.add(valueHash);
-    }
   }
   const config = loadEnvironment(mapped, baseDirectory);
   const origin = new URL(config.publicOrigin); const domain = required(input, "VAULT_DOMAIN").toLowerCase();

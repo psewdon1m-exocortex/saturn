@@ -10,6 +10,9 @@ permissions:
   packages: write
   id-token: write
 
+env:
+  UPDATER_REPOSITORY: ${{ vars.UPDATER_REPOSITORY || 'psewdon1m-exocortex/updater' }}
+
 concurrency:
   group: vault-release-${{ github.ref }}
   cancel-in-progress: false
@@ -44,6 +47,20 @@ jobs:
         run: corepack enable && corepack prepare pnpm@11.24.0 --activate
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+      - name: Download and verify pinned Updater
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_READ_TOKEN || secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          updater_version="$(tr -d '[:space:]' < .release/updater.version)"
+          mkdir -p .release-inputs
+          gh release download "updater-v${updater_version}" \
+            --repo "$UPDATER_REPOSITORY" --dir .release-inputs \
+            --pattern "updater-${updater_version}-install.tar.gz" \
+            --pattern "updater-${updater_version}-install.tar.gz.sha256"
+          (cd .release-inputs && sha256sum -c "updater-${updater_version}-install.tar.gz.sha256")
+          tar -xzf ".release-inputs/updater-${updater_version}-install.tar.gz" -C .release-inputs
       - name: Install Chromium runtime
         run: pnpm exec playwright install --with-deps chromium
       - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
@@ -97,7 +114,10 @@ jobs:
           test -n "$RELEASE_SIGNING_PRIVATE_KEY"
           install -m 0600 /dev/null "$RUNNER_TEMP/vault-release-key.pem"
           printf '%s' "$RELEASE_SIGNING_PRIVATE_KEY" > "$RUNNER_TEMP/vault-release-key.pem"
-          node scripts/release-bundle.mjs build \
+          updater_version="$(tr -d '[:space:]' < .release/updater.version)"
+          UPDATER_BUNDLE_DIR="$PWD/.release-inputs/updater" \
+          UPDATER_BUNDLE_VERSION="$updater_version" \
+            node scripts/release-bundle.mjs build \
             "${{ steps.identity.outputs.version }}" \
             "${{ github.sha }}" \
             "${{ steps.identity.outputs.image_root }}/vault-app@${{ steps.app.outputs.digest }}" \

@@ -1,9 +1,12 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { App } from "./app.js";
-import { DROP_POINT_RESOURCE_ID } from "./types.js";
+import { DROP_POINT_RESOURCE_ID, SYNC_RESOURCE_ID } from "./types.js";
 
-afterEach(() => { cleanup(); Reflect.deleteProperty(window.navigator, "clipboard"); vi.restoreAllMocks(); vi.unstubAllGlobals(); window.history.replaceState({}, "", "/"); });
+const pdfJsMock = vi.hoisted(() => ({ getDocument: vi.fn() }));
+vi.mock("pdfjs-dist", () => ({ GlobalWorkerOptions: { workerSrc: "" }, getDocument: pdfJsMock.getDocument }));
+
+afterEach(() => { cleanup(); window.sessionStorage.clear(); Reflect.deleteProperty(window.navigator, "clipboard"); vi.restoreAllMocks(); vi.unstubAllGlobals(); window.history.replaceState({}, "", "/"); });
 
 function requestUrl(input: RequestInfo | URL): string {
   if (typeof input === "string") return input;
@@ -21,13 +24,30 @@ function jsonRequestBody(init: RequestInit | undefined): Record<string, unknown>
   return body as Record<string, unknown>;
 }
 
+function directoryDataTransfer(name = "folder"): DataTransfer {
+  const directory = new File([], name);
+  return {
+    types: ["Files"],
+    files: [directory],
+    items: [{
+      kind: "file",
+      type: "",
+      getAsFile: () => directory,
+      webkitGetAsEntry: () => ({ isDirectory: true, isFile: false }),
+    }],
+  } as unknown as DataTransfer;
+}
+
 function preferences(overrides: Record<string, unknown> = {}) {
   return {
     accentColor: "#00a8ff",
     sidebarMode: "fixed",
-    navigationOrder: ["dashboard", "files", "inbox", "shared", "trash", "settings"],
+    navigationOrder: ["dashboard", "files", "inbox", "shared", "synchronization", "trash", "settings"],
     dashboardOrder: ["cpu", "ram", "disk", "uptime", "storage", "drop", "reachability", "tasks"],
-    settingsOrder: ["appearance", "security", "telegram", "backup", "updates", "logs"],
+    settingsOrder: ["appearance", "security", "backup", "gryphon", "updates", "logs"],
+    trashRetentionDays: 30,
+    uploadBufferGiB: 110,
+    maximumUploadFileGiB: 20,
     updatedAt: new Date().toISOString(),
     ...overrides,
   };
@@ -40,8 +60,8 @@ function overview() {
     ram: { state: "available", usedBytes: 1, totalBytes: 100, percent: 1, processBytes: 1 },
     disk: { state: "unavailable", reason: "unavailable" },
     uptime: { state: "available", seconds: 10 },
-    storage: { state: "available", indexedBytes: 1, fileCount: 1, capacity: { state: "unavailable", reason: "unavailable" } },
-    transfers: { uploadBytesPerSecond: 128, downloadBytesPerSecond: 64, activeCount: 1, queuedCount: 1, tasks: [{ id: "task-1", direction: "upload", filename: "archive.bin", state: "uploading", transferredBytes: 50, totalBytes: 100, percent: 50, bytesPerSecond: 128, updatedAt: new Date().toISOString() }] },
+    storage: { state: "available", indexedBytes: 25, fileCount: 1, directoryCount: 6, capacity: { state: "available", totalBytes: 100, availableBytes: 60, usedBytes: 40 } },
+    transfers: { uploadBytesPerSecond: 128, downloadBytesPerSecond: 64, activeCount: 1, queuedCount: 1, tasks: [{ id: "task-1", direction: "upload", filename: "archive.bin", state: "uploading", transferredBytes: 50, totalBytes: 100, percent: 50, bytesPerSecond: 128, canPause: true, canResume: false, canCancel: true, updatedAt: new Date().toISOString() }] },
   };
 }
 
@@ -73,6 +93,9 @@ describe("owner Saturn UI", () => {
     expect(screen.getByText("50.0%")).toBeTruthy();
     expect(screen.getAllByText("128 B/s").length).toBeGreaterThan(0);
     expect(screen.getByRole("progressbar", { name: "archive.bin 50.0%" })).toHaveProperty("value", 50);
+    expect(screen.getByText("40 B / 100 B")).toBeTruthy();
+    expect(screen.getByText("40.0% occupied · 25 B indexed · 6 folders / 1 file")).toBeTruthy();
+    expect(screen.getByRole("meter", { name: "Storage 40.0%" }).getAttribute("aria-valuenow")).toBe("40");
     const loginCall = fetchMock.mock.calls.find((call) => requestUrl(call[0]).endsWith("/auth/login"));
     expect(loginCall).toBeDefined();
     expect(jsonRequestBody(loginCall?.[1])).toEqual({ accessKey: "temporary-owner-proof" });
@@ -116,7 +139,6 @@ describe("owner Saturn UI", () => {
       if (url.endsWith("/auth/session")) return json({ state: "authenticated" });
       if (url.endsWith("/auth/preferences")) return json(preferences());
       if (url.endsWith("/operator/overview")) return json(overview());
-      if (url.endsWith("/telegram/status")) return json({ provider: { state: "disabled" } });
       return json({});
     }));
 
@@ -170,6 +192,85 @@ describe("owner Saturn UI", () => {
     expect(request?.[1]?.method).toBe("POST");
   });
 
+  it("pauses, resumes and cancels a transfer from dashboard Tasks", async () => {
+    let state: "uploading" | "paused" | "cancelled" = "uploading";
+    const actions: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = requestUrl(input);
+      if (url === "/health/ready") return json({ status: "ok" });
+      if (url.endsWith("/auth/session")) return json({ state: "authenticated" });
+      if (url.endsWith("/auth/preferences")) return json(preferences());
+      if (url.endsWith("/operator/overview")) {
+        const value = overview();
+        return json({ ...value, transfers: { ...value.transfers, tasks: [{ ...value.transfers.tasks[0], state, canPause: state === "uploading", canResume: state === "paused", canCancel: state !== "cancelled" }] } });
+      }
+      if (url.endsWith("/operator/tasks/task-1") && init?.method === "PATCH") {
+        const action = String(jsonRequestBody(init).action); actions.push(action);
+        state = action === "pause" ? "paused" : action === "resume" ? "uploading" : "cancelled";
+        return json({ id: "task-1", state: state === "uploading" ? "running" : state });
+      }
+      return json({});
+    }));
+
+    render(<App />);
+    const controls = await screen.findByLabelText("Controls for archive.bin");
+    fireEvent.click(within(controls).getByRole("button", { name: "Pause" }));
+    await waitFor(() => expect(actions).toEqual(["pause"]));
+    await waitFor(() => expect(within(controls).getByRole("button", { name: "Resume" })).toHaveProperty("disabled", false));
+    fireEvent.click(within(controls).getByRole("button", { name: "Resume" }));
+    await waitFor(() => expect(actions).toEqual(["pause", "resume"]));
+    await waitFor(() => expect(within(controls).getByRole("button", { name: "Cancel" })).toHaveProperty("disabled", false));
+    fireEvent.click(within(controls).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(actions).toEqual(["pause", "resume", "cancel"]));
+    await waitFor(() => expect(screen.getByText("Cancelled")).toBeTruthy());
+  });
+
+  it("reattaches the original file and resumes a paused upload after refresh", async () => {
+    const lastModified = 1_788_547_200_000;
+    window.sessionStorage.setItem("saturnOwnerUploadsV1", JSON.stringify([{ id: "task-1", filename: "archive.bin", expectedSize: 100, lastModified, parentId: DROP_POINT_RESOURCE_ID }]));
+    const actions: string[] = [];
+    let completed = false;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = requestUrl(input);
+      if (url === "/health/ready") return json({ status: "ok" });
+      if (url.endsWith("/auth/session")) return json({ state: "authenticated" });
+      if (url.endsWith("/auth/preferences")) return json(preferences());
+      if (url.endsWith("/operator/overview")) {
+        const value = overview();
+        return json({ ...value, transfers: { ...value.transfers, tasks: completed ? [] : [{ ...value.transfers.tasks[0], state: "paused", canPause: false, canResume: true, canCancel: true }] } });
+      }
+      if (url.endsWith("/operator/tasks/task-1") && init?.method === "PATCH") {
+        actions.push(String(jsonRequestBody(init).action));
+        return json({ id: "task-1", state: "running" });
+      }
+      if (url.endsWith("/uploads/task-1") && init?.method === "HEAD") {
+        return new Response(null, { status: 204, headers: { "Upload-Offset": "50", "Upload-Length": "100", "Upload-Status": "uploading" } });
+      }
+      if (url.endsWith("/uploads/task-1") && init?.method === "PATCH") return new Response(null, { status: 204 });
+      if (url.endsWith("/uploads/task-1/complete") && init?.method === "POST") {
+        completed = true;
+        return json({ resource: { id: "resource-1", parentId: DROP_POINT_RESOURCE_ID, type: "file", name: "archive.bin", storagePath: "drop point/archive.bin", sizeBytes: 100, status: "active", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() } });
+      }
+      return json({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<App />);
+    const controls = await screen.findByLabelText("Controls for archive.bin");
+    fireEvent.click(within(controls).getByRole("button", { name: "Resume" }));
+    expect(actions).toEqual([]);
+
+    const source = new File([new Uint8Array(100)], "archive.bin", { lastModified });
+    fireEvent.change(screen.getByLabelText("Resume upload source"), { target: { files: [source] } });
+
+    await waitFor(() => expect(actions).toEqual(["resume"]));
+    await waitFor(() => expect(fetchMock.mock.calls.some((call) => requestUrl(call[0]).endsWith("/uploads/task-1/complete") && call[1]?.method === "POST")).toBe(true));
+    const chunk = fetchMock.mock.calls.find((call) => requestUrl(call[0]).endsWith("/uploads/task-1") && call[1]?.method === "PATCH");
+    expect(new Headers(chunk?.[1]?.headers).get("Upload-Offset")).toBe("50");
+    expect((chunk?.[1]?.body as Blob).size).toBe(50);
+    expect(window.sessionStorage.getItem("saturnOwnerUploadsV1")).toBeNull();
+  });
+
   it("renders the authenticated collection toolbar and empty recovery state", async () => {
     window.history.replaceState({}, "", "/files");
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
@@ -191,11 +292,11 @@ describe("owner Saturn UI", () => {
     if (collection === null) throw new Error("Storage collection is missing");
     fireEvent.contextMenu(collection);
     const contextMenu = screen.getByRole("menu", { name: "Folder actions" });
-    expect([...contextMenu.querySelectorAll(".context-menu__ordinal")].map((item) => item.textContent)).toEqual(["1.", "2.", "3.", "4.", "5.", "6.", "7.", "8."]);
+    expect([...contextMenu.querySelectorAll(".context-menu__ordinal")].map((item) => item.textContent)).toEqual(["1.", "2.", "3.", "4.", "5.", "6.", "7.", "8.", "9.", "10."]);
     expect(screen.getByRole("menuitem", { name: "New folder" })).toHaveProperty("disabled", false);
     expect(screen.getByRole("button", { name: "Upload here" })).toHaveProperty("disabled", true);
     expect(screen.queryByRole("button", { name: "Quick upload" })).toBeNull();
-    expect(screen.getByRole("navigation", { name: "Primary" }).querySelectorAll("button")).toHaveLength(6);
+    expect(screen.getByRole("navigation", { name: "Primary" }).querySelectorAll("button")).toHaveLength(7);
     expect(screen.queryByRole("button", { name: "Activity" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Laboratory" })).toBeNull();
   });
@@ -235,6 +336,12 @@ describe("owner Saturn UI", () => {
 
     const resolveRequest = fetchMock.mock.calls.find((call) => requestUrl(call[0]).includes("/folders/resolve?"));
     expect(new URL(requestUrl(resolveRequest?.[0] ?? ""), "http://saturn.test").searchParams.get("rootId")).toBe(DROP_POINT_RESOURCE_ID);
+
+    const uploader = document.querySelector(".internal-drop");
+    if (uploader === null) throw new Error("In-house Drop uploader is missing");
+    fireEvent.drop(uploader, { dataTransfer: directoryDataTransfer("project") });
+    expect(await screen.findByText("1 folder was skipped. Open it and select the files inside.")).toBeTruthy();
+    expect(fetchMock.mock.calls.some((call) => requestUrl(call[0]).endsWith("/drop/internal/session") && call[1]?.method === "POST")).toBe(false);
   });
 
   it("renders searchable expandable Trash records and restores only after confirmation", async () => {
@@ -259,7 +366,7 @@ describe("owner Saturn UI", () => {
       const url = requestUrl(input);
       if (url === "/health/ready") return json({ status: "ok" });
       if (url.endsWith("/auth/session")) return json({ state: "authenticated" });
-      if (url.endsWith("/auth/preferences")) return json(preferences());
+      if (url.endsWith("/auth/preferences")) return json(preferences({ trashRetentionDays: 45 }));
       if (url.includes("/trash?")) return json(restored ? [] : [trashed]);
       if (url.endsWith(`/resources/${trashed.id}/restore`) && init?.method === "POST") { restored = true; return json({ ...trashed, name: trashed.trashedFromName, status: "active" }); }
       return json({});
@@ -271,9 +378,9 @@ describe("owner Saturn UI", () => {
     expect(await screen.findByRole("heading", { level: 1, name: "trash" })).toBeTruthy();
     expect(screen.getByRole("searchbox", { name: "Search trash" })).toBeTruthy();
     expect((await screen.findByRole("button", { name: /archive project/i })).getAttribute("aria-expanded")).toBe("false");
-    expect(screen.getByText("1 items · 216.0 MB · 90-day retention")).toBeTruthy();
+    expect(screen.getByText("1 items · 216.0 MB · 45-day retention")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Quick upload" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "Delete permanently" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Delete permanently" })).toBeTruthy();
 
     const record = screen.getByRole("button", { name: /archive project/i });
     fireEvent.click(record);
@@ -295,7 +402,7 @@ describe("owner Saturn UI", () => {
     await waitFor(() => expect(fetchMock.mock.calls.some((call) => requestUrl(call[0]).endsWith(`/resources/${trashed.id}/restore`) && call[1]?.method === "POST")).toBe(true));
     expect(await screen.findByText("No matching trash records.")).toBeTruthy();
     expect(screen.queryByRole("button", { name: /archive project/i })).toBeNull();
-    expect(screen.getByText("0 items · 0 B · 90-day retention")).toBeTruthy();
+    expect(screen.getByText("0 items · 0 B · 45-day retention")).toBeTruthy();
   });
 
   it("permanently deletes a trashed file only after an irreversible-action warning", async () => {
@@ -342,6 +449,8 @@ describe("owner Saturn UI", () => {
     fireEvent.click(confirm);
 
     await waitFor(() => expect(fetchMock.mock.calls.some((call) => requestUrl(call[0]).endsWith(`/trash/${trashed.id}`) && call[1]?.method === "DELETE")).toBe(true));
+    const purgeRequest = fetchMock.mock.calls.find((call) => requestUrl(call[0]).endsWith(`/trash/${trashed.id}`) && call[1]?.method === "DELETE");
+    expect(new Headers(purgeRequest?.[1]?.headers).get("Idempotency-Key")).toBe(`web-purge-${trashed.id}`);
     expect(await screen.findByText("Trash is empty.")).toBeTruthy();
     expect(screen.queryByText("report.pdf")).toBeNull();
   });
@@ -351,9 +460,9 @@ describe("owner Saturn UI", () => {
     const initial = {
       accentColor: "#00a8ff",
       sidebarMode: "fixed",
-      navigationOrder: ["inbox", "dashboard", "files", "shared", "trash", "settings"],
+      navigationOrder: ["inbox", "dashboard", "files", "shared", "synchronization", "trash", "settings"],
       dashboardOrder: ["cpu", "ram", "disk", "uptime", "storage", "drop", "reachability", "tasks"],
-      settingsOrder: ["appearance", "security", "telegram", "backup", "updates", "logs"],
+      settingsOrder: ["appearance", "security", "backup", "gryphon", "updates", "logs"],
     } as const;
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = requestUrl(input);
@@ -378,7 +487,7 @@ describe("owner Saturn UI", () => {
     await waitFor(() => {
       const request = fetchMock.mock.calls.find((call) => requestUrl(call[0]).endsWith("/auth/preferences") && call[1]?.method === "PUT");
       expect(request).toBeDefined();
-      expect(jsonRequestBody(request?.[1]).navigationOrder).toEqual(["dashboard", "inbox", "files", "shared", "trash", "settings"]);
+      expect(jsonRequestBody(request?.[1]).navigationOrder).toEqual(["dashboard", "inbox", "files", "shared", "synchronization", "trash", "settings"]);
     });
     expect(navigation.querySelector("button")?.getAttribute("aria-label")).toBe("Dashboard");
   });
@@ -390,15 +499,15 @@ describe("owner Saturn UI", () => {
       if (url === "/health/ready") return json({ status: "ok" });
       if (url.endsWith("/auth/session")) return json({ state: "authenticated" });
       if (url.endsWith("/auth/preferences") && init?.method === "PUT") return json({ ...jsonRequestBody(init), updatedAt: now });
-      if (url.endsWith("/auth/preferences")) return json(preferences({ updatedAt: now }));
+      if (url.endsWith("/auth/preferences")) return json(preferences({ accentColor: "#123456", updatedAt: now }));
       if (url.endsWith("/operator/overview")) return json(overview());
-      if (url.endsWith("/telegram/status")) return json({ provider: { state: "disabled" } });
       return json({});
     });
     vi.stubGlobal("fetch", fetchMock);
     render(<App />);
 
     expect(await screen.findByRole("heading", { name: "Tasks" })).toBeTruthy();
+    await waitFor(() => expect(document.documentElement.style.getPropertyValue("--accent")).toBe("#123456"));
     fireEvent.keyDown(screen.getByRole("button", { name: "Reorder tasks card" }), { key: "ArrowUp", altKey: true });
 
     await waitFor(() => {
@@ -479,6 +588,109 @@ describe("owner Saturn UI", () => {
     expect(screen.getByLabelText("Select charlie")).toHaveProperty("checked", true);
     expect(screen.getByLabelText("Select delta")).toHaveProperty("checked", true);
     expect(screen.getByLabelText("Select echo")).toHaveProperty("checked", false);
+  });
+
+  it("queues ZIP actions for the current selection and opens image Quick Preview with Space", async () => {
+    window.history.replaceState({}, "", "/files/projects");
+    const now = new Date().toISOString();
+    const rootId = "00000000-0000-7000-8000-000000000001";
+    const folderId = "01900000-0000-7000-8000-000000000090";
+    const image = { id: "01900000-0000-7000-8000-000000000091", parentId: folderId, type: "file", name: "saturn.png", storagePath: "projects/saturn.png", sizeBytes: 1024, mimeType: "image/png", status: "active", createdAt: now, updatedAt: now } as const;
+    const zip = { id: "01900000-0000-7000-8000-000000000092", parentId: folderId, type: "file", name: "assets.zip", storagePath: "projects/assets.zip", sizeBytes: 2048, mimeType: "application/zip", status: "active", createdAt: now, updatedAt: now } as const;
+    const requests: Array<{ readonly url: string; readonly body: unknown }> = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = requestUrl(input);
+      if (url === "/health/ready") return json({ status: "ok" });
+      if (url.endsWith("/auth/session")) return json({ state: "authenticated" });
+      if (url.endsWith("/auth/preferences")) return json(preferences({ updatedAt: now }));
+      if (url.includes("/folders/resolve?")) return json([
+        { id: rootId, type: "folder", name: "root", storagePath: "", sizeBytes: 3072, status: "active", createdAt: now, updatedAt: now },
+        { id: folderId, parentId: rootId, type: "folder", name: "projects", storagePath: "projects", sizeBytes: 3072, status: "active", createdAt: now, updatedAt: now },
+      ]);
+      if (url.includes(`/folders/${folderId}/children`)) return json([image, zip]);
+      if (url.includes("/shares?")) return json([]);
+      if (url.includes("/archives/jobs?") && (init?.method ?? "GET") === "GET") return json([]);
+      if (url.endsWith("/archives/jobs") && init?.method === "POST") {
+        requests.push({ url, body: jsonRequestBody(init) });
+        return json({ id: "01900000-0000-7000-8000-000000000099", kind: "compress_zip", format: "zip", state: "queued", requestedState: "running", destinationParentId: folderId, sourceResourceIds: [image.id, zip.id], outputName: "selected.zip", totalBytes: 3072, processedBytes: 0, createdAt: now, updatedAt: now }, 202);
+      }
+      if (url.endsWith(`/archives/resources/${zip.id}/extract`) && init?.method === "POST") {
+        requests.push({ url, body: undefined });
+        return json({ id: "01900000-0000-7000-8000-000000000098", kind: "extract", format: "zip", state: "queued", requestedState: "running", destinationParentId: folderId, sourceResourceId: zip.id, sourceResourceIds: [], outputName: "assets", totalBytes: 2048, processedBytes: 0, createdAt: now, updatedAt: now }, 202);
+      }
+      return json({});
+    }));
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "saturn.png" }));
+    fireEvent.click(screen.getByRole("button", { name: "assets.zip" }), { ctrlKey: true });
+    fireEvent.contextMenu(screen.getByRole("button", { name: "assets.zip" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Compress to ZIP" }));
+    fireEvent.change(await screen.findByLabelText("Archive name"), { target: { value: "selected" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create ZIP" }));
+    await waitFor(() => expect(requests[0]?.body).toMatchObject({ destinationParentId: folderId, sourceResourceIds: [image.id, zip.id], outputName: "selected" }));
+
+    fireEvent.contextMenu(screen.getByRole("button", { name: "assets.zip" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Extract here" }));
+    await waitFor(() => expect(requests.some((request) => request.url.endsWith(`/archives/resources/${zip.id}/extract`))).toBe(true));
+
+    fireEvent.click(screen.getByRole("button", { name: "saturn.png" }));
+    fireEvent.keyDown(window, { code: "Space", key: " " });
+    expect(screen.getByRole("dialog", { name: "Preview saturn.png" })).toBeTruthy();
+    fireEvent.keyDown(window, { code: "Space", key: " " });
+    expect(screen.queryByRole("dialog", { name: "Preview saturn.png" })).toBeNull();
+  });
+
+  it("keeps one PDF document loaded while paging and renders long Markdown from its top edge", async () => {
+    window.history.replaceState({}, "", "/files/projects");
+    const now = new Date().toISOString();
+    const rootId = "00000000-0000-7000-8000-000000000001";
+    const folderId = "01900000-0000-7000-8000-000000000090";
+    const pdf = { id: "01900000-0000-7000-8000-000000000093", parentId: folderId, type: "file", name: "manual.pdf", storagePath: "projects/manual.pdf", sizeBytes: 4096, mimeType: "application/pdf", status: "active", createdAt: now, updatedAt: now } as const;
+    const markdown = { id: "01900000-0000-7000-8000-000000000094", parentId: folderId, type: "file", name: "notes.md", storagePath: "projects/notes.md", sizeBytes: 2048, mimeType: "text/markdown", status: "active", createdAt: now, updatedAt: now } as const;
+    const getPage = vi.fn(async () => ({
+      getViewport: ({ scale }: { readonly scale: number }) => ({ width: 600 * scale, height: 800 * scale }),
+      render: () => ({ promise: Promise.resolve(), cancel: vi.fn() }),
+      cleanup: vi.fn(),
+    }));
+    pdfJsMock.getDocument.mockReset();
+    pdfJsMock.getDocument.mockReturnValue({ promise: Promise.resolve({ numPages: 2, getPage }), destroy: vi.fn(async () => undefined) });
+    vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(900);
+    vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(700);
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue({} as never);
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = requestUrl(input);
+      if (url === "/health/ready") return json({ status: "ok" });
+      if (url.endsWith("/auth/session")) return json({ state: "authenticated" });
+      if (url.endsWith("/auth/preferences")) return json(preferences({ updatedAt: now }));
+      if (url.includes("/folders/resolve?")) return json([
+        { id: rootId, type: "folder", name: "root", storagePath: "", sizeBytes: 6144, status: "active", createdAt: now, updatedAt: now },
+        { id: folderId, parentId: rootId, type: "folder", name: "projects", storagePath: "projects", sizeBytes: 6144, status: "active", createdAt: now, updatedAt: now },
+      ]);
+      if (url.includes(`/folders/${folderId}/children`)) return json([pdf, markdown]);
+      if (url.endsWith(`/files/${markdown.id}/preview`)) return new Response(`# First heading\n\n${"A long paragraph. ".repeat(200)}\n\n## Last heading`, { headers: { "content-type": "text/markdown" } });
+      if (url.includes("/shares?") || url.includes("/archives/jobs?")) return json([]);
+      return json({});
+    }));
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "manual.pdf" }));
+    fireEvent.keyDown(window, { code: "Space", key: " " });
+    expect(await screen.findByRole("dialog", { name: "Preview manual.pdf" })).toBeTruthy();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Next" })).toHaveProperty("disabled", false));
+    expect(pdfJsMock.getDocument).toHaveBeenCalledTimes(1);
+    expect(getPage).toHaveBeenLastCalledWith(1);
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    await waitFor(() => expect(getPage).toHaveBeenLastCalledWith(2));
+    expect(pdfJsMock.getDocument).toHaveBeenCalledTimes(1);
+    fireEvent.keyDown(window, { code: "Space", key: " " });
+
+    fireEvent.click(screen.getByRole("button", { name: "notes.md" }));
+    fireEvent.keyDown(window, { code: "Space", key: " " });
+    const preview = await screen.findByRole("dialog", { name: "Preview notes.md" });
+    expect(within(preview).getByRole("heading", { name: "First heading" })).toBeTruthy();
+    expect(within(preview).getByRole("heading", { name: "Last heading" })).toBeTruthy();
+    expect(preview.querySelector(".quick-preview__content--markdown > article")).toBeTruthy();
   });
 
   it("renders the Shared template with access status, sorts its table columns, and expands policy details", async () => {
@@ -608,9 +820,40 @@ describe("owner Saturn UI", () => {
     expect(await screen.findByText("archive", { selector: ".breadcrumbs span" })).toBeTruthy();
   });
 
+  it("manages the three Neptune pipelines from the Synchronization tab", async () => {
+    window.history.replaceState({}, "", "/synchronization");
+    const now = new Date().toISOString();
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = requestUrl(input);
+      if (url === "/health/ready") return json({ status: "ok" });
+      if (url.endsWith("/auth/session")) return json({ state: "authenticated" });
+      if (url.endsWith("/auth/preferences")) return json(preferences({ updatedAt: now }));
+      if (url.endsWith("/auth/reauthenticate")) return json({ state: "authenticated" });
+      if (url.endsWith("/operator/neptune/status")) return json({ product: "neptune-linux", version: "0.2.0", client_instance_id: "linux-1", active: false, project: { enabled: false, interval_hours: 24, mirror: null }, mirror_active: false, mirror: { state: "idle", uploadedFiles: 0, deletedEntries: 0 } });
+      if (url.includes("/backup-services")) return json([]);
+      if (url.includes("/devices") && init?.method === "POST") return json({ token: "windows-token", device: { id: crypto.randomUUID(), name: "Office PC", state: "active", scopeIds: [SYNC_RESOURCE_ID], rights: { read: true, write: true, move: true, delete: true }, createdAt: now, updatedAt: now } });
+      if (url.includes("/devices")) return json([]);
+      return json({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "synchronization" })).toBeTruthy();
+    for (const title of ["Linux · recovery archives", "Linux · dedicated mirrors", "Windows · folder synchronization"]) expect(screen.getByRole("heading", { name: title })).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("Current Access Key"), { target: { value: "owner-key" } });
+    fireEvent.click(screen.getByRole("button", { name: "Unlock management" }));
+    await screen.findByText("Synchronization management unlocked.");
+    fireEvent.change(screen.getByLabelText("PC / client name"), { target: { value: "Office PC" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create Windows client password" }));
+    expect(await screen.findByText("windows-token")).toBeTruthy();
+    const request = fetchMock.mock.calls.find((call) => requestUrl(call[0]).endsWith("/devices") && call[1]?.method === "POST");
+    expect(jsonRequestBody(request?.[1])).toMatchObject({ name: "Office PC", scopeIds: [SYNC_RESOURCE_ID] });
+  });
+
   it("renders the six Saturn Settings cards and persists keyboard card order", async () => {
     window.history.replaceState({}, "", "/settings");
     const now = new Date().toISOString();
+    let gryphonConnected = false;
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = requestUrl(input);
       if (url === "/health/ready") return json({ status: "ok" });
@@ -620,8 +863,13 @@ describe("owner Saturn UI", () => {
       if (url.endsWith("/operator/kernel")) return json({ configured: false, reachability: "unavailable", revision: 1 });
       if (url.endsWith("/operator/recovery")) return json({ exportEnabled: false, restoreEnabled: false, reason: "not configured" });
       if (url.endsWith("/operator/updates")) return json({ installedVersion: "0.1.0", updater: { state: "unavailable" }, registry: { state: "unavailable" }, discoveryEnabled: false });
+      if (url.endsWith("/operator/gryphon/status")) return json({ schema: "exocortex.gryphon.service-status.v1", version: "1.2.3", serviceId: "saturn", state: gryphonConnected ? "enabled" : "unlinked", connected: gryphonConnected, commandPrefix: gryphonConnected ? "saturn" : null, bot: gryphonConnected ? { id: "bot-1", alias: "main", username: "saturn_bot", state: "ready" } : null, binding: null });
+      if (url.endsWith("/operator/gryphon/bots")) return json({ schema: "exocortex.gryphon.service-bots.v1", serviceId: "saturn", bots: [{ id: "bot-1", alias: "main", username: "saturn_bot", state: "ready", selected: gryphonConnected }] });
+      if (url.endsWith("/operator/gryphon/connection") && init?.method === "PUT") { gryphonConnected = true; return json({ connected: true }); }
+      if (url.endsWith("/operator/gryphon/connection") && init?.method === "DELETE") { gryphonConnected = false; return json({ disconnected: true }); }
+      if (url.endsWith("/operator/gryphon/update/check")) return json({ installed_version: "1.2.3", available_version: "1.2.4", update_available: true });
+      if (url.endsWith("/operator/gryphon/update/install")) return json({ updated: true, version: "1.2.4" });
       if (url.includes("/activity")) return json([]);
-      if (url.endsWith("/telegram/status")) return json({ provider: { state: "disabled" } });
       if (url.includes("/devices")) return json([]);
       if (url.includes("/backup-services")) return json([]);
       return json({});
@@ -630,7 +878,25 @@ describe("owner Saturn UI", () => {
     render(<App />);
 
     expect(await screen.findByRole("heading", { name: "settings" })).toBeTruthy();
-    for (const title of ["Appearance", "Security", "Telegram bot connection", "Backup", "Updates", "Logs"]) expect(screen.getByRole("heading", { name: title })).toBeTruthy();
+    for (const title of ["Appearance", "Security", "Backup", "Bot connection", "Updates", "Logs"]) expect(screen.getByRole("heading", { name: title })).toBeTruthy();
+    const linkFunction = screen.getByRole("button", { name: "Link Saturn function" });
+    await waitFor(() => expect(linkFunction).toHaveProperty("disabled", false));
+    fireEvent.click(linkFunction);
+    const gryphonDialog = within(await screen.findByRole("dialog", { name: "Link Saturn function" }));
+    fireEvent.click(gryphonDialog.getByRole("button", { name: "Link function" }));
+    await waitFor(() => {
+      const request = fetchMock.mock.calls.find((call) => requestUrl(call[0]).endsWith("/operator/gryphon/connection") && call[1]?.method === "PUT");
+      expect(jsonRequestBody(request?.[1])).toEqual({ botId: "bot-1" });
+    });
+    expect(await screen.findByRole("button", { name: "Unlink Saturn function" })).toBeTruthy();
+    const gryphonCheck = screen.getByRole("button", { name: "Check Gryphon for updates" });
+    await waitFor(() => expect(gryphonCheck).toHaveProperty("disabled", false));
+    fireEvent.click(gryphonCheck);
+    fireEvent.click(await screen.findByRole("button", { name: "Install Gryphon 1.2.4" }));
+    await waitFor(() => {
+      const request = fetchMock.mock.calls.find((call) => requestUrl(call[0]).endsWith("/operator/gryphon/update/install"));
+      expect(jsonRequestBody(request?.[1])).toEqual({ version: "1.2.4" });
+    });
     await waitFor(() => {
       const request = fetchMock.mock.calls.find((call) => requestUrl(call[0]).endsWith("/auth/preferences") && call[1]?.method !== "PUT");
       expect(request).toBeTruthy();
@@ -642,6 +908,28 @@ describe("owner Saturn UI", () => {
     expect(await screen.findByText("Accent color applied.")).toBeTruthy();
     await waitFor(() => {
       const request = fetchMock.mock.calls.find((call) => requestUrl(call[0]).endsWith("/auth/preferences") && call[1]?.method === "PUT" && jsonRequestBody(call[1]).accentColor === "#111111");
+      expect(request).toBeTruthy();
+    });
+    fireEvent.click(screen.getByText("Advanced security and owner proof"));
+    const uploadBuffer = screen.getByLabelText("Upload buffer capacity, GiB");
+    const maximumFile = screen.getByLabelText("Maximum upload file size, GiB");
+    expect(uploadBuffer).toHaveProperty("value", "110");
+    expect(maximumFile).toHaveProperty("value", "20");
+    fireEvent.change(uploadBuffer, { target: { value: "64" } });
+    fireEvent.change(maximumFile, { target: { value: "8" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save upload limits" }));
+    expect(await screen.findByText("Upload limits updated.")).toBeTruthy();
+    await waitFor(() => {
+      const request = fetchMock.mock.calls.find((call) => requestUrl(call[0]).endsWith("/auth/preferences") && call[1]?.method === "PUT" && jsonRequestBody(call[1]).uploadBufferGiB === 64);
+      expect(jsonRequestBody(request?.[1])).toMatchObject({ uploadBufferGiB: 64, maximumUploadFileGiB: 8 });
+    });
+    const trashRetention = screen.getByLabelText("Trash retention, days");
+    expect(trashRetention).toHaveProperty("value", "30");
+    fireEvent.change(trashRetention, { target: { value: "45" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save retention" }));
+    expect(await screen.findByText("Trash retention updated.")).toBeTruthy();
+    await waitFor(() => {
+      const request = fetchMock.mock.calls.find((call) => requestUrl(call[0]).endsWith("/auth/preferences") && call[1]?.method === "PUT" && jsonRequestBody(call[1]).trashRetentionDays === 45);
       expect(request).toBeTruthy();
     });
     fireEvent.click(screen.getByRole("button", { name: "Start Access Key change" }));
@@ -657,7 +945,7 @@ describe("owner Saturn UI", () => {
         const body = jsonRequestBody(call[1]);
         return Array.isArray(body.settingsOrder) && body.settingsOrder[0] === "security";
       });
-      expect(jsonRequestBody(request?.[1]).settingsOrder).toEqual(["security", "appearance", "telegram", "backup", "updates", "logs"]);
+      expect(jsonRequestBody(request?.[1]).settingsOrder).toEqual(["security", "appearance", "backup", "gryphon", "updates", "logs"]);
     });
   });
 
@@ -677,7 +965,6 @@ describe("owner Saturn UI", () => {
       if (url.endsWith("/operator/recovery")) return json({ exportEnabled: false, restoreEnabled: false, reason: "not configured" });
       if (url.endsWith("/operator/updates")) return json({ installedVersion: "0.1.0", updater: { state: "unavailable" }, registry: { state: "unavailable" }, discoveryEnabled: false });
       if (url.includes("/activity")) return json([]);
-      if (url.endsWith("/telegram/status")) return json({ provider: { state: "disabled" } });
       if (url.includes("/devices") || url.includes("/backup-services")) return json([]);
       return json({});
     });
@@ -730,7 +1017,6 @@ describe("owner Saturn UI", () => {
       if (url.endsWith("/operator/kernel")) return json({ configured: false, reachability: "unavailable", revision: 1 });
       if (url.endsWith("/operator/updates")) return json({ installedVersion: "0.1.0", updater: { state: "unavailable" }, registry: { state: "unavailable" }, discoveryEnabled: false });
       if (url.includes("/activity")) return json([]);
-      if (url.endsWith("/telegram/status")) return json({ provider: { state: "disabled" } });
       if (url.includes("/devices") || url.includes("/backup-services")) return json([]);
       return json({});
     });
@@ -743,7 +1029,7 @@ describe("owner Saturn UI", () => {
     await waitFor(() => expect(createObjectUrl).toHaveBeenCalledTimes(1));
     expect(await screen.findByText(/created.*downloaded/i)).toBeTruthy();
 
-    fireEvent.click(screen.getByRole("button", { name: "Restore snapshot" }));
+    fireEvent.click(screen.getByRole("button", { name: "Browse local snapshot archive" }));
     const dialog = within(screen.getByRole("dialog", { name: "Restore snapshot" }));
     fireEvent.change(dialog.getByLabelText("Choose snapshot"), { target: { files: [new File([new Uint8Array(2050)], "snapshot.zip", { type: "application/zip" })] } });
     expect(await dialog.findByText("vault.backup.v1")).toBeTruthy();
@@ -819,6 +1105,29 @@ describe("public Drop UI", () => {
     expect(screen.getByText("UPLOAD HERE").closest(".storage-drop-overlay")).toBeTruthy();
     fireEvent.dragLeave(dropView, { dataTransfer: { types: ["Files"] } });
     expect(screen.queryByText("UPLOAD HERE")).toBeNull();
+  });
+
+  it("rejects a dropped directory before creating an upload", async () => {
+    window.history.replaceState({}, "", "/drop");
+    const expiresAt = new Date(Date.now() + 30 * 60_000).toISOString();
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = requestUrl(input);
+      if (url === "/health/ready") return json({ status: "ok" });
+      if (url.endsWith("/drop/session")) return json({ state: "upload_only", channelId: "channel-directory", expiresAt, maxFiles: 20, maxBytes: 1024 });
+      if (url.endsWith("/drop/uploads") && init?.method !== "POST") return json([]);
+      return json({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "saturn drop point" })).toBeTruthy();
+    const dropView = document.querySelector(".drop-view");
+    if (dropView === null) throw new Error("Drop view is missing");
+    fireEvent.drop(dropView, { dataTransfer: directoryDataTransfer("photos") });
+
+    expect(await screen.findByText("1 folder was skipped. Open it and select the files inside.")).toBeTruthy();
+    expect(fetchMock.mock.calls.some((call) => requestUrl(call[0]).endsWith("/drop/uploads") && call[1]?.method === "POST")).toBe(false);
+    expect(screen.queryByText("photos", { selector: ".drop-job span" })).toBeNull();
   });
 
   it("applies real-time upload snapshots from another client in the same channel", async () => {

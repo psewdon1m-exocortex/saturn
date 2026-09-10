@@ -60,6 +60,11 @@ x-vault-environment: &vault-environment
       uid: "1000"
       gid: "1000"
       mode: 0400
+    - source: gryphon_service_token
+      target: gryphon_service_token
+      uid: "1000"
+      gid: "1000"
+      mode: 0400
     - source: storage_private_key
       target: storage_private_key
       uid: "1000"
@@ -184,11 +189,39 @@ services:
     <<: *vault-environment
     image: ${VAULT_APP_IMAGE:?set VAULT_APP_IMAGE to an immutable digest}
     command: ["node", "/app/api/dist/main.js"]
+    ports:
+      - "127.0.0.1:3000:3000"
+    networks:
+      backend:
+      exocortex-services:
+        aliases:
+          - saturn
     volumes:
       - drop_buffer:/var/lib/vault/drop-buffer
       - recovery_spool:/var/lib/vault/spool
       - recovery_archives:/var/lib/vault/recovery
       - storage_runtime:/var/lib/vault/storage-runtime
+      - type: bind
+        source: "${UPDATER_SOCKET_DIR:-/run/exocortex}"
+        target: /run/exocortex
+      - type: bind
+        source: "${NEPTUNE_SOCKET_DIR:-/run/neptune}"
+        target: /run/neptune
+      - type: bind
+        source: "${GRYPHON_SOCKET_DIR:-/run/gryphon}"
+        target: /run/gryphon
+      - type: bind
+        source: "${NEPTUNE_CONTROL_TOKEN_HOST_FILE:?Set NEPTUNE_CONTROL_TOKEN_HOST_FILE}"
+        target: /run/secrets/neptune-control.token
+        read_only: true
+      - type: bind
+        source: "${NEPTUNE_EXPORT_TOKEN_HOST_FILE:?Set NEPTUNE_EXPORT_TOKEN_HOST_FILE}"
+        target: /run/secrets/neptune-export.token
+        read_only: true
+    group_add:
+      - "${UPDATER_SOCKET_GID:?Set UPDATER_SOCKET_GID}"
+      - "${NEPTUNE_SOCKET_GID:?Set NEPTUNE_SOCKET_GID}"
+      - "${GRYPHON_CLIENTS_GID:?Set GRYPHON_CLIENTS_GID}"
     depends_on:
       worker:
         condition: service_healthy
@@ -246,6 +279,8 @@ networks:
   edge:
   backend:
     internal: true
+  exocortex-services:
+    external: true
 
 secrets:
   database_password:
@@ -264,5 +299,7 @@ secrets:
     file: ${VAULT_SECRET_ROOT:?set VAULT_SECRET_ROOT}/backup_pepper
   laboratory_pepper:
     file: ${VAULT_SECRET_ROOT:?set VAULT_SECRET_ROOT}/laboratory_pepper
+  gryphon_service_token:
+    file: ${GRYPHON_SERVICE_TOKEN_HOST_FILE:?Set GRYPHON_SERVICE_TOKEN_HOST_FILE}
   storage_private_key:
     file: ${VAULT_SECRET_ROOT:?set VAULT_SECRET_ROOT}/storage_private_key

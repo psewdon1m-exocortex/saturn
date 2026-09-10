@@ -42,18 +42,21 @@ function publicRun(value: BackupRunRecord) {
 
 export class BackupIngestService {
   readonly pepper: Buffer;
-  constructor(private readonly input: { readonly repository: BackupRepository; readonly storage: BackupStorage; readonly pepper: string; readonly options: BackupOptions; readonly audit?: AuditSink }) {
+  constructor(private readonly input: { readonly repository: BackupRepository; readonly storage: BackupStorage; readonly pepper: string; readonly options: BackupOptions; readonly backupRootPath?: () => Promise<string>; readonly audit?: AuditSink }) {
     if (input.pepper.length < 32 || /[\r\n]/.test(input.pepper)) throw new Error("Backup pepper is invalid"); this.pepper = Buffer.from(input.pepper, "utf8");
   }
   hmac(label: string, value: string): string { return createHmac("sha256", this.pepper).update(label).update("\0").update(value).digest("hex"); }
   token(): string { return randomBytes(32).toString("base64url"); }
 
   async createService(value: BackupServiceCreateInput, now = new Date()): Promise<{ readonly service: PublicBackupService; readonly token: string }> {
-    const slug = value.slug.trim().toLowerCase(); const name = value.name.trim();
-    if (!/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(slug) || name.length < 1 || name.length > 100 || /[\r\n]/.test(name)) throw new BackupServiceError("invalid");
+    const slug = value.slug.trim().toLowerCase(); const namespaceSlug = (value.namespaceSlug ?? slug).trim().toLowerCase();
+    const deploymentId = (value.deploymentId ?? "default").trim().toLowerCase(); const name = value.name.trim();
+    const safeSlug = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+    if (!safeSlug.test(slug) || !safeSlug.test(namespaceSlug) || !safeSlug.test(deploymentId) || name.length < 1 || name.length > 100 || /[\r\n]/.test(name)
+      || (value.mirrorRoot !== undefined && value.mirrorRoot !== namespaceSlug)) throw new BackupServiceError("invalid");
     const defaults = this.input.options.defaults; const retention = { ...defaults.retention, ...value.retention };
     const record: BackupServiceRecord = {
-      id: uuidv7(), slug, name, tokenHash: "", state: "active", requireEncryption: value.requireEncryption ?? defaults.requireEncryption,
+      id: uuidv7(), slug, namespaceSlug, deploymentId, ...(value.mirrorRoot === undefined ? {} : { mirrorRoot: value.mirrorRoot }), name, tokenHash: "", state: "active", requireEncryption: value.requireEncryption ?? defaults.requireEncryption,
       ...(value.mtlsCertFingerprint === undefined ? {} : { mtlsCertFingerprint: this.fingerprint(value.mtlsCertFingerprint) }),
       maxBackupBytes: value.maxBackupBytes ?? defaults.maxBackupBytes, dailyQuotaBytes: value.dailyQuotaBytes ?? defaults.dailyQuotaBytes,
       storedQuotaBytes: value.storedQuotaBytes ?? defaults.storedQuotaBytes, maxConcurrentRuns: value.maxConcurrentRuns ?? defaults.maxConcurrentRuns,
@@ -62,6 +65,43 @@ export class BackupIngestService {
     this.validatePolicy(record); const token = this.token(); const withHash = { ...record, tokenHash: this.hmac("backup-service-token", token) };
     await this.input.repository.createService(withHash); await this.audit("backup.service.created", record.id, { slug });
     return { service: await this.publicService(withHash, now), token };
+  }
+
+  async createEnrollment(value: BackupServiceCreateInput, now = new Date()): Promise<{ readonly service: PublicBackupService; readonly code: string; readonly expiresAt: string }> {
+    const namespaceSlug = (value.namespaceSlug ?? value.slug).trim().toLowerCase();
+    const deploymentId = (value.deploymentId ?? "default").trim().toLowerCase();
+    const existing = await this.input.repository.getActiveServiceByDeployment(namespaceSlug, deploymentId);
+    if (existing !== undefined) {
+      if (existing.mirrorRoot !== value.mirrorRoot) throw new BackupServiceError("conflict");
+      return this.createEnrollmentForService(existing.id, now);
+    }
+    const created = await this.createService(value, now);
+    return this.createEnrollmentForService(created.service.id, now);
+  }
+
+  async createEnrollmentForService(serviceId: string, now = new Date()): Promise<{ readonly service: PublicBackupService; readonly code: string; readonly expiresAt: string }> {
+    const selected = await this.requiredService(serviceId);
+    if (selected.state !== "active") throw new BackupServiceError("conflict");
+    const code = randomBytes(24).toString("base64url"); const expiresAt = new Date(now.getTime() + 15 * 60_000);
+    await this.input.repository.createEnrollment({ id: uuidv7(), serviceId, codeHash: this.hmac("backup-enrollment-code", code), expiresAt, createdAt: now });
+    await this.audit("backup.service.enrollment.created", serviceId, { expiresAt: expiresAt.toISOString() });
+    return { service: await this.publicService(selected, now), code, expiresAt: expiresAt.toISOString() };
+  }
+
+  async redeemEnrollment(code: string, now = new Date()): Promise<{ readonly serviceId: string; readonly token: string; readonly slug: string; readonly namespaceSlug: string; readonly deploymentId: string; readonly mirrorRoot?: "volt" | "mastermind" }> {
+    if (!/^[A-Za-z0-9_-]{32}$/.test(code)) throw new BackupServiceError("unauthorized");
+    const selected = await this.input.repository.consumeEnrollment(this.hmac("backup-enrollment-code", code), now);
+    if (selected === undefined) throw new BackupServiceError("unauthorized");
+    const token = this.token();
+    await this.input.repository.rotateToken(selected.id, this.hmac("backup-service-token", token), now, now);
+    await this.audit("backup.service.enrollment.redeemed", selected.id, { deploymentId: selected.deploymentId });
+    return { serviceId: selected.id, token, slug: selected.slug, namespaceSlug: selected.namespaceSlug, deploymentId: selected.deploymentId, ...(selected.mirrorRoot === undefined ? {} : { mirrorRoot: selected.mirrorRoot }) };
+  }
+
+  async attachMirrorDevice(serviceId: string, deviceId: string, now = new Date()): Promise<PublicBackupService> {
+    const updated = await this.input.repository.attachMirrorDevice(serviceId, deviceId, now);
+    await this.audit("backup.service.mirror.attached", serviceId, { deviceId, mirrorRoot: updated.mirrorRoot });
+    return this.publicService(updated, now);
   }
 
   async listServices(offset = 0, limit = 100, now = new Date()): Promise<readonly PublicBackupService[]> {
@@ -103,10 +143,11 @@ export class BackupIngestService {
       || value.sourceVersion.length < 1 || value.sourceVersion.length > 200 || /[\r\n]/.test(value.sourceVersion) || !Number.isSafeInteger(value.expectedSize) || value.expectedSize < 1 || value.expectedSize > context.service.maxBackupBytes
       || !Number.isFinite(value.createdAt.getTime()) || value.createdAt.getTime() > now.getTime() + 86_400_000 || value.createdAt.getUTCFullYear() < 2000 || (context.service.requireEncryption && !value.encrypted)) throw new BackupServiceError("invalid");
     const id = uuidv7(); const date = value.createdAt.toISOString(); const parts = date.slice(0, 10).split("-"); const stamp = date.replace(/[:.]/g, "-");
+    const backupRootPath = this.input.backupRootPath === undefined ? "backups" : await this.input.backupRootPath();
     const run: BackupRunRecord = { id, serviceId: context.service.id, clientKeyHash: this.hmac("backup-run-idempotency", value.idempotencyKey), filename,
       sourceCreatedAt: value.createdAt, backupType: value.backupType, expectedSize: value.expectedSize, expectedSha256: sha256, sourceVersion: value.sourceVersion,
       encrypted: value.encrypted, state: "pending", receivedSize: 0, tempPath: joinStoragePath("_system", "incoming", "backups", context.service.id, `${id}.part`),
-      finalPath: joinStoragePath("backups", context.service.slug, ...(parts as [string, string, string]), `${stamp}_${value.backupType}_${id}_${filename}`), createdAt: now, updatedAt: now };
+      finalPath: joinStoragePath(backupRootPath, context.service.namespaceSlug, ...(context.service.deploymentId === "default" ? [] : [context.service.deploymentId]), ...(parts as [string, string, string]), `${stamp}_${value.backupType}_${id}_${filename}`), createdAt: now, updatedAt: now };
     try { const result = await this.input.repository.reserveRun(run, now); if (!result.created && (result.run.expectedSize !== run.expectedSize || result.run.expectedSha256 !== run.expectedSha256 || result.run.filename !== run.filename)) throw new BackupServiceError("conflict"); await this.audit("backup.run.created", result.run.id, { serviceId: context.service.id, created: result.created, expectedSize: result.run.expectedSize }, context.service.id); return publicRun(result.run); }
     catch (error) { if (error instanceof Error && /quota/i.test(error.message)) throw new BackupServiceError("quota"); throw error; }
   }
@@ -139,6 +180,18 @@ export class BackupIngestService {
   }
 
   async listRunsForOwner(serviceId: string, offset = 0, limit = 100) { validatePage(offset, limit); await this.requiredService(serviceId); return (await this.input.repository.listRuns(serviceId, offset, limit)).map(publicRun); }
+  async getRunForOwner(runId: string): Promise<BackupRunRecord> {
+    const run = await this.input.repository.getRunForOwner(runId);
+    if (run === undefined) throw new BackupServiceError("not_found");
+    return run;
+  }
+  async cancelRunForOwner(runId: string, now = new Date()): Promise<void> {
+    const run = await this.getRunForOwner(runId);
+    if (!["pending", "uploading", "appending"].includes(run.state)) throw new BackupServiceError("conflict");
+    await this.input.repository.failRun(run.serviceId, run.id, "cancelled_by_owner", now);
+    await this.input.storage.delete(run.tempPath).catch(() => undefined);
+    await this.audit("backup.run.cancelled", run.id, { serviceId: run.serviceId, receivedSize: run.receivedSize });
+  }
   async retentionPreview(serviceId: string, limit = 500) { const selected = await this.requiredService(serviceId); const runs = await this.input.repository.listRuns(serviceId, 0, Math.min(500, limit)); return retentionCandidates(runs, selected.retention).map((item) => item.id); }
   async recordRestoreTest(runId: string, value: { readonly method: BackupRestoreTestRecord["method"]; readonly outcome: BackupRestoreTestRecord["outcome"]; readonly notes?: string; readonly artifactSha256?: string }, now = new Date()): Promise<BackupRestoreTestRecord> {
     const run = await this.input.repository.getRunForOwner(runId); if (run === undefined || run.state !== "complete") throw new BackupServiceError("not_found");

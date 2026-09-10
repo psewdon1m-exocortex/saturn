@@ -16,7 +16,6 @@ import type {
   DropUploadCreateInput,
   DropUploadStatus,
   NewDropSession,
-  TelegramBinding,
   TelegramIdentity,
 } from "./types.js";
 
@@ -125,39 +124,11 @@ export class DropService {
     return this.#hmac("drop-user-agent", userAgent.slice(0, 1024));
   }
 
-  async createLinkChallenge(now = new Date()): Promise<{ readonly code: string; readonly expiresAt: Date }> {
-    const raw = code(12);
-    const expiresAt = new Date(now.getTime() + this.#options.linkCodeTtlMs);
-    await this.#repository.createLinkChallenge({ id: uuidv7(), codeHash: this.#hmac("telegram-link-code", raw), createdAt: now, expiresAt });
-    await this.#auditEvent("telegram.link.challenge.created", "success", `telegram-link:${uuidv7()}`, {});
-    return { code: displayCode(raw), expiresAt };
-  }
-
-  async linkTelegram(rawCode: string, identity: TelegramIdentity, now = new Date()): Promise<TelegramBinding> {
-    validateIdentity(identity);
-    const normalized = normalizeCode(rawCode, 12);
-    if (normalized === undefined) throw new DropServiceError("invalid_code");
-    const value = await this.#repository.consumeLinkChallenge(this.#hmac("telegram-link-code", normalized), identity, now);
-    if (value === undefined) throw new DropServiceError("invalid_code");
-    await this.#auditEvent("telegram.bound", "success", `telegram-bound:${uuidv7()}`, { telegramUserId: identity.userId });
-    return value;
-  }
-
-  getBinding(): Promise<TelegramBinding | undefined> {
-    return this.#repository.getBinding();
-  }
-
-  async unlink(now = new Date()): Promise<{ readonly sessions: number; readonly challenges: number }> {
-    const result = await this.#repository.unlink(now);
-    await this.#auditEvent("telegram.unlinked", "success", `telegram-unlink:${uuidv7()}`, result);
-    return result;
-  }
-
   issueDropCode(now = new Date()): Promise<{ readonly code: string; readonly expiresAt: Date }> {
     return this.#issueDropCode(undefined, now);
   }
 
-  issueDropCodeForTelegram(identity: TelegramIdentity, now = new Date()): Promise<{ readonly code: string; readonly expiresAt: Date }> {
+  issueDropCodeForGryphon(identity: TelegramIdentity, now = new Date()): Promise<{ readonly code: string; readonly expiresAt: Date }> {
     validateIdentity(identity);
     return this.#issueDropCode(identity, now);
   }
@@ -269,7 +240,7 @@ export class DropService {
     return opaqueToken(token) ? this.#repository.revokeDropSession(sha256(token), now) : Promise.resolve();
   }
 
-  async revokeAccess(identity: TelegramIdentity, now = new Date()): Promise<{ readonly sessions: number; readonly challenges: number }> {
+  async revokeGryphonAccess(identity: TelegramIdentity, now = new Date()): Promise<{ readonly sessions: number; readonly challenges: number }> {
     validateIdentity(identity);
     const result = await this.#repository.revokeDropAccess(identity, now);
     await this.#auditEvent("drop.access.revoked", "success", `drop-revoke:${uuidv7()}`, { telegramUserId: identity.userId, ...result });
@@ -279,7 +250,9 @@ export class DropService {
   async createUpload(session: DropSession, input: DropUploadCreateInput): Promise<DropUploadStatus> {
     const filename = normalizeStorageName(input.filename);
     const expectedSha256 = input.expectedSha256?.toLowerCase();
-    if (!Number.isSafeInteger(input.expectedSize) || input.expectedSize < 0 || input.expectedSize > this.#options.maxBytes) {
+    const limits = await this.#files.getUploadLimits();
+    if (!Number.isSafeInteger(input.expectedSize) || input.expectedSize < 0
+      || input.expectedSize > Math.min(this.#options.maxBytes, limits.maximumFileBytes)) {
       throw new Error("Drop upload size is invalid");
     }
     if (expectedSha256 !== undefined && !/^[a-f0-9]{64}$/.test(expectedSha256)) throw new Error("Drop upload checksum is invalid");
@@ -300,7 +273,7 @@ export class DropService {
       now,
       ...(this.#buffer === undefined ? {} : {
         continuationUntil: new Date(now.getTime() + (this.#options.continuationTtlMs ?? 24 * 60 * 60 * 1_000)),
-        globalMaxBytes: this.#buffer.reservationLimitBytes,
+        globalMaxBytes: await this.#buffer.reservationLimitBytes(),
       }),
     }).catch((error: unknown) => {
       if (error instanceof Error && /quota/i.test(error.message)) throw new DropServiceError("quota_exhausted");
@@ -356,6 +329,10 @@ export class DropService {
     return this.#buffer.capacity(await this.#repository.bufferReservedBytes());
   }
 
+  uploadLimits() {
+    return this.#files.getUploadLimits();
+  }
+
   async appendUpload(session: DropSession, id: string, offset: number, contentLength: number, source: Readable): Promise<DropUploadStatus> {
     const mapping = await this.#mapped(session.channelId, id);
     if (this.#buffer !== undefined && mapping.localPath !== undefined && this.#repository.advanceBufferedUpload !== undefined) {
@@ -388,7 +365,7 @@ export class DropService {
     await this.#repository.completeDropUpload(session.channelId, mapping.id, completed.resource.id, now);
     if (session.telegramUserId !== undefined && session.telegramChatId !== undefined) {
       const identity = { userId: session.telegramUserId, chatId: session.telegramChatId };
-      await this.#notifications?.uploadCompleted(identity, completed.resource.name, completed.resource.sizeBytes).catch(() => undefined);
+      await this.#notifications?.uploadCompleted(identity, mapping.id, completed.resource.name, completed.resource.sizeBytes).catch(() => undefined);
     }
     await this.#auditEvent("drop.upload.completed", "success", `drop-upload:${mapping.id}`, {
       sessionId: session.id,

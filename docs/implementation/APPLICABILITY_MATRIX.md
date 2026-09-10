@@ -14,7 +14,7 @@ This matrix applies the document-selection rules from
 | Part V CI/releases/local updates | Applicable | Production releases, migrations and rollback are in scope | 2, 13-14 |
 | Part VI unified acceptance | Applicable | Always applicable; exclusions require evidence | 0-14 |
 | Part VII security/exposure | Applicable | Saturn has secrets, public endpoints, private state and deployment boundaries | 0-14 |
-| Outer Connections: Telegram | Applicable | Telegram bot issues Drop access and security alerts | 7 |
+| Outer Connections: Telegram | Applicable through Gryphon | Gryphon owns Telegram; Saturn issues and revokes Drop access through an authenticated neutral adapter | 7 |
 | SEO/GEO public/indexable rules | Requires investigation | Authentication, Drop and Share are public non-indexable. Laboratory assets may be public, but indexable HTML pages require an explicit operator decision | 12 |
 | Perimetr Excalidraw | Informative | Provides conceptual context for fields, gates and selective exposure; it is not linked as normative by the orchestrator | 0-14 |
 

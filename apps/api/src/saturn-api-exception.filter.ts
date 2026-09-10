@@ -6,9 +6,10 @@ function safeError(error: Error): { readonly statusCode: number; readonly code: 
   const message = error.message;
   if (/not found|missing/i.test(message)) return { statusCode: 404, code: "not_found", message };
   if (/locked/i.test(message)) return { statusCode: 423, code: "locked", message };
-  if (/already|exists|offset mismatch|concurrently|in progress|reconciliation/i.test(message)) {
+  if (/already|exists|offset mismatch|concurrently|in progress|reconciliation|cancelled|not paused|not controllable|client disconnected/i.test(message)) {
     return { statusCode: 409, code: "conflict", message };
   }
+  if (/duplicate|unique constraint/i.test(message)) return { statusCode: 409, code: "identity_conflict", message: "An active Neptune identity already owns this project/server pair or mirror root" };
   if (/invalid|incomplete|cannot|not active|differs|checksum|Content-Length|reserved/i.test(message)) {
     return { statusCode: 400, code: "invalid_request", message };
   }

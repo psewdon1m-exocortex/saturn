@@ -50,7 +50,11 @@ for item in z.infolist():
   if p.is_absolute() or '..' in p.parts or item.is_dir(): raise SystemExit('unsafe bundle member')
 pathlib.Path(target).mkdir(mode=0o755)
 for item in z.infolist():
-  output=pathlib.Path(target,*pathlib.PurePosixPath(item.filename).parts);output.parent.mkdir(parents=True,exist_ok=True);output.write_bytes(z.read(item));output.chmod(0o700 if item.filename.endswith('.sh') else 0o600)
+  output=pathlib.Path(target,*pathlib.PurePosixPath(item.filename).parts);output.parent.mkdir(parents=True,exist_ok=True);output.write_bytes(z.read(item));output.chmod(0o700 if item.filename.endswith('.sh') or item.filename.endswith('/updater-linux-amd64') else 0o600)
 PY
+[ -f "$INSTALL_ROOT/updater/install.sh" ] || die "release bundle is missing updater/install.sh"
+[ -x "$INSTALL_ROOT/updater/updater-linux-amd64" ] || die "release bundle is missing updater/updater-linux-amd64"
+[ -f "$INSTALL_ROOT/updater/systemd/updater.service" ] || die "release bundle is missing updater/systemd/updater.service"
 install -m 0755 "$INSTALL_ROOT/infra/production/install.sh" /usr/local/sbin/vaultctl
+ln -sfn /usr/local/sbin/vaultctl /usr/local/sbin/saturn-install
 "$INSTALL_ROOT/infra/production/install.sh" prepare

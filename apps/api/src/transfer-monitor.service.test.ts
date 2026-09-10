@@ -1,4 +1,4 @@
-import { Readable } from "node:stream";
+import { PassThrough, Readable } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
 import { TransferMonitorService } from "./transfer-monitor.service.js";
 
@@ -40,5 +40,57 @@ describe("TransferMonitorService", () => {
     expect(second.uploadBytesPerSecond).toBe(200);
     expect(second.tasks.find((task) => task.id === "queued")).toMatchObject({ state: "queued", queuePosition: 1 });
     expect(second.tasks.find((task) => task.id === "retry")).toMatchObject({ state: "waiting_retry", queuePosition: 2 });
+  });
+
+  it("pauses, resumes and cancels a persisted upload at request boundaries", async () => {
+    const monitor = new TransferMonitorService();
+    const now = new Date("2026-09-04T10:00:00.000Z");
+    const row = { id: "active", filename: "active.bin", expectedBytes: 1_000, receivedBytes: 250, status: "uploading" as const, createdAt: now, updatedAt: now };
+
+    expect(monitor.control("active", "pause")).toBe("paused");
+    expect(monitor.snapshot([row], now.getTime()).tasks[0]).toMatchObject({ state: "paused", canPause: false, canResume: true, canCancel: true, bytesPerSecond: 0 });
+
+    let released = false;
+    const waiting = monitor.awaitRunnable("active").then(() => { released = true; });
+    await Promise.resolve();
+    expect(released).toBe(false);
+    expect(monitor.control("active", "resume")).toBe("running");
+    await waiting;
+    expect(released).toBe(true);
+
+    monitor.control("active", "pause");
+    const cancelled = expect(monitor.awaitRunnable("active")).rejects.toMatchObject({ code: "cancelled" });
+    expect(monitor.control("active", "cancel")).toBe("cancelled");
+    await cancelled;
+    expect(monitor.snapshot([row], now.getTime()).tasks[0]).toMatchObject({ state: "cancelled", canPause: false, canResume: false, canCancel: false });
+  });
+
+  it("detaches an aborted paused request without reviving it on resume", async () => {
+    const monitor = new TransferMonitorService();
+    const abort = new AbortController();
+    monitor.control("active", "pause");
+    const waiting = expect(monitor.awaitRunnable("active", abort.signal)).rejects.toMatchObject({ code: "client_disconnected" });
+
+    abort.abort();
+    await waiting;
+    expect(monitor.control("active", "resume")).toBe("running");
+  });
+
+  it("pauses, resumes and cancels the actual download stream", () => {
+    const monitor = new TransferMonitorService();
+    const source = new PassThrough();
+    const output = monitor.trackDownload(source, { filename: "archive.bin", totalBytes: 100 });
+    output.resume();
+    const id = monitor.snapshot([]).tasks[0]?.id;
+    if (id === undefined) throw new Error("Download task was not registered");
+
+    expect(monitor.control(id, "pause")).toBe("paused");
+    expect(source.isPaused()).toBe(true);
+    expect(monitor.snapshot([]).tasks[0]).toMatchObject({ state: "paused", canPause: false, canResume: true, canCancel: true });
+    expect(monitor.control(id, "resume")).toBe("running");
+    expect(monitor.snapshot([]).tasks[0]).toMatchObject({ state: "downloading", canPause: true, canResume: false, canCancel: true });
+    expect(monitor.control(id, "cancel")).toBe("cancelled");
+    expect(source.destroyed).toBe(true);
+    expect(monitor.snapshot([]).tasks[0]).toMatchObject({ state: "cancelled", canPause: false, canResume: false, canCancel: false });
   });
 });

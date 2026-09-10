@@ -7,12 +7,13 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { LocalStorageAdapter } from "@saturn/storage";
 import { BackupIngestService, BackupServiceError } from "./backup.service.js";
 import { retentionCandidates } from "./retention.js";
-import type { BackupReceipt, BackupRepository, BackupRestoreTestRecord, BackupRunRecord, BackupServiceRecord, BackupUsage } from "./types.js";
+import type { BackupEnrollmentRecord, BackupReceipt, BackupRepository, BackupRestoreTestRecord, BackupRunRecord, BackupServiceRecord, BackupUsage } from "./types.js";
 
 class MemoryRepository implements BackupRepository {
-  services = new Map<string, BackupServiceRecord>(); runs = new Map<string, BackupRunRecord>(); restores: BackupRestoreTestRecord[] = [];
+  services = new Map<string, BackupServiceRecord>(); runs = new Map<string, BackupRunRecord>(); restores: BackupRestoreTestRecord[] = []; enrollments = new Map<string, BackupEnrollmentRecord>();
   async createService(value: BackupServiceRecord) { if ([...this.services.values()].some((item) => item.slug === value.slug)) throw new Error("exists"); this.services.set(value.id, value); }
   async getService(id: string) { return this.services.get(id); }
+  async getActiveServiceByDeployment(namespaceSlug: string, deploymentId: string) { return [...this.services.values()].find((item) => item.namespaceSlug === namespaceSlug && item.deploymentId === deploymentId && item.state === "active"); }
   async listServices(offset: number, limit: number) { return [...this.services.values()].slice(offset, offset + limit); }
   async updateService(id: string, input: Parameters<BackupRepository["updateService"]>[1], now: Date) { const current = this.services.get(id); if (!current) throw new Error("not found"); const value = { ...current, ...input, updatedAt: now }; this.services.set(id, value); return value; }
   async rotateToken(id: string, tokenHash: string, previousTokenExpiresAt: Date, now: Date) { const current = this.services.get(id); if (!current) throw new Error("not found"); const value = { ...current, previousTokenHash: current.tokenHash, previousTokenExpiresAt, tokenHash, updatedAt: now }; this.services.set(id, value); return value; }
@@ -31,6 +32,9 @@ class MemoryRepository implements BackupRepository {
   async usage(serviceId: string): Promise<BackupUsage> { const values = [...this.runs.values()].filter((item) => item.serviceId === serviceId); return { storedBytes: values.filter((item) => item.state === "complete").reduce((sum, item) => sum + item.expectedSize, 0), activeReservedBytes: 0, dailyReservedBytes: 0, activeRuns: 0, failedRuns: 0 }; }
   async recordRestoreTest(value: BackupRestoreTestRecord) { this.restores.push(value); }
   async latestRestoreTest(serviceId: string) { return this.restores.filter((item) => item.serviceId === serviceId).at(-1); }
+  async createEnrollment(value: BackupEnrollmentRecord) { for (const [key, current] of this.enrollments) if (current.serviceId === value.serviceId && current.consumedAt === undefined) this.enrollments.set(key, { ...current, consumedAt: value.createdAt }); this.enrollments.set(value.codeHash, value); }
+  async consumeEnrollment(codeHash: string, now: Date) { const value = this.enrollments.get(codeHash); if (value === undefined || value.consumedAt !== undefined || value.expiresAt <= now) return undefined; this.enrollments.set(codeHash, { ...value, consumedAt: now }); return this.services.get(value.serviceId); }
+  async attachMirrorDevice(serviceId: string, deviceId: string, now: Date) { const current = this.services.get(serviceId); if (!current) throw new Error("not found"); const value = { ...current, mirrorDeviceId: deviceId, updatedAt: now }; this.services.set(serviceId, value); return value; }
 }
 
 const options = { enabled: true, trustClientCertificateHeader: true, tokenRotationGraceMs: 1000, uploadChunkMaxBytes: 1024, incompleteTtlMs: 60_000, defaults: { requireEncryption: true, maxBackupBytes: 4096, dailyQuotaBytes: 8192, storedQuotaBytes: 16384, maxConcurrentRuns: 1, freshnessSlaMs: 86_400_000, retention: { daily: 7, weekly: 4, monthly: 12, yearly: 3 } } } as const;
@@ -46,6 +50,32 @@ describe("BackupIngestService", () => {
     const rotated = await service.rotateToken(created.service.id); await expect(service.authenticate(`Bearer ${created.token}`, fingerprint)).resolves.toMatchObject({ usedPreviousToken: true });
     await service.revokeService(created.service.id); await expect(service.authenticate(`Bearer ${rotated.token}`, fingerprint)).rejects.toMatchObject({ code: "unauthorized" });
   });
+  it("redeems an enrollment exactly once and isolates the deployment path", async () => {
+    const enrollment = await service.createEnrollment({ slug: "chronos-vps-1", namespaceSlug: "chronos", deploymentId: "vps-1", name: "Chronos VPS 1", requireEncryption: false });
+    const redeemed = await service.redeemEnrollment(enrollment.code);
+    expect(redeemed).toMatchObject({ slug: "chronos-vps-1", namespaceSlug: "chronos", deploymentId: "vps-1" });
+    await expect(service.redeemEnrollment(enrollment.code)).rejects.toMatchObject({ code: "unauthorized" });
+    const context = await service.authenticate(`Bearer ${redeemed.token}`);
+    const payload = Buffer.from("plain-zip"); const digest = createHash("sha256").update(payload).digest("hex");
+    const run = await service.createRun(context, redeemed.slug, { filename: "chronos.zip", createdAt: new Date("2026-09-08T10:00:00Z"), backupType: "full", expectedSize: payload.length, sha256: digest, sourceVersion: "1", encrypted: false, idempotencyKey: "deployment-path-test" });
+    expect(repository.runs.get(run.id)?.finalPath).toContain("backups/chronos/vps-1/2026/09/08/");
+  });
+  it("reissues setup for an existing active project/server pair instead of duplicating it", async () => {
+    const first = await service.createEnrollment({ slug: "chronos-vps-1", namespaceSlug: "chronos", deploymentId: "vps-1", name: "Chronos VPS 1", requireEncryption: false });
+    const replacement = await service.createEnrollment({ slug: "ignored-replacement-slug", namespaceSlug: "chronos", deploymentId: "vps-1", name: "Replacement label", requireEncryption: false });
+    expect(replacement.service.id).toBe(first.service.id);
+    expect(replacement.code).not.toBe(first.code);
+    await expect(service.redeemEnrollment(first.code)).rejects.toMatchObject({ code: "unauthorized" });
+    await expect(service.redeemEnrollment(replacement.code)).resolves.toMatchObject({ serviceId: first.service.id, namespaceSlug: "chronos", deploymentId: "vps-1" });
+  });
+  it("keeps the dedicated mirror identity bound to its matching Saturn root", async () => {
+    await expect(service.createEnrollment({ slug: "volt-vps-1", namespaceSlug: "chronos", deploymentId: "vps-1", mirrorRoot: "volt", name: "Invalid mirror" })).rejects.toMatchObject({ code: "invalid" });
+    const enrollment = await service.createEnrollment({ slug: "volt-vps-1", namespaceSlug: "volt", deploymentId: "vps-1", mirrorRoot: "volt", name: "Volt mirror", requireEncryption: false });
+    const redeemed = await service.redeemEnrollment(enrollment.code);
+    expect(redeemed).toMatchObject({ mirrorRoot: "volt", namespaceSlug: "volt", deploymentId: "vps-1" });
+    const attached = await service.attachMirrorDevice(redeemed.serviceId, "00000000-0000-7000-8000-000000000099");
+    expect(attached).toMatchObject({ mirrorRoot: "volt", mirrorDeviceId: "00000000-0000-7000-8000-000000000099" });
+  });
   it("streams an exact resumable backup, rejects wrong offset and commits a receipt", async () => {
     const payload = Buffer.from("encrypted-backup-fixture"); const digest = createHash("sha256").update(payload).digest("hex"); const created = await service.createService({ slug: "service-a", name: "Service A" }); const context = await service.authenticate(`Bearer ${created.token}`);
     const run = await service.createRun(context, "service-a", { filename: "backup.age", createdAt: new Date("2026-08-26T01:00:00Z"), backupType: "full", expectedSize: payload.length, sha256: digest, sourceVersion: "1.0.0", encrypted: true, idempotencyKey: "backup-test-one" });
@@ -58,6 +88,19 @@ describe("BackupIngestService", () => {
     const a = await service.createService({ slug: "service-a", name: "A" }); const b = await service.createService({ slug: "service-b", name: "B" }); const contextA = await service.authenticate(`Bearer ${a.token}`); const contextB = await service.authenticate(`Bearer ${b.token}`);
     await expect(service.createRun(contextA, "service-b", { filename: "x.age", createdAt: new Date(), backupType: "full", expectedSize: 1, sha256: "a".repeat(64), sourceVersion: "1", encrypted: true, idempotencyKey: "isolation-key" })).rejects.toMatchObject({ code: "not_found" });
     await expect(service.inspectRun(contextB, "service-b", crypto.randomUUID())).rejects.toMatchObject({ code: "not_found" });
+  });
+  it("cancels an unfinished owner backup and removes its temporary bytes", async () => {
+    const payload = Buffer.from("unfinished-backup"); const created = await service.createService({ slug: "service-a", name: "A" }); const context = await service.authenticate(`Bearer ${created.token}`);
+    const run = await service.createRun(context, "service-a", { filename: "partial.age", createdAt: new Date(), backupType: "full", expectedSize: payload.length * 2, sha256: "a".repeat(64), sourceVersion: "1", encrypted: true, idempotencyKey: "cancel-owner-run" });
+    await service.append(context, "service-a", run.id, 0, payload.length, Readable.from(payload));
+    const stored = repository.runs.get(run.id);
+    if (stored === undefined) throw new Error("Backup run was not stored");
+    await expect(fs.stat(path.join(root, stored.tempPath))).resolves.toMatchObject({ size: payload.length });
+
+    await service.cancelRunForOwner(run.id);
+
+    expect(repository.runs.get(run.id)).toMatchObject({ state: "failed", failureCode: "cancelled_by_owner" });
+    await expect(fs.stat(path.join(root, stored.tempPath))).rejects.toMatchObject({ code: "ENOENT" });
   });
   it("selects deterministic GFS retention candidates", () => {
     const base = Array.from({ length: 12 }, (_, index) => ({ id: String(index), state: "complete", committedAt: new Date(Date.UTC(2026, 7, 26 - index)) } as BackupRunRecord));

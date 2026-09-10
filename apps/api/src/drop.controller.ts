@@ -76,6 +76,7 @@ export class DropController {
       expiresAt: created.session.expiresAt,
       maxFiles: created.session.maxFiles,
       maxBytes: created.session.maxBytes,
+      maxFileBytes: (await this.drop.uploadLimits()).maximumFileBytes,
       reservedFiles: created.session.reservedFiles,
       reservedBytes: created.session.reservedBytes,
       buffer: await this.drop.bufferCapacity(),
@@ -91,6 +92,7 @@ export class DropController {
       continuationTtlMs: this.config.drop.continuationTtlMs,
       workers: this.config.drop.drainWorkers,
       intervalMs: this.config.drop.drainIntervalMs,
+      maximumFileBytes: (await this.drop.uploadLimits()).maximumFileBytes,
     };
   }
 
@@ -104,7 +106,7 @@ export class DropController {
     try {
       const created = await this.drop.redeem(redeemSchema.parse(body).code, request.ip, request.headers["user-agent"] ?? "");
       this.#setCookies(reply, created);
-      return { state: "upload_only", channelId: created.session.channelId, expiresAt: created.session.expiresAt, maxFiles: created.session.maxFiles, maxBytes: created.session.maxBytes };
+      return { state: "upload_only", channelId: created.session.channelId, expiresAt: created.session.expiresAt, maxFiles: created.session.maxFiles, maxBytes: created.session.maxBytes, maxFileBytes: (await this.drop.uploadLimits()).maximumFileBytes };
     } catch (error) {
       if (error instanceof DropServiceError && error.code === "rate_limited") {
         throw new HttpException({ code: "drop_unavailable" }, HttpStatus.TOO_MANY_REQUESTS);
@@ -151,6 +153,7 @@ export class DropController {
       expiresAt: session.expiresAt,
       maxFiles: session.maxFiles,
       maxBytes: session.maxBytes,
+      maxFileBytes: (await this.drop.uploadLimits()).maximumFileBytes,
       reservedFiles: session.reservedFiles,
       reservedBytes: session.reservedBytes,
       buffer: await this.drop.bufferCapacity(),

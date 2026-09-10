@@ -2,14 +2,15 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { BadRequestException, Body, ConflictException, Controller, Get, Inject, Post, Put, UseGuards } from "@nestjs/common";
+import { BadRequestException, Body, ConflictException, Controller, Get, Inject, Optional, Post, Put, UseGuards } from "@nestjs/common";
 import type { AuditService } from "@saturn/audit";
+import type { ArchiveJobRepository } from "@saturn/archive";
 import type { SaturnConfig } from "@saturn/config";
 import type { Database } from "@saturn/database";
-import type { StorageAdapter } from "@saturn/storage";
+import type { RuntimeStorageManager } from "@saturn/storage";
 import { z } from "zod";
 import { OwnerTokenGuard, RequireRecentReauthentication } from "./owner-token.guard.js";
-import { APP_CONFIG, AUDIT_SERVICE, DATABASE, STORAGE_ADAPTER } from "./tokens.js";
+import { APP_CONFIG, ARCHIVE_REPOSITORY, AUDIT_SERVICE, DATABASE, STORAGE_RUNTIME } from "./tokens.js";
 import { TransferMonitorService, type UploadTaskSample } from "./transfer-monitor.service.js";
 
 interface CpuSample {
@@ -36,6 +37,7 @@ interface UploadTaskRow {
 interface StorageUsageRow {
   readonly used_bytes: string;
   readonly file_count: string;
+  readonly directory_count: string;
 }
 
 type DiskUsageMetric = {
@@ -76,6 +78,12 @@ async function localDiskUsage(): Promise<DiskUsageMetric> {
   }
 }
 
+function isLocalDevelopmentStorage(config: SaturnConfig, storage: RuntimeStorageManager): boolean {
+  if (config.environment === "production") return false;
+  const host = storage.current().config.host.trim().toLowerCase().replace(/^\[|\]$/g, "");
+  return host === "localhost" || host === "::1" || host.startsWith("127.");
+}
+
 const kernelUrlSchema = z.object({ url: z.string().min(1).max(2048) }).strict();
 const kernelTokenSchema = z.object({ token: z.string().min(32).max(4096) }).strict();
 
@@ -87,7 +95,8 @@ export class OperatorController {
   readonly #config: SaturnConfig;
   readonly #audit: AuditService;
   readonly #transfers: TransferMonitorService;
-  readonly #storage: StorageAdapter;
+  readonly #storage: RuntimeStorageManager;
+  readonly #archives: ArchiveJobRepository | undefined;
   #kernelRotations: number[] = [];
 
   constructor(
@@ -95,13 +104,15 @@ export class OperatorController {
     @Inject(APP_CONFIG) config: SaturnConfig,
     @Inject(AUDIT_SERVICE) audit: AuditService,
     @Inject(TransferMonitorService) transfers: TransferMonitorService,
-    @Inject(STORAGE_ADAPTER) storage: StorageAdapter,
+    @Inject(STORAGE_RUNTIME) storage: RuntimeStorageManager,
+    @Optional() @Inject(ARCHIVE_REPOSITORY) archives?: ArchiveJobRepository,
   ) {
     this.#database = database;
     this.#config = config;
     this.#audit = audit;
     this.#transfers = transfers;
     this.#storage = storage;
+    this.#archives = archives;
   }
 
   #normalizeKernelUrl(input: string): string {
@@ -180,7 +191,8 @@ export class OperatorController {
   @Get("overview")
   async overview() {
     const sampledAt = Date.now();
-    const [uploadRows, backupRows, storageRows, disk, storageCapacity] = await Promise.all([
+    const localDevelopmentStorage = isLocalDevelopmentStorage(this.#config, this.#storage);
+    const [uploadRows, backupRows, storageRows, disk, storageCapacity, archiveJobs] = await Promise.all([
       this.#database.withSql((sql) => sql<UploadTaskRow[]>`
         SELECT id::text, filename, expected_size::text, received_size::text, status, created_at, updated_at
         FROM upload_sessions
@@ -211,12 +223,16 @@ export class OperatorController {
         LIMIT 32
       `),
       this.#database.withSql((sql) => sql<StorageUsageRow[]>`
-        SELECT coalesce(sum(size_bytes), 0)::text AS used_bytes, count(*)::text AS file_count
+        SELECT
+          coalesce(sum(size_bytes) FILTER (WHERE type = 'file'), 0)::text AS used_bytes,
+          count(*) FILTER (WHERE type = 'file')::text AS file_count,
+          count(*) FILTER (WHERE type = 'folder' AND parent_id IS NOT NULL)::text AS directory_count
         FROM resources
-        WHERE type = 'file' AND status = 'active'
+        WHERE status = 'active'
       `),
       localDiskUsage(),
-      this.#storage.statFs().catch(() => undefined),
+      localDevelopmentStorage ? Promise.resolve(undefined) : this.#storage.statFs().catch(() => undefined),
+      this.#archives?.list(undefined, 32) ?? Promise.resolve([]),
     ]);
     const now = process.hrtime.bigint();
     const elapsedMicros = Number(now - this.#cpuSample.time) / 1_000;
@@ -227,7 +243,7 @@ export class OperatorController {
     const memory = process.memoryUsage();
     const totalMemory = os.totalmem();
     const systemUsedMemory = Math.max(0, totalMemory - os.freemem());
-    const storage = storageRows[0] ?? { used_bytes: "0", file_count: "0" };
+    const storage = storageRows[0] ?? { used_bytes: "0", file_count: "0", directory_count: "0" };
     const transfers = this.#transfers.snapshot([...uploadRows.map((row): UploadTaskSample => ({
       id: row.id,
       filename: row.filename,
@@ -245,6 +261,27 @@ export class OperatorController {
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     }))], sampledAt);
+    const visibleArchiveJobs = archiveJobs.filter((job) => !["completed", "failed", "cancelled"].includes(job.state)
+      || sampledAt - (job.completedAt?.getTime() ?? job.updatedAt.getTime()) <= 10_000);
+    const archiveTasks = visibleArchiveJobs.map((job) => ({
+      id: job.id,
+      direction: "archive" as const,
+      filename: job.outputName,
+      state: job.state,
+      transferredBytes: job.processedBytes,
+      totalBytes: job.totalBytes,
+      percent: job.totalBytes === 0 ? (job.state === "completed" ? 100 : 0) : Math.min(100, Math.max(0, job.processedBytes / job.totalBytes * 100)),
+      canPause: job.requestedState === "running" && ["queued", "scanning", "compressing", "extracting"].includes(job.state),
+      canResume: job.state === "paused" || job.requestedState === "paused",
+      canCancel: !["completed", "failed", "cancelled"].includes(job.state),
+      updatedAt: job.updatedAt.toISOString(),
+    }));
+    const mergedTransfers = {
+      ...transfers,
+      activeCount: transfers.activeCount + archiveTasks.filter((task) => ["scanning", "compressing", "extracting", "verifying", "committing"].includes(task.state)).length,
+      queuedCount: transfers.queuedCount + archiveTasks.filter((task) => task.state === "queued").length,
+      tasks: [...transfers.tasks, ...archiveTasks].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt)).slice(0, 32),
+    };
     return {
       sampledAt: new Date(sampledAt).toISOString(),
       cpu: cpuPercent === undefined ? { state: "unavailable" } : { state: "available", percent: cpuPercent, logicalCores: os.cpus().length },
@@ -257,11 +294,14 @@ export class OperatorController {
         state: "available",
         indexedBytes: databaseInteger(storage.used_bytes),
         fileCount: databaseInteger(storage.file_count),
+        directoryCount: databaseInteger(storage.directory_count),
         capacity: storageCapacity === undefined
-          ? { state: "unavailable", reason: "Storage capacity telemetry is unavailable for the active profile." }
+          ? { state: "unavailable", reason: localDevelopmentStorage
+            ? "Local DEV SFTP exposes the host backing disk, so its capacity is intentionally excluded."
+            : "Storage capacity telemetry is unavailable for the active profile." }
           : { state: "available", totalBytes: storageCapacity.totalBytes, availableBytes: storageCapacity.availableBytes, usedBytes: Math.max(0, storageCapacity.totalBytes - storageCapacity.availableBytes) },
       },
-      transfers,
+      transfers: mergedTransfers,
     };
   }
 

@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@saturn/audit": "workspace:*",
+    "@saturn/archive": "workspace:*",
     "@saturn/config": "workspace:*",
     "@saturn/contracts": "workspace:*",
     "@saturn/database": "workspace:*",

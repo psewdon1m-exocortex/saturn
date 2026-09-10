@@ -27,11 +27,18 @@ export interface CommitUploadRecord {
   readonly mimeType: string;
 }
 
+export interface UploadLimits {
+  readonly bufferMaxBytes: number;
+  readonly maximumFileBytes: number;
+}
+
 export interface FileRepository {
   getResource(id: string): Promise<Resource | undefined>;
   getChild(parentId: string, name: string): Promise<Resource | undefined>;
   listChildren(parentId: string, offset: number, limit: number): Promise<readonly Resource[]>;
   listTrash(offset: number, limit: number): Promise<readonly Resource[]>;
+  getTrashRetentionDays(): Promise<number>;
+  getUploadLimits(): Promise<UploadLimits | undefined>;
   listTree(storagePath: string): Promise<readonly Resource[]>;
   createFolder(record: { readonly id: string; readonly parentId: string; readonly name: string; readonly storagePath: string }): Promise<Resource>;
   setSecurityClassification(id: string, classification: SecurityClassification): Promise<Resource>;
@@ -83,7 +90,7 @@ export interface FileRepository {
     readonly parentId: string;
     readonly name: string;
   }): Promise<Resource>;
-  purgeTrashFile(record: {
+  purgeTrashTree(record: {
     readonly operationId: string;
     readonly resourceId: string;
   }): Promise<Resource>;

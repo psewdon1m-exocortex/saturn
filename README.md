@@ -5,6 +5,13 @@ implementation entry point is [docs/implementation/README.md](docs/implementatio
 the complete target architecture is documented in
 [docs/technical_solution_storage_gateway.md](docs/technical_solution_storage_gateway.md).
 
+После обычной установки создайте в Synchronization pipeline для namespace
+`saturn` и одноразовый Neptune setup code. Если локальный Neptune уже установлен,
+но Saturn ещё не связан с ним, в Settings → Backup нажмите **Initialize Neptune**
+и введите код. `sudo saturn-install backup` (старое имя `vaultctl backup` также
+поддерживается) устанавливает отсутствующий агент и остаётся резервным
+CLI-сценарием. Расписание задаётся только в Synchronization.
+
 ## Verification
 
 Install the pinned workspace dependencies and run the production-like suite:
@@ -31,3 +38,19 @@ also require the same protected writable `STORAGE_RUNTIME_CONFIG_DIR` (default
 may validate and select another SFTP target in Settings → Security. This rebuilds
 the active catalog for that independent target and migrates no file bytes. See
 [runtime storage switching](docs/implementation/RUNTIME_STORAGE_SWITCHING.md).
+
+## Gryphon integration
+
+Saturn does not connect to Telegram directly. Gryphon owns bot tokens and
+webhooks, then calls Saturn's authenticated `POST /internal/gryphon/command`
+adapter. Connect bot tokens with `gryphon bot connect`; **Link Saturn function**
+in the Bot connection Settings card selects one of those bots through the
+service-scoped `GRYPHON_SOCKET_PATH`. The installer provisions
+`/etc/gryphon/clients/saturn.token`; Saturn never receives a bot token. When the
+function is connected but no Telegram user is bound, **Initialize bot** creates
+the one-time `/link CODE` challenge directly in Settings; `gryphon link issue
+saturn` remains the equivalent CLI fallback.
+The same Settings card can ask the privileged Updater to check or install a
+verified Gryphon Linux release.
+After linking, use `/saturn drop`, `/saturn status` and `/saturn revoke` (or the
+corresponding inline buttons).

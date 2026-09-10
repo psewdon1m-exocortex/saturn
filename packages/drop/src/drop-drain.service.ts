@@ -34,10 +34,9 @@ export class DropDrainService {
       return;
     }
     try {
-      const filename = await this.#availableName(item.filename, item.id);
       const core = await this.#files.createUpload({
         parentId: DROP_POINT_RESOURCE_ID,
-        filename,
+        filename: item.filename,
         expectedSize: item.expectedSize,
         ...(item.actualSha256 === undefined ? {} : { expectedSha256: item.actualSha256 }),
         idempotencyKey: `drop-drain:${item.id}`,
@@ -68,18 +67,5 @@ export class DropDrainService {
       const code = error instanceof Error && /checksum/i.test(error.message) ? "remote_checksum_mismatch" : "transfer_failed";
       await this.#repository.markUploadFailed?.(item.id, code, new Date()).catch(() => undefined);
     }
-  }
-
-  async #availableName(filename: string, uploadId: string): Promise<string> {
-    const existing: string[] = [];
-    for (let offset = 0; ; offset += 500) {
-      const page = await this.#files.listChildren(DROP_POINT_RESOURCE_ID, offset, 500);
-      existing.push(...page.map((item) => item.name.toLocaleLowerCase()));
-      if (page.length < 500) break;
-    }
-    if (!existing.includes(filename.toLocaleLowerCase())) return filename;
-    const dot = filename.lastIndexOf(".");
-    const suffix = uploadId.slice(0, 8);
-    return dot > 0 ? `${filename.slice(0, dot)}-${suffix}${filename.slice(dot)}` : `${filename}-${suffix}`;
   }
 }

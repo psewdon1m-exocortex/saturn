@@ -27,9 +27,6 @@ https://localhost:8443 {
   handle /dav* {
     reverse_proxy vault-stage13-api:3000
   }
-  handle /internal/telegram/* {
-    reverse_proxy vault-stage13-api:3000
-  }
   handle /health/live {
     reverse_proxy vault-stage13-api:3000
   }

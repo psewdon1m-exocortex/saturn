@@ -128,12 +128,16 @@ inside Saturn.
   original parent ID and current state. Opening details never starts a restore;
 - Restore is an explicit row action followed by a confirmation dialog. Success
   removes the item immediately and then reconciles the list with Gateway;
-- trashed files expose a separate `Delete permanently` action; it is never
-  available for folders and always opens an irreversible-action warning. The
-  active owner session plus CSRF protection authorize it without a second
-  Access Key prompt; Gateway physically deletes the stored bytes, expires every
-  file version, preserves only the purged metadata tombstone/audit record, and
-  removes the file from the live Trash list after confirmation;
+- every top-level trashed file or folder exposes a separate `Delete permanently`
+  action that always opens an irreversible-action warning. The active owner
+  session plus CSRF protection authorize it without a second Access Key prompt;
+  Gateway recursively deletes a folder tree, expires every retained version,
+  preserves only purged metadata tombstones/audit records, and removes the root
+  item from the live Trash list after confirmation;
+- Settings → Security exposes the automatic Trash retention period as a
+  persisted whole-day value from 1 through 365. The new value applies when a
+  file or folder is moved to Trash; existing `purgeAfter` deadlines are not
+  rewritten retroactively;
 - the route has no unrelated Quick upload action. Narrow layouts keep the
   complete record table horizontally scrollable and stack detail facts without
   discarding fields.
@@ -151,8 +155,13 @@ inside Saturn.
 
 - code admission and channel/session lifetime share one absolute timestamp 30
   minutes after issue; aggregate reservation limit: 100 GiB;
-- local Drop buffer budget: 110 GiB with configured warning, refusal and
-  emergency watermarks based on both buffer usage and host free space;
+- local Drop buffer budget defaults to 110 GiB and is owner-configurable from
+  1–8192 GiB. A shared maximum file size defaults to 20 GiB, is configurable
+  from 1–4096 GiB and cannot exceed 90% of the buffer. Migration
+  `0033_upload_limits_settings` persists both values; API and worker resolve
+  them per operation so a saved change applies without restart. Warning,
+  refusal and emergency watermarks still use both buffer usage and host free
+  space;
 - resumable chunk reception into non-public local staging files;
 - authoritative states:
   `UPLOADING -> BUFFERED -> TRANSFERRING -> VERIFYING -> STORED`, with
@@ -246,7 +255,7 @@ inside Saturn.
 
 - align all mandatory groups with the unification specification;
 - expose Telegram configuration/binding state without returning secrets;
-- add Drop buffer policy and worker status, Storage connection diagnostics,
+- add editable Drop buffer/file-size policy plus worker status, Storage connection diagnostics,
   sharing defaults, session controls and bounded retention summaries where
   responsibilities already exist in Saturn;
 - keep unavailable backup/update actions explicitly unavailable with a reason.

@@ -19,7 +19,7 @@ import {
   UseFilters,
   UseGuards,
 } from "@nestjs/common";
-import { ROOT_RESOURCE_ID, type FileService, type Resource } from "@saturn/file-core";
+import { detectContentType, ROOT_RESOURCE_ID, type FileService, type Resource } from "@saturn/file-core";
 import type { SaturnConfig } from "@saturn/config";
 import type { FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
@@ -28,6 +28,7 @@ import { OWNER_SESSION, type AuthenticatedOwnerRequest } from "./owner-token.gua
 import { APP_CONFIG, FILE_SERVICE } from "./tokens.js";
 import { SaturnApiExceptionFilter } from "./saturn-api-exception.filter.js";
 import { TransferMonitorService } from "./transfer-monitor.service.js";
+import { awaitTransferRunnable } from "./transfer-request.js";
 
 const folderSchema = z.object({
   parentId: z.uuid().optional(),
@@ -81,15 +82,42 @@ const previewMimeTypes = new Set([
   "image/jpeg",
   "image/gif",
   "image/webp",
+  "image/avif",
+  "image/bmp",
+  "image/svg+xml",
   "application/pdf",
   "text/plain",
   "text/markdown",
+  "text/csv",
+  "application/json",
+  "application/yaml",
   "audio/mpeg",
   "audio/ogg",
   "audio/wav",
+  "audio/flac",
+  "audio/mp4",
   "video/mp4",
   "video/webm",
+  "video/ogg",
+  "video/quicktime",
 ]);
+
+async function previewMime(resource: Resource, files: FileService): Promise<string | undefined> {
+  const stored = resource.mimeType ?? "application/octet-stream";
+  if (previewMimeTypes.has(stored)) return stored;
+  if (stored !== "application/octet-stream") return undefined;
+  const probeLength = Math.min(resource.sizeBytes, 64 * 1024);
+  const chunks: Buffer[] = [];
+  if (probeLength > 0) {
+    const probe = await files.openDownload(resource.id, 0, probeLength);
+    for await (const chunk of probe.stream as AsyncIterable<unknown>) {
+      if (typeof chunk === "string" || chunk instanceof Uint8Array) chunks.push(Buffer.from(chunk));
+      else throw new Error("Preview probe returned an invalid chunk");
+    }
+  }
+  const detected = await detectContentType(resource.name, Buffer.concat(chunks));
+  return previewMimeTypes.has(detected) ? detected : undefined;
+}
 
 function contentDisposition(disposition: "attachment" | "inline", filename: string): string {
   const fallback = filename.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 180) || "download";
@@ -221,6 +249,7 @@ export class FileController {
     @Res() reply: FastifyReply,
   ): Promise<void> {
     if (!(request.body instanceof Readable)) throw new Error("Upload body is invalid");
+    await awaitTransferRunnable(this.transfers, id, request, reply);
     const upload = await this.files.appendUpload(
       id,
       integerHeader(rawOffset, "Upload-Offset"),
@@ -231,7 +260,8 @@ export class FileController {
   }
 
   @Post("uploads/:id/complete")
-  completeUpload(@Param("id") id: string) {
+  async completeUpload(@Param("id") id: string, @Req() request: FastifyRequest, @Res({ passthrough: true }) reply: FastifyReply) {
+    await awaitTransferRunnable(this.transfers, id, request, reply);
     return this.files.completeUpload(id);
   }
 
@@ -309,8 +339,8 @@ export class FileController {
     const resource = await this.files.getResource(id);
     if (this.#isVolt(resource)) throw new ForbiddenException({ code: "preview_forbidden" });
     this.#requireRecentProof(resource, request);
-    const mimeType = resource.mimeType ?? "application/octet-stream";
-    if (!previewMimeTypes.has(mimeType)) throw new Error("File type is not eligible for inline preview");
+    const mimeType = await previewMime(resource, this.files);
+    if (mimeType === undefined) throw new Error("File type is not eligible for inline preview");
     const range = parseRange(rawRange, resource.sizeBytes);
     const download = await this.files.openDownload(id, range.offset, range.length);
     const contentLength = range.length ?? resource.sizeBytes;
@@ -376,11 +406,11 @@ export class FileController {
   }
 
   @Delete("trash/:id")
-  purgeTrashFile(
+  purgeTrashResource(
     @Param("id") id: string,
     @Headers("idempotency-key") idempotencyKey: string | undefined,
   ) {
-    return this.files.purgeTrashFile(id, { idempotencyKey: requiredHeader(idempotencyKey, "Idempotency-Key") });
+    return this.files.purgeTrashResource(id, { idempotencyKey: requiredHeader(idempotencyKey, "Idempotency-Key") });
   }
 
   @Get("files/:id/versions")

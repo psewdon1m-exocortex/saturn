@@ -9,6 +9,7 @@ import type {
   CopiedResourceRecord,
   CreateUploadRecord,
   FileRepository,
+  UploadLimits,
 } from "./repository.js";
 
 interface ResourceRow {
@@ -204,6 +205,35 @@ export class PostgresFileRepository implements FileRepository {
         OFFSET ${offset} LIMIT ${limit}
       `;
       return rows.map(resource);
+    });
+  }
+
+  getTrashRetentionDays(): Promise<number> {
+    return this.#database.withSql(async (sql) => {
+      const rows = await sql<{ trash_retention_days: number }[]>`
+        SELECT trash_retention_days FROM owner_preferences WHERE owner_id = 'owner'
+      `;
+      const days = rows[0]?.trash_retention_days;
+      if (typeof days !== "number" || !Number.isSafeInteger(days) || days < 1 || days > 365) throw new Error("Trash retention setting is invalid");
+      return days;
+    });
+  }
+
+  getUploadLimits(): Promise<UploadLimits | undefined> {
+    return this.#database.withSql(async (sql) => {
+      const rows = await sql<{ upload_buffer_gib: number; maximum_upload_file_gib: number }[]>`
+        SELECT upload_buffer_gib, maximum_upload_file_gib FROM owner_preferences WHERE owner_id = 'owner'
+      `;
+      const row = rows[0];
+      if (row === undefined) return undefined;
+      if (!Number.isSafeInteger(row.upload_buffer_gib) || row.upload_buffer_gib < 1
+        || !Number.isSafeInteger(row.maximum_upload_file_gib) || row.maximum_upload_file_gib < 1) {
+        throw new Error("Upload limit settings are invalid");
+      }
+      return {
+        bufferMaxBytes: row.upload_buffer_gib * 1024 ** 3,
+        maximumFileBytes: row.maximum_upload_file_gib * 1024 ** 3,
+      };
     });
   }
 
@@ -451,7 +481,7 @@ export class PostgresFileRepository implements FileRepository {
     const uniqueKeys = [...new Set(lockKeys)].sort();
     return this.#database.transaction(async (sql) => {
       await sql`DELETE FROM operation_locks WHERE expires_at <= now()`;
-      let acquired = 0;
+      const acquiredKeys: string[] = [];
       for (const lockKey of uniqueKeys) {
         const rows = await sql<{ lock_key: string }[]>`
           INSERT INTO operation_locks (lock_key, operation_id, expires_at)
@@ -459,10 +489,12 @@ export class PostgresFileRepository implements FileRepository {
           ON CONFLICT (lock_key) DO NOTHING
           RETURNING lock_key
         `;
-        acquired += rows.length;
+        if (rows.length > 0) acquiredKeys.push(lockKey);
       }
-      if (acquired === uniqueKeys.length) return true;
-      await sql`DELETE FROM operation_locks WHERE operation_id = ${operationId}`;
+      if (acquiredKeys.length === uniqueKeys.length) return true;
+      for (const lockKey of acquiredKeys) {
+        await sql`DELETE FROM operation_locks WHERE lock_key = ${lockKey} AND operation_id = ${operationId}`;
+      }
       return false;
     });
   }
@@ -599,24 +631,30 @@ export class PostgresFileRepository implements FileRepository {
     });
   }
 
-  purgeTrashFile(record: { readonly operationId: string; readonly resourceId: string }): Promise<Resource> {
+  purgeTrashTree(record: { readonly operationId: string; readonly resourceId: string }): Promise<Resource> {
     return this.#database.transaction(async (sql) => {
       const existing = await this.#resourceQuery(sql, record.resourceId);
-      if (existing === undefined || existing.type !== "file" || existing.status !== "trashed" || existing.trashedFromParentId === undefined) {
-        throw new Error("Trash file was not found");
+      if (existing === undefined || existing.status !== "trashed" || existing.trashedFromParentId === undefined) {
+        throw new Error("Trash resource was not found");
       }
-      await sql`UPDATE file_versions SET state = 'expired' WHERE resource_id = ${record.resourceId}`;
-      const rows = await sql<ResourceRow[]>`
+      await sql`
+        UPDATE file_versions SET state = 'expired'
+        WHERE resource_id IN (
+          SELECT id FROM resources
+          WHERE storage_path = ${existing.storagePath} OR storage_path LIKE ${`${existing.storagePath}/%`}
+        )
+      `;
+      await sql`
         UPDATE resources SET status = 'purged', purge_after = NULL, updated_at = now()
-        WHERE id = ${record.resourceId} RETURNING *
+        WHERE storage_path = ${existing.storagePath} OR storage_path LIKE ${`${existing.storagePath}/%`}
       `;
       await sql`
         UPDATE operation_journal SET state = 'active', resource_id = ${record.resourceId}, updated_at = now()
         WHERE id = ${record.operationId}
       `;
-      const row = rows[0];
-      if (row === undefined) throw new Error("Purged trash file was not found");
-      return resource(row);
+      const row = await this.#resourceQuery(sql, record.resourceId);
+      if (row === undefined) throw new Error("Purged trash resource was not found");
+      return row;
     });
   }
 

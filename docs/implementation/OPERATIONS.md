@@ -14,15 +14,23 @@ OCI images once with SBOM/provenance, tests those exact digests, signs the
 release manifest and refuses replacement of existing version tags/releases.
 The Ed25519 private key exists only in the protected release environment; the
 installer receives the public key through an independent trust channel.
+Every signed Saturn bundle also contains the checksum-verified Updater version
+pinned in `.release/updater.version`; CI refuses to build with another version.
 
 ## First installation
 
 1. Verify the signed release manifest and immutable image digests.
-2. Run the pinned HTTPS bootstrap as root. It prepares files and stops.
-3. Edit only `OPERATOR INPUT` in `/etc/vault/.env.production`; keep mode `0600`.
+2. Run the pinned HTTPS bootstrap as root. It prepares files, generates the
+   Updater control token and socket group IDs, and preserves them on later runs.
+   If Kernel is installed locally, its URL and service token are copied too.
+3. Edit only the remaining `OPERATOR INPUT` values in
+   `/etc/vault/.env.production`; keep mode `0600`. A remote Kernel URL and token
+   are operator inputs; Updater and agent tokens are not.
 4. Place the nine distinct secret files in `VAULT_SECRET_ROOT`, each mode
    `0600`, and keep the release signing private key outside the host.
-5. Run `vaultctl validate`, then `vaultctl install`.
+5. Run `vaultctl validate`, then `vaultctl install`. The latter installs or
+   safely upgrades the bundled Updater and registers the `saturn` head before
+   starting Saturn.
 6. Run `pnpm prod:bootstrap-storage` and `vaultctl smoke` with the production
    environment. The smoke object must be deleted automatically.
 7. Verify canonical HTTPS, DNS, unauthorised external exposure and second-copy

@@ -20,7 +20,6 @@ const exports: readonly ExportDefinition[] = [
   { table: "reconciliation_issues", cursor: "id", name: "reconciliation_issues" },
   { table: "backup_runs", cursor: "id", name: "backup_runs" },
   { table: "recovery_runs", cursor: "id", name: "recovery_runs" },
-  { table: "telegram_binding", cursor: "owner_id", name: "telegram_binding" },
   {
     table: "shares",
     cursor: "id",
@@ -36,7 +35,7 @@ const exports: readonly ExportDefinition[] = [
   { table: "sync_conflicts", cursor: "id", name: "sync_conflicts" },
   {
     table: "backup_services", cursor: "id", name: "backup_services",
-    columns: "id, slug, name, state, require_encryption, mtls_cert_fingerprint, max_backup_bytes, daily_quota_bytes, stored_quota_bytes, max_concurrent_runs, freshness_sla_ms, retention_daily, retention_weekly, retention_monthly, retention_yearly, last_used_at, created_at, updated_at, revoked_at",
+    columns: "id, slug, namespace_slug, deployment_id, name, state, require_encryption, mtls_cert_fingerprint, max_backup_bytes, daily_quota_bytes, stored_quota_bytes, max_concurrent_runs, freshness_sla_ms, retention_daily, retention_weekly, retention_monthly, retention_yearly, last_used_at, created_at, updated_at, revoked_at",
   },
   {
     table: "service_backup_runs", cursor: "id", name: "service_backup_runs",

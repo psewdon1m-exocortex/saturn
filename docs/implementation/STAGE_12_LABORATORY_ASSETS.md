@@ -70,6 +70,7 @@ GET    /api/v1/laboratory/clients
 POST   /api/v1/laboratory/clients/{id}/rotate-token
 DELETE /api/v1/laboratory/clients/{id}
 POST   /api/v1/laboratory/assets
+POST   /api/v1/laboratory/imports/from-share
 GET    /api/v1/laboratory/assets
 GET    /api/v1/laboratory/assets/{id}
 PATCH  /api/v1/laboratory/assets/{id}
@@ -82,6 +83,13 @@ HEAD   /a/{asset_id}/{filename}
 Private content uses `Authorization: Bearer <laboratory-token>` on `/a/...`.
 There is deliberately no token-authenticated asset enumeration or mutation
 route. The owner API never returns token verifiers or physical storage paths.
+The single machine-only import route accepts a scoped Laboratory Bearer token,
+an ordinary active passwordless folder-share capability, and a bounded list of
+descendant resource IDs with expected SHA-256 values. It idempotently creates
+`public_immutable` pins for the exact current versions and returns stable
+Gateway URLs. It creates neither storage objects nor user-visible folders.
+Revoking the original share does not revoke an already-created asset; disabling
+the asset is the explicit publication revocation operation.
 
 ## Mode and cache contract
 

@@ -227,7 +227,16 @@ export class ShareService {
     const children = await this.#allChildren(parent.id);
     const visible = children.filter((child) => child.status === "active" && classificationRank[child.securityClassification ?? "internal"] <= classificationRank[access.share.classificationCeiling]);
     await this.#access(access.share.id, input.sourceIp, "browse", "success", 200, now);
-    return visible.map((child) => ({ id: child.id, parentId: child.parentId, type: child.type, name: child.name, sizeBytes: child.sizeBytes, mimeType: child.mimeType, updatedAt: child.updatedAt }));
+    return visible.map((child) => ({
+      id: child.id,
+      parentId: child.parentId,
+      type: child.type,
+      name: child.name,
+      sizeBytes: child.sizeBytes,
+      mimeType: child.mimeType,
+      ...(child.sha256 === undefined ? {} : { sha256: child.sha256 }),
+      updatedAt: child.updatedAt,
+    }));
   }
 
   async childMetadata(token: string, resourceId: string, input: { readonly sourceIp: string; readonly userAgent: string; readonly sessionToken?: string }, now = new Date()) {

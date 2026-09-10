@@ -2,12 +2,13 @@ import { Module } from "@nestjs/common";
 import { APP_INTERCEPTOR } from "@nestjs/core";
 import fs from "node:fs/promises";
 import { AuditService } from "@saturn/audit";
+import { ArchiveService, PostgresArchiveJobRepository, type ArchiveJobRepository } from "@saturn/archive";
 import { OwnerAuthService, PostgresOwnerAuthRepository } from "@saturn/auth";
 import { BackupIngestService, PostgresBackupRepository, type BackupRepository } from "@saturn/backup-ingest";
 import { loadEnvironment } from "@saturn/config";
 import { Database } from "@saturn/database";
-import { DropBufferStore, DropService, PostgresDropRepository, TelegramHttpProvider, TelegramNotifier, TelegramSupervisor, TelegramWebhookService, type DropRepository, type TelegramProvider } from "@saturn/drop";
-import { FileService, PostgresFileRepository } from "@saturn/file-core";
+import { DropBufferStore, DropService, GryphonNotificationSink, PostgresDropRepository, type DropRepository } from "@saturn/drop";
+import { BACKUPS_RESOURCE_ID, FileService, PostgresFileRepository } from "@saturn/file-core";
 import { LaboratoryService, PostgresLaboratoryRepository, type LaboratoryRepository } from "@saturn/laboratory";
 import { RuntimeStorageManager, type StorageAdapter } from "@saturn/storage";
 import { PostgresPurgeRepository, PostgresReconciliationRepository, PurgeService, ReconciliationService } from "@saturn/protection";
@@ -23,19 +24,23 @@ import { ProtectionController } from "./protection.controller.js";
 import { AuthController } from "./auth.controller.js";
 import { DropController } from "./drop.controller.js";
 import { DropSessionGuard } from "./drop-session.guard.js";
-import { TelegramOwnerController, TelegramWebhookController } from "./telegram.controller.js";
+import { GryphonController } from "./gryphon.controller.js";
+import { GryphonOwnerController } from "./gryphon-owner.controller.js";
+import { GryphonEventStore } from "./gryphon-event.store.js";
 import { PublicShareController, ResourceClassificationController, ShareOwnerController } from "./share.controller.js";
 import { ShareApiExceptionFilter } from "./share-api-exception.filter.js";
 import { DeviceController } from "./device.controller.js";
-import { BackupOwnerController, BackupProducerController, BackupRestoreController } from "./backup.controller.js";
+import { BackupCapabilitiesController, BackupEnrollmentController, BackupOwnerController, BackupProducerController, BackupRestoreController } from "./backup.controller.js";
 import { BackupApiExceptionFilter } from "./backup-api-exception.filter.js";
-import { LaboratoryAssetController, LaboratoryClientController, LaboratoryDeliveryController } from "./laboratory.controller.js";
+import { LaboratoryAssetController, LaboratoryClientController, LaboratoryDeliveryController, LaboratoryImportController } from "./laboratory.controller.js";
 import { LaboratoryApiExceptionFilter } from "./laboratory-api-exception.filter.js";
 import { createAuditService } from "./audit.factory.js";
 import { OwnerTokenGuard } from "./owner-token.guard.js";
 import { SaturnApiExceptionFilter } from "./saturn-api-exception.filter.js";
 import {
   APP_CONFIG,
+  ARCHIVE_REPOSITORY,
+  ARCHIVE_SERVICE,
   AUDIT_SERVICE,
   AUTH_SERVICE,
   BACKUP_INGEST_REPOSITORY,
@@ -46,6 +51,7 @@ import {
   DROP_REPOSITORY,
   DROP_SERVICE,
   FILE_SERVICE,
+  GRYPHON_EVENT_STORE,
   LABORATORY_REPOSITORY,
   LABORATORY_SERVICE,
   PURGE_SERVICE,
@@ -55,23 +61,25 @@ import {
   STORAGE_ADAPTER,
   STORAGE_HEALTH,
   STORAGE_RUNTIME,
-  TELEGRAM_PROVIDER,
-  TELEGRAM_RUNTIME,
-  TELEGRAM_SUPERVISOR,
-  TELEGRAM_WEBHOOK_SERVICE,
 } from "./tokens.js";
+import { ArchiveController } from "./archive.controller.js";
 import { OperatorController } from "./operator.controller.js";
 import { TransferMonitorService } from "./transfer-monitor.service.js";
+import { TransferTaskController } from "./transfer-task.controller.js";
 import { MaintenanceBarrierInterceptor } from "./maintenance-barrier.interceptor.js";
 import { RecoveryController } from "./recovery.controller.js";
+import { NeptuneExportController, NeptuneOwnerController } from "./neptune.controller.js";
 import { RecoveryWorkflowService } from "./recovery-workflow.service.js";
 import { StorageConnectionController } from "./storage-connection.controller.js";
 import { StorageConnectionService } from "./storage-connection.service.js";
+import { SyncClientController } from "./sync-client.controller.js";
+import { NeptuneAgentController, NeptuneFleetOwnerController } from "./neptune-fleet.controller.js";
+import { NeptuneFleetService } from "./neptune-fleet.service.js";
 
 const config = loadEnvironment();
 
 @Module({
-  controllers: [HealthController, AuthController, OperatorController, StorageConnectionController, RecoveryController, FileController, ActivityController, ProtectionController, DropController, TelegramOwnerController, TelegramWebhookController, ShareOwnerController, ResourceClassificationController, PublicShareController, DeviceController, BackupOwnerController, BackupRestoreController, BackupProducerController, LaboratoryClientController, LaboratoryAssetController, LaboratoryDeliveryController],
+  controllers: [HealthController, AuthController, OperatorController, TransferTaskController, ArchiveController, StorageConnectionController, RecoveryController, NeptuneExportController, NeptuneOwnerController, NeptuneAgentController, NeptuneFleetOwnerController, GryphonOwnerController, FileController, ActivityController, ProtectionController, DropController, GryphonController, ShareOwnerController, ResourceClassificationController, PublicShareController, DeviceController, SyncClientController, BackupOwnerController, BackupRestoreController, BackupEnrollmentController, BackupCapabilitiesController, BackupProducerController, LaboratoryClientController, LaboratoryAssetController, LaboratoryImportController, LaboratoryDeliveryController],
   providers: [
     { provide: APP_CONFIG, useValue: config },
     { provide: DATABASE, useFactory: () => new Database(config.databaseUrl, { max: 10, maintenanceBarrier: true }) },
@@ -120,39 +128,24 @@ const config = loadEnvironment();
       ),
       inject: [DATABASE, STORAGE_ADAPTER, AUDIT_SERVICE],
     },
+    { provide: ARCHIVE_REPOSITORY, useFactory: (database: Database) => new PostgresArchiveJobRepository(database), inject: [DATABASE] },
+    {
+      provide: ARCHIVE_SERVICE,
+      useFactory: (repository: ArchiveJobRepository, files: FileService, audit: AuditService) => new ArchiveService(repository, files, audit),
+      inject: [ARCHIVE_REPOSITORY, FILE_SERVICE, AUDIT_SERVICE],
+    },
     { provide: DROP_REPOSITORY, useFactory: (database: Database) => new PostgresDropRepository(database), inject: [DATABASE] },
-    {
-      provide: TELEGRAM_RUNTIME,
-      useFactory: async () => {
-        const token = config.telegram.botTokenFile === undefined
-          ? "100000:disabled_vault_telegram_token_000000"
-          : (await fs.readFile(config.telegram.botTokenFile, "utf8")).replace(/[\r\n]+$/, "");
-        const webhookSecret = config.telegram.webhookSecretFile === undefined
-          ? "disabled_vault_webhook_secret"
-          : (await fs.readFile(config.telegram.webhookSecretFile, "utf8")).replace(/[\r\n]+$/, "");
-        if (!/^[A-Za-z0-9_-]{1,256}$/.test(webhookSecret)) throw new Error("Telegram webhook secret is invalid");
-        return { token, webhookSecret };
-      },
-    },
-    {
-      provide: TELEGRAM_PROVIDER,
-      useFactory: (runtime: { readonly token: string }) => new TelegramHttpProvider({
-        token: runtime.token,
-        baseUrl: config.telegram.apiBaseUrl,
-        timeoutMs: config.telegram.providerTimeoutMs,
-      }),
-      inject: [TELEGRAM_RUNTIME],
-    },
+    { provide: GRYPHON_EVENT_STORE, useFactory: (database: Database) => new GryphonEventStore(database), inject: [DATABASE] },
     {
       provide: DROP_SERVICE,
-      useFactory: async (repository: DropRepository, files: FileService, audit: AuditService) => new DropService({
-        repository,
-        files,
-        pepper: (await fs.readFile(config.drop.pepperFile, "utf8")).replace(/[\r\n]+$/, ""),
-        options: {
+      useFactory: async (repository: DropRepository, files: FileService, audit: AuditService) => {
+        const drop = new DropService({
+          repository,
+          files,
+          pepper: (await fs.readFile(config.drop.pepperFile, "utf8")).replace(/[\r\n]+$/, ""),
+          options: {
           publicOrigin: config.publicOrigin,
           codeTtlMs: config.drop.codeTtlMs,
-          linkCodeTtlMs: config.drop.linkCodeTtlMs,
           sessionTtlMs: config.drop.sessionTtlMs,
           maxFiles: config.drop.maxFiles,
           maxBytes: config.drop.maxBytes,
@@ -160,17 +153,23 @@ const config = loadEnvironment();
           globalFailureLimit: config.drop.globalFailureLimit,
           failureWindowMs: config.drop.failureWindowMs,
           continuationTtlMs: config.drop.continuationTtlMs,
-        },
-        buffer: new DropBufferStore({
+          },
+          buffer: new DropBufferStore({
           root: config.drop.bufferDirectory,
-          maxBytes: config.drop.bufferMaxBytes,
+          maxBytes: async () => (await files.getUploadLimits()).bufferMaxBytes,
           minFreeBytes: config.drop.bufferMinFreeBytes,
           warningRatio: config.drop.bufferWarningRatio,
           criticalRatio: config.drop.bufferCriticalRatio,
           refusalRatio: config.drop.bufferRefusalRatio,
-        }),
-        audit,
-      }),
+          }),
+          audit,
+        });
+        if (config.gryphon.enabled && config.gryphon.serviceTokenFile !== undefined) {
+          const token = (await fs.readFile(config.gryphon.serviceTokenFile, "utf8")).replace(/[\r\n]+$/, "");
+          drop.setNotificationSink(new GryphonNotificationSink(config.gryphon.socketPath, token, config.gryphon.timeoutMs));
+        }
+        return drop;
+      },
       inject: [DROP_REPOSITORY, FILE_SERVICE, AUDIT_SERVICE],
     },
     { provide: SHARE_REPOSITORY, useFactory: (database: Database) => new PostgresShareRepository(database), inject: [DATABASE] },
@@ -196,7 +195,7 @@ const config = loadEnvironment();
     },
     {
       provide: BACKUP_INGEST_SERVICE,
-      useFactory: async (repository: BackupRepository, storage: StorageAdapter, audit: AuditService) => new BackupIngestService({
+      useFactory: async (repository: BackupRepository, storage: StorageAdapter, audit: AuditService, files: FileService) => new BackupIngestService({
         repository,
         storage,
         pepper: (await fs.readFile(config.backupIngest.pepperFile, "utf8")).replace(/[\r\n]+$/, ""),
@@ -216,9 +215,10 @@ const config = loadEnvironment();
             retention: config.backupIngest.retention,
           },
         },
+        backupRootPath: async () => (await files.getResource(BACKUPS_RESOURCE_ID)).storagePath,
         audit,
       }),
-      inject: [BACKUP_INGEST_REPOSITORY, STORAGE_ADAPTER, AUDIT_SERVICE],
+      inject: [BACKUP_INGEST_REPOSITORY, STORAGE_ADAPTER, AUDIT_SERVICE, FILE_SERVICE],
     },
     {
       provide: DEVICE_SERVICE,
@@ -263,25 +263,6 @@ const config = loadEnvironment();
       inject: [SHARE_REPOSITORY, FILE_SERVICE, STORAGE_ADAPTER, AUDIT_SERVICE],
     },
     {
-      provide: TELEGRAM_SUPERVISOR,
-      useFactory: (provider: TelegramProvider, runtime: { readonly webhookSecret: string }) => new TelegramSupervisor({
-        enabled: config.telegram.enabled,
-        provider,
-        publicOrigin: config.publicOrigin,
-        webhookSecret: runtime.webhookSecret,
-        maxConnections: config.telegram.webhookMaxConnections,
-      }),
-      inject: [TELEGRAM_PROVIDER, TELEGRAM_RUNTIME],
-    },
-    {
-      provide: TELEGRAM_WEBHOOK_SERVICE,
-      useFactory: (drop: DropService, repository: DropRepository, provider: TelegramProvider, supervisor: TelegramSupervisor, runtime: { readonly webhookSecret: string }) => {
-        drop.setNotificationSink(new TelegramNotifier(drop, provider, supervisor));
-        return new TelegramWebhookService({ drop, repository, provider, supervisor, webhookSecret: runtime.webhookSecret });
-      },
-      inject: [DROP_SERVICE, DROP_REPOSITORY, TELEGRAM_PROVIDER, TELEGRAM_SUPERVISOR, TELEGRAM_RUNTIME],
-    },
-    {
       provide: RECONCILIATION_SERVICE,
       useFactory: (database: Database, storage: StorageAdapter, audit: AuditService) => new ReconciliationService(
         new PostgresReconciliationRepository(database),
@@ -315,6 +296,7 @@ const config = loadEnvironment();
       inject: [DATABASE, STORAGE_RUNTIME, AUDIT_SERVICE],
     },
     RecoveryWorkflowService,
+    NeptuneFleetService,
     { provide: APP_INTERCEPTOR, useClass: MaintenanceBarrierInterceptor },
     RuntimeLifecycleService,
   ],

@@ -1,6 +1,7 @@
 import type { Database } from "@saturn/database";
 import type {
   BackupReceipt,
+  BackupEnrollmentRecord,
   BackupRepository,
   BackupRestoreTestRecord,
   BackupRunRecord,
@@ -9,7 +10,7 @@ import type {
 } from "./types.js";
 
 interface ServiceRow {
-  id: string; slug: string; name: string; token_hash: string; previous_token_hash: string | null;
+  id: string; slug: string; namespace_slug: string; deployment_id: string; mirror_root: "volt" | "mastermind" | null; mirror_device_id: string | null; name: string; token_hash: string; previous_token_hash: string | null;
   previous_token_expires_at: Date | null; state: BackupServiceRecord["state"]; require_encryption: boolean;
   mtls_cert_fingerprint: string | null; max_backup_bytes: string; daily_quota_bytes: string; stored_quota_bytes: string;
   max_concurrent_runs: number; freshness_sla_ms: string; retention_daily: number; retention_weekly: number;
@@ -28,7 +29,9 @@ interface RestoreRow {
 
 function service(row: ServiceRow): BackupServiceRecord {
   return {
-    id: row.id, slug: row.slug, name: row.name, tokenHash: row.token_hash,
+    id: row.id, slug: row.slug, namespaceSlug: row.namespace_slug, deploymentId: row.deployment_id,
+    ...(row.mirror_root === null ? {} : { mirrorRoot: row.mirror_root }), ...(row.mirror_device_id === null ? {} : { mirrorDeviceId: row.mirror_device_id }),
+    name: row.name, tokenHash: row.token_hash,
     ...(row.previous_token_hash === null ? {} : { previousTokenHash: row.previous_token_hash }),
     ...(row.previous_token_expires_at === null ? {} : { previousTokenExpiresAt: row.previous_token_expires_at }),
     state: row.state, requireEncryption: row.require_encryption,
@@ -60,16 +63,20 @@ export class PostgresBackupRepository implements BackupRepository {
 
   createService(value: BackupServiceRecord): Promise<void> {
     return this.database.withSql(async (sql) => { await sql`
-      INSERT INTO backup_services (id, slug, name, token_hash, state, require_encryption, mtls_cert_fingerprint,
+      INSERT INTO backup_services (id, slug, namespace_slug, deployment_id, mirror_root, name, token_hash, state, require_encryption, mtls_cert_fingerprint,
         max_backup_bytes, daily_quota_bytes, stored_quota_bytes, max_concurrent_runs, freshness_sla_ms,
         retention_daily, retention_weekly, retention_monthly, retention_yearly, created_at, updated_at)
-      VALUES (${value.id}, ${value.slug}, ${value.name}, ${value.tokenHash}, ${value.state}, ${value.requireEncryption}, ${value.mtlsCertFingerprint ?? null},
+      VALUES (${value.id}, ${value.slug}, ${value.namespaceSlug}, ${value.deploymentId}, ${value.mirrorRoot ?? null}, ${value.name}, ${value.tokenHash}, ${value.state}, ${value.requireEncryption}, ${value.mtlsCertFingerprint ?? null},
         ${value.maxBackupBytes}, ${value.dailyQuotaBytes}, ${value.storedQuotaBytes}, ${value.maxConcurrentRuns}, ${value.freshnessSlaMs},
         ${value.retention.daily}, ${value.retention.weekly}, ${value.retention.monthly}, ${value.retention.yearly}, ${value.createdAt}, ${value.updatedAt})
     `; });
   }
   getService(id: string): Promise<BackupServiceRecord | undefined> { return this.database.withSql(async (sql) => {
     const rows = await sql<ServiceRow[]>`SELECT * FROM backup_services WHERE id = ${id} LIMIT 1`; return rows[0] === undefined ? undefined : service(rows[0]);
+  }); }
+  getActiveServiceByDeployment(namespaceSlug: string, deploymentId: string): Promise<BackupServiceRecord | undefined> { return this.database.withSql(async (sql) => {
+    const rows = await sql<ServiceRow[]>`SELECT * FROM backup_services WHERE namespace_slug = ${namespaceSlug} AND deployment_id = ${deploymentId} AND state = 'active' LIMIT 1`;
+    return rows[0] === undefined ? undefined : service(rows[0]);
   }); }
   listServices(offset: number, limit: number): Promise<readonly BackupServiceRecord[]> { return this.database.withSql(async (sql) =>
     (await sql<ServiceRow[]>`SELECT * FROM backup_services ORDER BY created_at DESC, id DESC OFFSET ${offset} LIMIT ${limit}`).map(service)); }
@@ -140,4 +147,20 @@ export class PostgresBackupRepository implements BackupRepository {
   usage(serviceId: string, since: Date): Promise<BackupUsage> { return this.database.withSql(async (sql) => { const rows = await sql<{ stored_bytes: string; active_bytes: string; daily_bytes: string; active_runs: string; last_completed_at: Date | null; failed_runs: string }[]>`SELECT coalesce(sum(expected_size) FILTER (WHERE state='complete'),0)::text AS stored_bytes, coalesce(sum(expected_size) FILTER (WHERE state IN ('pending','uploading','appending','verifying')),0)::text AS active_bytes, coalesce(sum(expected_size) FILTER (WHERE state <> 'failed' AND created_at >= ${since}),0)::text AS daily_bytes, count(*) FILTER (WHERE state IN ('pending','uploading','appending','verifying'))::text AS active_runs, max(committed_at) FILTER (WHERE state='complete') AS last_completed_at, count(*) FILTER (WHERE state='failed')::text AS failed_runs FROM service_backup_runs WHERE service_id=${serviceId}`; const row = rows[0]; if (row === undefined) throw new Error("Backup usage calculation failed"); return { storedBytes:Number(row.stored_bytes), activeReservedBytes:Number(row.active_bytes), dailyReservedBytes:Number(row.daily_bytes), activeRuns:Number(row.active_runs), ...(row.last_completed_at===null?{}:{lastCompletedAt:row.last_completed_at}), failedRuns:Number(row.failed_runs) }; }); }
   recordRestoreTest(value: BackupRestoreTestRecord): Promise<void> { return this.database.withSql(async (sql) => { await sql`INSERT INTO service_backup_restore_tests (id, service_id, run_id, method, outcome, notes, artifact_sha256, started_at, completed_at) VALUES (${value.id},${value.serviceId},${value.runId},${value.method},${value.outcome},${value.notes??null},${value.artifactSha256??null},${value.startedAt},${value.completedAt})`; }); }
   latestRestoreTest(serviceId: string): Promise<BackupRestoreTestRecord | undefined> { return this.database.withSql(async (sql) => { const rows = await sql<RestoreRow[]>`SELECT * FROM service_backup_restore_tests WHERE service_id=${serviceId} ORDER BY completed_at DESC,id DESC LIMIT 1`; return rows[0]===undefined?undefined:restore(rows[0]); }); }
+  createEnrollment(value: BackupEnrollmentRecord): Promise<void> { return this.database.transaction(async (sql) => {
+    await sql`SELECT id FROM backup_services WHERE id = ${value.serviceId} FOR UPDATE`;
+    await sql`UPDATE backup_enrollments SET consumed_at = ${value.createdAt} WHERE service_id = ${value.serviceId} AND consumed_at IS NULL`;
+    await sql`INSERT INTO backup_enrollments (id, service_id, code_hash, expires_at, created_at) VALUES (${value.id}, ${value.serviceId}, ${value.codeHash}, ${value.expiresAt}, ${value.createdAt})`;
+  }); }
+  consumeEnrollment(codeHash: string, now: Date): Promise<BackupServiceRecord | undefined> { return this.database.transaction(async (sql) => {
+    const rows = await sql<{ service_id: string }[]>`UPDATE backup_enrollments SET consumed_at = ${now} WHERE code_hash = ${codeHash} AND consumed_at IS NULL AND expires_at > ${now} RETURNING service_id`;
+    const id = rows[0]?.service_id; if (id === undefined) return undefined;
+    const services = await sql<ServiceRow[]>`SELECT * FROM backup_services WHERE id = ${id} AND state = 'active' LIMIT 1`;
+    return services[0] === undefined ? undefined : service(services[0]);
+  }); }
+  attachMirrorDevice(serviceId: string, deviceId: string, now: Date): Promise<BackupServiceRecord> { return this.database.withSql(async (sql) => {
+    const rows = await sql<ServiceRow[]>`UPDATE backup_services SET mirror_device_id = ${deviceId}, updated_at = ${now} WHERE id = ${serviceId} AND state = 'active' AND mirror_root IS NOT NULL RETURNING *`;
+    if (rows[0] === undefined) throw new Error("Backup mirror identity is unavailable");
+    return service(rows[0]);
+  }); }
 }

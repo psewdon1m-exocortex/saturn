@@ -18,8 +18,7 @@ const sharePepperFile = path.join(secretDirectory, "dev-share-pepper");
 const devicePepperFile = path.join(secretDirectory, "dev-device-pepper");
 const backupPepperFile = path.join(secretDirectory, "dev-backup-pepper");
 const laboratoryPepperFile = path.join(secretDirectory, "dev-laboratory-pepper");
-const telegramBotTokenFile = path.join(secretDirectory, "dev-telegram-bot-token");
-const telegramWebhookSecretFile = path.join(secretDirectory, "dev-telegram-webhook-secret");
+const gryphonServiceTokenFile = path.join(secretDirectory, "dev-gryphon-service-token");
 const hostKeyFile = path.join(sftpDirectory, "ssh_host_ed25519_key");
 const clientKeyFile = path.join(sftpDirectory, "dev_client_ed25519");
 const usersFile = path.join(sftpDirectory, "users.conf");
@@ -84,12 +83,7 @@ export async function prepareDevelopmentEnvironment() {
   await ensureSecret(devicePepperFile);
   await ensureSecret(backupPepperFile);
   await ensureSecret(laboratoryPepperFile);
-  try {
-    await fs.access(telegramBotTokenFile);
-  } catch {
-    await fs.writeFile(telegramBotTokenFile, `100000:${randomBytes(32).toString("base64url")}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
-  }
-  await ensureSecret(telegramWebhookSecretFile);
+  await ensureSecret(gryphonServiceTokenFile);
 
   try {
     await fs.access(hostKeyFile);
@@ -126,7 +120,6 @@ export async function prepareDevelopmentEnvironment() {
     AUTH_FAILURE_WINDOW_MS: "900000",
     DROP_PEPPER_FILE: dropPepperFile,
     DROP_CODE_TTL_MS: "1800000",
-    DROP_LINK_CODE_TTL_MS: "300000",
     DROP_SESSION_TTL_MS: "1800000",
     DROP_MAX_FILES: "1000",
     DROP_MAX_BYTES: "107374182400",
@@ -177,13 +170,10 @@ export async function prepareDevelopmentEnvironment() {
     LABORATORY_PUBLIC_ENABLED: "false",
     LABORATORY_TOKEN_ROTATION_GRACE_MS: "3600000",
     LABORATORY_MAX_CONCURRENT_PUBLIC_STREAMS: "16",
-    TELEGRAM_ENABLED: "false",
-    TELEGRAM_BOT_TOKEN_FILE: telegramBotTokenFile,
-    TELEGRAM_WEBHOOK_SECRET_FILE: telegramWebhookSecretFile,
-    TELEGRAM_API_BASE_URL: "https://api.telegram.org/",
-    TELEGRAM_PROVIDER_TIMEOUT_MS: "10000",
-    TELEGRAM_WEBHOOK_MAX_BYTES: "65536",
-    TELEGRAM_WEBHOOK_MAX_CONNECTIONS: "8",
+    GRYPHON_ENABLED: "false",
+    GRYPHON_SERVICE_TOKEN_FILE: gryphonServiceTokenFile,
+    GRYPHON_SOCKET_PATH: "/run/gryphon/client.sock",
+    GRYPHON_TIMEOUT_MS: "10000",
     STORAGE_HOST: "127.0.0.1",
     STORAGE_PORT: "2222",
     STORAGE_USER: "vault",
@@ -192,13 +182,14 @@ export async function prepareDevelopmentEnvironment() {
     STORAGE_AUTH_MODE: "private_key_file",
     STORAGE_PASSWORD_FILE: "",
     STORAGE_PRIVATE_KEY_FILE: clientKeyFile,
+    STORAGE_RUNTIME_CONFIG_DIR: path.join(vaultRoot, "data", "storage-runtime"),
     STORAGE_OPERATION_TIMEOUT_MS: "60000",
     STORAGE_MAX_CONNECTIONS: "8",
     UPLOAD_MAX_BYTES: "21474836480",
     UPLOAD_CHUNK_MAX_BYTES: "8388608",
     UPLOAD_INCOMPLETE_TTL_MS: "86400000",
-    TRASH_RETENTION_MS: "7776000000",
-    PURGE_ENABLED: "false",
+    TRASH_RETENTION_MS: "2592000000",
+    PURGE_ENABLED: "true",
     READINESS_REQUIRE_STORAGE: "true",
     LOG_LEVEL: "info",
     WORKER_HEARTBEAT_INTERVAL_MS: "5000",
@@ -213,6 +204,14 @@ export async function prepareDevelopmentEnvironment() {
     RECOVERY_MAX_COMPRESSION_RATIO: "200",
     RECOVERY_MAX_MANIFEST_BYTES: "1048576",
     RECOVERY_BACKUP_INTERVAL_MS: "21600000",
+    ARCHIVE_SPOOL_DIR: path.join(vaultRoot, "spool", "archives"),
+    ARCHIVE_7Z_BIN: process.platform === "win32" ? "7z.exe" : "7zz",
+    ARCHIVE_MAX_ARCHIVE_BYTES: "21474836480",
+    ARCHIVE_MAX_MEMBER_BYTES: "21474836480",
+    ARCHIVE_MAX_EXTRACTED_BYTES: "107374182400",
+    ARCHIVE_MAX_ENTRIES: "10000",
+    ARCHIVE_MAX_COMPRESSION_RATIO: "200",
+    ARCHIVE_JOB_LEASE_MS: "300000",
     PG_DUMP_BIN: process.platform === "win32" ? "docker.exe" : "docker",
     PG_RESTORE_BIN: process.platform === "win32" ? "docker.exe" : "docker",
     PG_DUMP_PREFIX_ARGS: JSON.stringify(["compose", "--project-directory", vaultRoot, "-p", "vault-dev", "exec", "-T", "postgres", "pg_dump"]),
@@ -224,7 +223,7 @@ export async function prepareDevelopmentEnvironment() {
     `${Object.entries(environment).map(([key, value]) => environmentLine(key, value)).join("\n")}\n`,
     { encoding: "utf8", mode: 0o600 },
   );
-  for (const filePath of [postgresPasswordFile, ownerTokenFile, authPepperFile, dropPepperFile, sharePepperFile, devicePepperFile, backupPepperFile, laboratoryPepperFile, telegramBotTokenFile, telegramWebhookSecretFile, hostKeyFile, clientKeyFile, usersFile, runtimeEnvironmentFile]) {
+  for (const filePath of [postgresPasswordFile, ownerTokenFile, authPepperFile, dropPepperFile, sharePepperFile, devicePepperFile, backupPepperFile, laboratoryPepperFile, gryphonServiceTokenFile, hostKeyFile, clientKeyFile, usersFile, runtimeEnvironmentFile]) {
     restrictWindowsAcl(filePath);
   }
   return { environment, hostFingerprint, runtimeEnvironmentFile };

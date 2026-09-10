@@ -19,7 +19,7 @@ ARG VAULT_SOURCE_REVISION=unknown
 LABEL org.opencontainers.image.title="Saturn Gateway runtime" \
       org.opencontainers.image.version=$VAULT_VERSION \
       org.opencontainers.image.revision=$VAULT_SOURCE_REVISION
-RUN apk add --no-cache postgresql-client tini
+RUN apk add --no-cache postgresql-client tini 7zip
 WORKDIR /app
 COPY --from=build --chown=node:node /release/api /app/api
 COPY --from=build --chown=node:node /release/worker /app/worker

@@ -21,6 +21,9 @@ interface PreferencesRow {
   navigation_order: OwnerPreferences["navigationOrder"];
   dashboard_order: OwnerPreferences["dashboardOrder"];
   settings_order: OwnerPreferences["settingsOrder"];
+  trash_retention_days: number;
+  upload_buffer_gib: number;
+  maximum_upload_file_gib: number;
   updated_at: Date;
 }
 
@@ -58,6 +61,9 @@ function preferences(row: PreferencesRow): OwnerPreferences {
     navigationOrder: row.navigation_order,
     dashboardOrder: row.dashboard_order,
     settingsOrder: row.settings_order,
+    trashRetentionDays: row.trash_retention_days,
+    uploadBufferGiB: row.upload_buffer_gib,
+    maximumUploadFileGiB: row.maximum_upload_file_gib,
     updatedAt: row.updated_at,
   };
 }
@@ -231,7 +237,10 @@ export class PostgresOwnerAuthRepository implements OwnerAuthRepository {
           accent_color = ${input.accentColor}, sidebar_mode = ${input.sidebarMode},
           navigation_order = ${sql.json(input.navigationOrder)},
           dashboard_order = ${sql.json(input.dashboardOrder)},
-          settings_order = ${sql.json(input.settingsOrder)}, updated_at = now()
+          settings_order = ${sql.json(input.settingsOrder)},
+          trash_retention_days = ${input.trashRetentionDays},
+          upload_buffer_gib = ${input.uploadBufferGiB},
+          maximum_upload_file_gib = ${input.maximumUploadFileGiB}, updated_at = now()
         WHERE owner_id = 'owner'
         RETURNING *
       `;

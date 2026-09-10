@@ -29,6 +29,7 @@ import type {
   CopiedResourceRecord,
   CreateUploadRecord,
   FileRepository,
+  UploadLimits,
 } from "./repository.js";
 
 class MemoryRepository implements FileRepository {
@@ -37,7 +38,10 @@ class MemoryRepository implements FileRepository {
   readonly operations = new Map<string, FileOperation>();
   readonly versions = new Map<string, FileVersion>();
   readonly locks = new Map<string, { operationId: string; expiresAt: Date }>();
+  trashRetentionDays = 30;
+  uploadLimits: UploadLimits | undefined;
   purgeFailuresRemaining = 0;
+  purgeCalls = 0;
 
   constructor() {
     const now = new Date();
@@ -84,6 +88,8 @@ class MemoryRepository implements FileRepository {
   async listTrash(offset: number, limit: number) {
     return [...this.resources.values()].filter((item) => item.status === "trashed" && item.trashedFromParentId !== undefined).slice(offset, offset + limit);
   }
+  async getTrashRetentionDays() { return this.trashRetentionDays; }
+  async getUploadLimits() { return this.uploadLimits; }
   async listTree(storagePath: string) {
     return [...this.resources.values()]
       .filter((item) => item.storagePath === storagePath || item.storagePath.startsWith(`${storagePath}/`))
@@ -377,23 +383,30 @@ class MemoryRepository implements FileRepository {
     await this.setOperationState(record.operationId, "active");
     return clean;
   }
-  async purgeTrashFile(record: { readonly operationId: string; readonly resourceId: string }) {
+  async purgeTrashTree(record: { readonly operationId: string; readonly resourceId: string }) {
+    this.purgeCalls += 1;
     if (this.purgeFailuresRemaining > 0) {
       this.purgeFailuresRemaining -= 1;
       throw new Error("Simulated purge database failure");
     }
     const existing = this.resources.get(record.resourceId);
-    if (existing === undefined || existing.type !== "file" || existing.status !== "trashed" || existing.trashedFromParentId === undefined) {
-      throw new Error("Trash file fixture missing");
+    if (existing === undefined || existing.status !== "trashed" || existing.trashedFromParentId === undefined) {
+      throw new Error("Trash resource fixture missing");
     }
+    const tree = [...this.resources.values()].filter((item) => item.storagePath === existing.storagePath || item.storagePath.startsWith(`${existing.storagePath}/`));
+    const resourceIds = new Set(tree.map((item) => item.id));
     for (const [id, version] of this.versions) {
-      if (version.resourceId === record.resourceId) this.versions.set(id, { ...version, state: "expired" });
+      if (resourceIds.has(version.resourceId)) this.versions.set(id, { ...version, state: "expired" });
     }
-    const purged: Resource = { ...existing, status: "purged", updatedAt: new Date() };
-    delete (purged as { purgeAfter?: Date }).purgeAfter;
-    this.resources.set(purged.id, purged);
+    for (const item of tree) {
+      const purged: Resource = { ...item, status: "purged", updatedAt: new Date() };
+      delete (purged as { purgeAfter?: Date }).purgeAfter;
+      this.resources.set(purged.id, purged);
+    }
     await this.setOperationState(record.operationId, "active", { resourceId: record.resourceId });
-    return purged;
+    const purgedRoot = this.resources.get(record.resourceId);
+    if (purgedRoot === undefined) throw new Error("Purged trash resource fixture missing");
+    return purgedRoot;
   }
   async commitVersionRestore(record: CommitVersionRestoreRecord) {
     const existing = this.resources.get(record.resourceId);
@@ -597,16 +610,24 @@ describe("FileService upload state machine", () => {
       const replacementSha = createHash("sha256").update(replacement).digest("hex");
       const overwrite = await service.createUpload({
         parentId: archive.id,
-        filename: "moved.txt",
+        filename: "MOVED.TXT",
         expectedSize: replacement.length,
         expectedSha256: replacementSha,
-        overwriteResourceId: moved.id,
         idempotencyKey: "overwrite-test-001",
       });
+      expect(overwrite.overwriteResourceId).toBe(moved.id);
+      expect(overwrite.filename).toBe("moved.txt");
       await service.appendUpload(overwrite.id, 0, replacement.length, Readable.from(replacement));
       const overwritten = await service.completeUpload(overwrite.id);
       expect(overwritten.resource.id).toBe(moved.id);
       expect(overwritten.resource.sha256).toBe(replacementSha);
+      expect((await service.createUpload({
+        parentId: archive.id,
+        filename: "MOVED.TXT",
+        expectedSize: replacement.length,
+        expectedSha256: replacementSha,
+        idempotencyKey: "overwrite-test-001",
+      })).id).toBe(overwrite.id);
       expect((await service.getResource(archive.id)).sizeBytes).toBe(replacement.length);
       expect((await service.getResource(ROOT_RESOURCE_ID)).sizeBytes).toBe(replacement.length);
       const versions = await service.listVersions(moved.id);
@@ -638,10 +659,12 @@ describe("FileService upload state machine", () => {
         idempotencyKey: "copy-test-001",
       })).id).toBe(copied.id);
 
+      repository.trashRetentionDays = 14;
       const trashed = await service.trashResource(copied.id, { idempotencyKey: "trash-test-001" });
       expect(trashed.status).toBe("trashed");
       expect(trashed.storagePath).toMatch(/^_system\/trash\/\d{4}\/\d{2}\//);
-      expect(trashed.purgeAfter?.getTime()).toBeGreaterThan(Date.now() + 89 * 24 * 60 * 60 * 1_000);
+      expect(trashed.purgeAfter?.getTime()).toBeGreaterThan(Date.now() + 13 * 24 * 60 * 60 * 1_000);
+      expect(trashed.purgeAfter?.getTime()).toBeLessThan(Date.now() + 15 * 24 * 60 * 60 * 1_000);
       expect(await storage.exists(trashed.storagePath)).toBe(true);
       expect((await service.getResource(folder.id)).sizeBytes).toBe(0);
       expect((await service.getResource(ROOT_RESOURCE_ID)).sizeBytes).toBe(payload.length);
@@ -659,16 +682,107 @@ describe("FileService upload state machine", () => {
       expect((await Promise.all(versionStoragePaths.map((storagePath) => storage.exists(storagePath)))).every(Boolean)).toBe(true);
       expect(await storage.exists(trashedAgain.storagePath)).toBe(true);
       repository.purgeFailuresRemaining = 1;
-      await expect(service.purgeTrashFile(moved.id, { idempotencyKey: "purge-test-001" })).rejects.toThrow(/database failure/);
+      await expect(service.purgeTrashResource(moved.id, { idempotencyKey: "purge-test-001" })).rejects.toThrow(/database failure/);
       expect(await storage.exists(trashedAgain.storagePath)).toBe(false);
       expect((await Promise.all(versionStoragePaths.map((storagePath) => storage.exists(storagePath)))).every((exists) => !exists)).toBe(true);
-      const purged = await service.purgeTrashFile(moved.id, { idempotencyKey: "purge-test-001" });
+      const purged = await service.purgeTrashResource(moved.id, { idempotencyKey: "purge-test-001" });
       expect(purged.status).toBe("purged");
       expect(purged.purgeAfter).toBeUndefined();
       expect(await storage.exists(trashedAgain.storagePath)).toBe(false);
       expect((await repository.listVersions(moved.id, 0, 100)).every((version) => version.state === "expired")).toBe(true);
       expect((await repository.listTrash(0, 100)).some((item) => item.id === moved.id)).toBe(false);
-      expect((await service.purgeTrashFile(moved.id, { idempotencyKey: "purge-test-001" })).status).toBe("purged");
+      expect((await service.purgeTrashResource(moved.id, { idempotencyKey: "purge-test-001" })).status).toBe("purged");
+    } finally {
+      await storage.close();
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("permanently deletes a trashed folder tree and all nested file versions", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "saturn-folder-purge-"));
+    const storage = new LocalStorageAdapter(root);
+    const repository = new MemoryRepository();
+    const service = new FileService(repository, storage);
+    const firstPayload = Buffer.from("first nested version");
+    const secondPayload = Buffer.from("second nested version");
+    try {
+      await storage.initialize();
+      await service.initializeStorage();
+      const folder = await service.createFolder(BACKUPS_RESOURCE_ID, "Project");
+      const nested = await service.createFolder(folder.id, "Nested");
+      const firstUpload = await service.createUpload({
+        parentId: nested.id,
+        filename: "artifact.bin",
+        expectedSize: firstPayload.length,
+        idempotencyKey: "folder-purge-upload-001",
+      });
+      await service.appendUpload(firstUpload.id, 0, firstPayload.length, Readable.from(firstPayload));
+      const file = (await service.completeUpload(firstUpload.id)).resource;
+      const secondUpload = await service.createUpload({
+        parentId: nested.id,
+        filename: "artifact.bin",
+        expectedSize: secondPayload.length,
+        idempotencyKey: "folder-purge-upload-002",
+      });
+      await service.appendUpload(secondUpload.id, 0, secondPayload.length, Readable.from(secondPayload));
+      await service.completeUpload(secondUpload.id);
+
+      const trashed = await service.trashResource(folder.id, { idempotencyKey: "folder-purge-trash-001" });
+      const versionStoragePaths = (await repository.listVersions(file.id, 0, 100)).map((version) => version.storagePath);
+      expect(await storage.exists(trashed.storagePath)).toBe(true);
+      expect(versionStoragePaths).toHaveLength(2);
+
+      const [purged, concurrentRetry] = await Promise.all([
+        service.purgeTrashResource(folder.id, { idempotencyKey: "folder-purge-delete-001" }),
+        service.purgeTrashResource(folder.id, { idempotencyKey: "folder-purge-delete-001" }),
+      ]);
+      expect(purged.status).toBe("purged");
+      expect(concurrentRetry.id).toBe(purged.id);
+      expect(await storage.exists(trashed.storagePath)).toBe(false);
+      expect((await service.getResource(nested.id)).status).toBe("purged");
+      expect((await service.getResource(file.id)).status).toBe("purged");
+      expect((await repository.listVersions(file.id, 0, 100)).every((version) => version.state === "expired")).toBe(true);
+      expect((await Promise.all(versionStoragePaths.map((storagePath) => storage.exists(storagePath)))).every((exists) => !exists)).toBe(true);
+      expect((await repository.listTrash(0, 100)).some((item) => item.id === folder.id)).toBe(false);
+      expect(repository.purgeCalls).toBe(1);
+    } finally {
+      await storage.close();
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("serializes concurrent uploads with the same name and commits the latter as an overwrite", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "saturn-concurrent-overwrite-"));
+    const storage = new LocalStorageAdapter(root);
+    const repository = new MemoryRepository();
+    const service = new FileService(repository, storage);
+    const firstPayload = Buffer.from("first payload");
+    const secondPayload = Buffer.from("second payload");
+    try {
+      await storage.initialize();
+      await service.initializeStorage();
+      const folder = await service.createFolder(SYNC_RESOURCE_ID, "Concurrent");
+      const first = await service.createUpload({
+        parentId: folder.id,
+        filename: "same.txt",
+        expectedSize: firstPayload.length,
+        idempotencyKey: "concurrent-upload-first",
+      });
+      const second = await service.createUpload({
+        parentId: folder.id,
+        filename: "same.txt",
+        expectedSize: secondPayload.length,
+        idempotencyKey: "concurrent-upload-second",
+      });
+      await service.appendUpload(first.id, 0, firstPayload.length, Readable.from(firstPayload));
+      await service.appendUpload(second.id, 0, secondPayload.length, Readable.from(secondPayload));
+
+      const completed = await Promise.all([service.completeUpload(first.id), service.completeUpload(second.id)]);
+      expect(completed[0].resource.id).toBe(completed[1].resource.id);
+      const resource = completed[1].resource;
+      expect(await service.listVersions(resource.id)).toHaveLength(2);
+      expect((await service.listChildren(folder.id)).filter((item) => item.name === "same.txt")).toHaveLength(1);
+      expect(repository.locks.size).toBe(0);
     } finally {
       await storage.close();
       await fs.rm(root, { recursive: true, force: true });
@@ -706,6 +820,14 @@ describe("FileService upload state machine", () => {
     try {
       await storage.initialize();
       await service.initializeStorage();
+      repository.uploadLimits = { bufferMaxBytes: 10, maximumFileBytes: 2 };
+      await expect(service.createUpload({
+        parentId: SYNC_RESOURCE_ID,
+        filename: "runtime-too-large.bin",
+        expectedSize: 3,
+        idempotencyKey: "upload-runtime-limit-001",
+      })).rejects.toThrow(/size/);
+      repository.uploadLimits = undefined;
       const limited = new FileService(repository, storage, { uploadMaxBytes: 2 });
       await expect(limited.createUpload({
         parentId: SYNC_RESOURCE_ID,

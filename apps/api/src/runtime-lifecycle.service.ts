@@ -1,8 +1,7 @@
 import { Inject, Injectable, type OnApplicationShutdown, type OnModuleInit } from "@nestjs/common";
 import type { FileService } from "@saturn/file-core";
-import type { TelegramSupervisor } from "@saturn/drop";
 import type { StorageAdapter } from "@saturn/storage";
-import { DATABASE, FILE_SERVICE, STORAGE_ADAPTER, TELEGRAM_SUPERVISOR } from "./tokens.js";
+import { DATABASE, FILE_SERVICE, STORAGE_ADAPTER } from "./tokens.js";
 
 interface CloseableDatabase {
   close(): Promise<void>;
@@ -14,12 +13,10 @@ export class RuntimeLifecycleService implements OnModuleInit, OnApplicationShutd
     @Inject(DATABASE) private readonly database: CloseableDatabase,
     @Inject(FILE_SERVICE) private readonly files: FileService,
     @Inject(STORAGE_ADAPTER) private readonly storage: StorageAdapter,
-    @Inject(TELEGRAM_SUPERVISOR) private readonly telegram: TelegramSupervisor,
   ) {}
 
   async onModuleInit(): Promise<void> {
     await this.files.initializeStorage();
-    await this.telegram.initialize();
   }
 
   async onApplicationShutdown(): Promise<void> {

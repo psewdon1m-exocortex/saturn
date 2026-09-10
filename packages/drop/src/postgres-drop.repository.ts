@@ -1,13 +1,5 @@
 import type { Database } from "@saturn/database";
-import type { DropRepository, DropSession, DropUpload, TelegramBinding, TelegramIdentity } from "./types.js";
-
-interface BindingRow {
-  telegram_user_id: string;
-  telegram_chat_id: string;
-  display_name: string | null;
-  bound_at: Date;
-  updated_at: Date;
-}
+import type { DropRepository, DropSession, DropUpload, TelegramIdentity } from "./types.js";
 
 interface SessionRow {
   id: string;
@@ -61,16 +53,6 @@ interface ChannelRow {
   reserved_bytes: string;
 }
 
-function binding(row: BindingRow): TelegramBinding {
-  return {
-    userId: row.telegram_user_id,
-    chatId: row.telegram_chat_id,
-    ...(row.display_name === null ? {} : { displayName: row.display_name }),
-    boundAt: row.bound_at,
-    updatedAt: row.updated_at,
-  };
-}
-
 function session(row: SessionRow): DropSession {
   return {
     id: row.id,
@@ -122,68 +104,8 @@ export class PostgresDropRepository implements DropRepository {
     this.#database = database;
   }
 
-  createLinkChallenge(input: { readonly id: string; readonly codeHash: string; readonly createdAt: Date; readonly expiresAt: Date }): Promise<void> {
-    return this.#database.transaction(async (sql) => {
-      await sql`UPDATE telegram_link_challenges SET state = 'revoked' WHERE state = 'active'`;
-      await sql`
-        INSERT INTO telegram_link_challenges (id, code_hash, state, created_at, expires_at)
-        VALUES (${input.id}, ${input.codeHash}, 'active', ${input.createdAt}, ${input.expiresAt})
-      `;
-    });
-  }
-
-  consumeLinkChallenge(codeHash: string, identity: TelegramIdentity, now: Date): Promise<TelegramBinding | undefined> {
-    return this.#database.transaction(async (sql) => {
-      await sql`UPDATE telegram_link_challenges SET state = 'expired' WHERE state = 'active' AND expires_at <= ${now}`;
-      const consumed = await sql`
-        UPDATE telegram_link_challenges SET state = 'consumed', consumed_at = ${now}
-        WHERE code_hash = ${codeHash} AND state = 'active' AND expires_at > ${now}
-        RETURNING id
-      `;
-      if (consumed.length !== 1) return undefined;
-      await sql`UPDATE drop_challenges SET state = 'revoked' WHERE state = 'active' AND telegram_user_id IS NOT NULL`;
-      await sql`UPDATE drop_sessions SET state = 'revoked', revoked_at = ${now} WHERE state = 'active' AND telegram_user_id IS NOT NULL`;
-      const rows = await sql<BindingRow[]>`
-        INSERT INTO telegram_binding (owner_id, telegram_user_id, telegram_chat_id, display_name, bound_at, updated_at)
-        VALUES ('owner', ${identity.userId}, ${identity.chatId}, ${identity.displayName ?? null}, ${now}, ${now})
-        ON CONFLICT (owner_id) DO UPDATE SET
-          telegram_user_id = EXCLUDED.telegram_user_id,
-          telegram_chat_id = EXCLUDED.telegram_chat_id,
-          display_name = EXCLUDED.display_name,
-          bound_at = EXCLUDED.bound_at,
-          updated_at = EXCLUDED.updated_at
-        RETURNING *
-      `;
-      const row = rows[0];
-      if (row === undefined) throw new Error("Telegram binding returned no row");
-      return binding(row);
-    });
-  }
-
-  getBinding(): Promise<TelegramBinding | undefined> {
-    return this.#database.withSql(async (sql) => {
-      const rows = await sql<BindingRow[]>`SELECT * FROM telegram_binding WHERE owner_id = 'owner' LIMIT 1`;
-      return rows[0] === undefined ? undefined : binding(rows[0]);
-    });
-  }
-
-  unlink(now: Date): Promise<{ readonly sessions: number; readonly challenges: number }> {
-    return this.#database.transaction(async (sql) => {
-      const sessions = await sql`UPDATE drop_sessions SET state = 'revoked', revoked_at = ${now} WHERE state = 'active' AND telegram_user_id IS NOT NULL RETURNING id`;
-      const challenges = await sql`UPDATE drop_challenges SET state = 'revoked' WHERE state = 'active' AND telegram_user_id IS NOT NULL RETURNING id`;
-      await sql`UPDATE telegram_link_challenges SET state = 'revoked' WHERE state = 'active'`;
-      await sql`DELETE FROM telegram_binding WHERE owner_id = 'owner'`;
-      return { sessions: sessions.length, challenges: challenges.length };
-    });
-  }
-
   createDropChallenge(input: { readonly id: string; readonly codeHash: string; readonly identity?: TelegramIdentity; readonly createdAt: Date; readonly expiresAt: Date; readonly maxFiles: number; readonly maxBytes: number }): Promise<boolean> {
     return this.#database.transaction(async (sql) => {
-      if (input.identity !== undefined) {
-        const rows = await sql<BindingRow[]>`SELECT * FROM telegram_binding WHERE owner_id = 'owner' FOR UPDATE`;
-        const current = rows[0];
-        if (current === undefined || current.telegram_user_id !== input.identity.userId || current.telegram_chat_id !== input.identity.chatId) return false;
-      }
       await sql`UPDATE drop_challenges SET state = 'revoked' WHERE state = 'active'`;
       await sql`
         UPDATE drop_channels SET state = 'revoked'
@@ -323,11 +245,6 @@ export class PostgresDropRepository implements DropRepository {
 
   revokeDropAccess(identity: TelegramIdentity, now: Date): Promise<{ readonly sessions: number; readonly challenges: number }> {
     return this.#database.transaction(async (sql) => {
-      const bound = await sql<BindingRow[]>`SELECT * FROM telegram_binding WHERE owner_id = 'owner' FOR UPDATE`;
-      const current = bound.at(0);
-      if (current?.telegram_user_id !== identity.userId || current.telegram_chat_id !== identity.chatId) {
-        throw new Error("Telegram identity is not bound");
-      }
       const sessions = await sql`UPDATE drop_sessions SET state = 'revoked', revoked_at = ${now} WHERE state = 'active' AND telegram_user_id = ${identity.userId} AND telegram_chat_id = ${identity.chatId} RETURNING id`;
       const challenges = await sql`UPDATE drop_challenges SET state = 'revoked' WHERE state = 'active' AND telegram_user_id = ${identity.userId} AND telegram_chat_id = ${identity.chatId} RETURNING id`;
       return { sessions: sessions.length, challenges: challenges.length };
@@ -553,42 +470,4 @@ export class PostgresDropRepository implements DropRepository {
     });
   }
 
-  claimTelegramUpdate(updateId: string, telegramUserId: string | undefined, now: Date): Promise<"claimed" | "retry" | "duplicate" | "busy"> {
-    return this.#database.transaction(async (sql) => {
-      const inserted = await sql`
-        INSERT INTO telegram_updates (update_id, state, telegram_user_id, received_at)
-        VALUES (${updateId}, 'processing', ${telegramUserId ?? null}, ${now})
-        ON CONFLICT (update_id) DO NOTHING
-        RETURNING update_id
-      `;
-      if (inserted.length === 1) return "claimed";
-      const rows = await sql<{ state: "processing" | "completed" | "failed" }[]>`
-        SELECT state FROM telegram_updates WHERE update_id = ${updateId} FOR UPDATE
-      `;
-      if (rows[0]?.state === "completed") return "duplicate";
-      if (rows[0]?.state === "processing") return "busy";
-      const retried = await sql`
-        UPDATE telegram_updates SET state = 'processing', attempt_count = attempt_count + 1,
-          failed_at = NULL, failure_code = NULL
-        WHERE update_id = ${updateId} AND state = 'failed'
-        RETURNING update_id
-      `;
-      return retried.length === 1 ? "retry" : "busy";
-    });
-  }
-
-  completeTelegramUpdate(updateId: string, now: Date): Promise<void> {
-    return this.#database.withSql(async (sql) => {
-      await sql`UPDATE telegram_updates SET state = 'completed', completed_at = ${now} WHERE update_id = ${updateId} AND state = 'processing'`;
-    });
-  }
-
-  failTelegramUpdate(updateId: string, failureCode: string, now: Date): Promise<void> {
-    return this.#database.withSql(async (sql) => {
-      await sql`
-        UPDATE telegram_updates SET state = 'failed', failed_at = ${now}, failure_code = ${failureCode}
-        WHERE update_id = ${updateId} AND state = 'processing'
-      `;
-    });
-  }
 }

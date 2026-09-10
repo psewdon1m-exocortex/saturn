@@ -22,6 +22,7 @@ import { buildWorker } from "./worker.js";
 import { PostgresShareRepository } from "@saturn/shares";
 import { DropBufferStore, DropDrainService, PostgresDropRepository } from "@saturn/drop";
 import { FileService, PostgresFileRepository } from "@saturn/file-core";
+import { ArchiveJobRunner, PostgresArchiveJobRepository } from "@saturn/archive";
 
 const config = loadEnvironment();
 const database = new Database(config.databaseUrl, { max: 5, maintenanceBarrier: true });
@@ -66,9 +67,10 @@ const recovery = new SaturnBackupService({
 });
 const shareRepository = new PostgresShareRepository(database);
 const dropRepository = new PostgresDropRepository(database);
+const fileService = new FileService(new PostgresFileRepository(database), storage, { ...config.limits, auditSink: audit });
 const dropBuffer = new DropBufferStore({
   root: config.drop.bufferDirectory,
-  maxBytes: config.drop.bufferMaxBytes,
+  maxBytes: async () => (await fileService.getUploadLimits()).bufferMaxBytes,
   minFreeBytes: config.drop.bufferMinFreeBytes,
   warningRatio: config.drop.bufferWarningRatio,
   criticalRatio: config.drop.bufferCriticalRatio,
@@ -78,9 +80,15 @@ await dropBuffer.initialize();
 const dropDrain = new DropDrainService({
   repository: dropRepository,
   buffer: dropBuffer,
-  files: new FileService(new PostgresFileRepository(database), storage, { ...config.limits, auditSink: audit }),
+  files: fileService,
   workers: config.drop.drainWorkers,
 });
+const archiveRunner = new ArchiveJobRunner(
+  new PostgresArchiveJobRepository(database),
+  fileService,
+  config.archive,
+  audit,
+);
 const runtime = buildWorker(config, database, new AdapterStorageHealthProbe(storage), {
   reconcile: async () => { await reconciliation.run("metadata"); },
   purge: async () => { await purge.run(); },
@@ -104,6 +112,7 @@ const runtime = buildWorker(config, database, new AdapterStorageHealthProbe(stor
     }
   },
   drain: async () => dropDrain.drain(),
+  archive: async () => archiveRunner.runNext(),
   close: async () => { await storage.close(); },
 });
 await runtime.startHeartbeat();

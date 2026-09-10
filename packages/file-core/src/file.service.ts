@@ -1,12 +1,12 @@
 import { createHash } from "node:crypto";
 import { Readable } from "node:stream";
-import { fileTypeFromBuffer } from "file-type";
 import { v7 as uuidv7 } from "uuid";
 import type { AuditSink } from "@saturn/audit";
 import type { StorageAdapter } from "@saturn/storage";
 import { joinStoragePath, normalizeStorageName, SATURN_BUSINESS_ROOT_DIRECTORIES, SATURN_SYSTEM_DIRECTORIES } from "@saturn/storage";
-import type { CopiedResourceRecord, FileRepository } from "./repository.js";
+import type { CopiedResourceRecord, FileRepository, UploadLimits } from "./repository.js";
 import { archivedVersionPurgeAfter } from "./retention.js";
+import { detectContentType } from "./content-type.js";
 import {
   DROP_POINT_RESOURCE_ID,
   BACKUPS_RESOURCE_ID,
@@ -54,6 +54,7 @@ const CANONICAL_DEFAULT_NAME_BY_ID = new Map<string, string>([
 const RESERVED_ROOT_NAMES = new Set([...SATURN_BUSINESS_ROOT_DIRECTORIES, "_system"].map((name) => name.toLocaleLowerCase()));
 const MUTATION_LOCK_MS = 60 * 60 * 1_000;
 const UPLOAD_LOCK_MS = 6 * 60 * 60 * 1_000;
+const PURGE_DELETE_CONCURRENCY = 8;
 
 class ReconciliationRequiredError extends Error {
   readonly original: unknown;
@@ -96,18 +97,21 @@ export class FileService {
   readonly #repository: FileRepository;
   readonly #storage: StorageAdapter;
   readonly #uploadMaxBytes: number;
+  readonly #uploadBufferMaxBytes: number;
   readonly #uploadChunkMaxBytes: number;
   readonly #uploadIncompleteTtlMs: number;
   readonly #trashRetentionMs: number;
   readonly #audit: AuditSink | undefined;
+  readonly #activePurges = new Map<string, Promise<Resource>>();
 
   constructor(repository: FileRepository, storage: StorageAdapter, options: FileServiceOptions = {}) {
     this.#repository = repository;
     this.#storage = storage;
     this.#uploadMaxBytes = options.uploadMaxBytes ?? 20 * 1024 * 1024 * 1024;
+    this.#uploadBufferMaxBytes = 110 * 1024 * 1024 * 1024;
     this.#uploadChunkMaxBytes = options.uploadChunkMaxBytes ?? 8 * 1024 * 1024;
     this.#uploadIncompleteTtlMs = options.uploadIncompleteTtlMs ?? 24 * 60 * 60 * 1_000;
-    this.#trashRetentionMs = options.trashRetentionMs ?? 90 * 24 * 60 * 60 * 1_000;
+    this.#trashRetentionMs = options.trashRetentionMs ?? 30 * 24 * 60 * 60 * 1_000;
     this.#audit = options.auditSink;
   }
 
@@ -129,6 +133,17 @@ export class FileService {
     const resource = await this.#repository.getResource(id);
     if (resource === undefined) throw new Error("Resource not found");
     return resource;
+  }
+
+  async getUploadLimits(): Promise<UploadLimits> {
+    const configured = await this.#repository.getUploadLimits();
+    const limits = configured ?? { bufferMaxBytes: this.#uploadBufferMaxBytes, maximumFileBytes: this.#uploadMaxBytes };
+    if (!Number.isSafeInteger(limits.bufferMaxBytes) || limits.bufferMaxBytes < 1
+      || !Number.isSafeInteger(limits.maximumFileBytes) || limits.maximumFileBytes < 1
+      || limits.maximumFileBytes * 10 > limits.bufferMaxBytes * 9) {
+      throw new Error("Upload limits are invalid");
+    }
+    return limits;
   }
 
   async listChildren(parentId = ROOT_RESOURCE_ID, offset = 0, limit = 100): Promise<readonly Resource[]> {
@@ -196,7 +211,8 @@ export class FileService {
 
   async createUpload(input: CreateUploadInput): Promise<UploadSession> {
     validateIdempotencyKey(input.idempotencyKey);
-    if (!Number.isSafeInteger(input.expectedSize) || input.expectedSize < 0 || input.expectedSize > this.#uploadMaxBytes) {
+    const limits = await this.getUploadLimits();
+    if (!Number.isSafeInteger(input.expectedSize) || input.expectedSize < 0 || input.expectedSize > limits.maximumFileBytes) {
       throw new Error("Upload size is invalid");
     }
     const expectedSha256 = input.expectedSha256?.toLowerCase();
@@ -210,7 +226,7 @@ export class FileService {
         throw new Error("Overwrite target is not an active file");
       }
       if (input.parentId !== undefined && input.parentId !== overwrite.parentId) throw new Error("Overwrite parent differs from target");
-      if (filename !== overwrite.name) throw new Error("Overwrite filename differs from target");
+      if (filename.toLocaleLowerCase() !== overwrite.name.toLocaleLowerCase()) throw new Error("Overwrite filename differs from target");
       parentId = overwrite.parentId;
       filename = overwrite.name;
     }
@@ -219,15 +235,22 @@ export class FileService {
     if (parent.id === ROOT_RESOURCE_ID) throw new Error("Files cannot be uploaded directly into the Saturn root");
     const existing = await this.#repository.getUploadByIdempotencyKey(input.idempotencyKey);
     if (existing !== undefined) {
-      if (existing.parentId !== parentId || existing.filename !== filename || existing.expectedSize !== input.expectedSize
-        || existing.overwriteResourceId !== input.overwriteResourceId
+      if (existing.parentId !== parentId || existing.filename.toLocaleLowerCase() !== filename.toLocaleLowerCase() || existing.expectedSize !== input.expectedSize
+        || (input.overwriteResourceId !== undefined && existing.overwriteResourceId !== input.overwriteResourceId)
         || (existing.auditActorType ?? "owner_bootstrap") !== (input.auditActor?.type ?? "owner_bootstrap")
         || (existing.auditActorId ?? "owner") !== (input.auditActor?.id ?? "owner")) {
         throw new Error("Idempotency key was already used for different upload parameters");
       }
       return existing;
     }
-    if (overwrite === undefined && await this.#repository.getChild(parentId, filename)) throw new Error("A sibling with this name already exists");
+    if (overwrite === undefined) {
+      const sibling = await this.#repository.getChild(parentId, filename);
+      if (sibling !== undefined) {
+        if (sibling.type !== "file" || sibling.status !== "active") throw new Error("A folder with this name already exists");
+        overwrite = sibling;
+        filename = sibling.name;
+      }
+    }
     const id = uuidv7();
     const upload = await this.#repository.createUpload({
       id,
@@ -316,8 +339,13 @@ export class FileService {
   }
 
   async completeUpload(id: string): Promise<CompleteUploadResult> {
+    const preliminary = await this.getUpload(id);
+    if (preliminary.status === "active" && preliminary.resourceId !== undefined) {
+      return { upload: preliminary, resource: await this.getResource(preliminary.resourceId) };
+    }
     const lockId = uuidv7();
-    if (!(await this.#repository.acquireLocks(lockId, [`upload:${id}`], new Date(Date.now() + UPLOAD_LOCK_MS)))) {
+    const destinationLock = `upload-target:${preliminary.parentId}:${preliminary.filename.toLocaleLowerCase()}`;
+    if (!(await this.#acquireLocksWithin(lockId, [`upload:${id}`, destinationLock], UPLOAD_LOCK_MS, 30_000))) {
       throw new Error("Upload is locked by another operation");
     }
     try {
@@ -346,18 +374,19 @@ export class FileService {
         await this.#repository.setUploadState(id, "failed_final", { actualSha256: digest.sha256, errorCode: "checksum_mismatch" });
         throw new Error("Upload checksum verification failed");
       }
-      const probeBytes = Math.min(upload.expectedSize, 4_100);
-      const detected = probeBytes === 0
-        ? undefined
-        : await fileTypeFromBuffer(await collectBounded(
-          await this.#storage.openRead(upload.tempPath, { offset: 0, length: probeBytes }),
-          4_100,
-        ));
-      const mimeType = detected?.mime ?? "application/octet-stream";
+      const probeBytes = Math.min(upload.expectedSize, 64 * 1024);
+      const probe = probeBytes === 0 ? Buffer.alloc(0) : await collectBounded(
+        await this.#storage.openRead(upload.tempPath, { offset: 0, length: probeBytes }),
+        64 * 1024,
+      );
+      const mimeType = await detectContentType(upload.filename, probe);
       await this.#repository.setUploadState(id, "committing", { actualSha256: digest.sha256 });
-      if (upload.overwriteResourceId !== undefined) {
-        const target = await this.getResource(upload.overwriteResourceId);
-        if (target.type !== "file" || target.status !== "active" || target.currentVersionId === undefined) {
+      const target = upload.overwriteResourceId === undefined
+        ? await this.#repository.getChild(upload.parentId, upload.filename)
+        : await this.getResource(upload.overwriteResourceId);
+      if (target !== undefined) {
+        if (target.type !== "file" || target.status !== "active" || target.currentVersionId === undefined
+          || target.parentId !== upload.parentId || target.name.toLocaleLowerCase() !== upload.filename.toLocaleLowerCase()) {
           await this.#repository.setUploadState(id, "failed_final", { errorCode: "overwrite_target_invalid" });
           throw new Error("Overwrite target is not an active versioned file");
         }
@@ -613,6 +642,10 @@ export class FileService {
     if (completed !== undefined) return completed;
     if (source.id === ROOT_RESOURCE_ID || CANONICAL_ROOT_RESOURCE_ID_SET.has(source.id) || source.status !== "active") throw new Error("Resource cannot be trashed");
     const tree = await this.#repository.listTree(source.storagePath);
+    const configuredRetentionDays = await this.#repository.getTrashRetentionDays();
+    const retentionMs = Number.isSafeInteger(configuredRetentionDays) && configuredRetentionDays >= 1 && configuredRetentionDays <= 365
+      ? configuredRetentionDays * 24 * 60 * 60 * 1_000
+      : this.#trashRetentionMs;
     const now = new Date();
     const year = String(now.getUTCFullYear());
     const month = String(now.getUTCMonth() + 1).padStart(2, "0");
@@ -633,7 +666,7 @@ export class FileService {
           resourceId: source.id,
           oldPath: source.storagePath,
           trashPath,
-          purgeAfter: new Date(now.getTime() + this.#trashRetentionMs),
+          purgeAfter: new Date(now.getTime() + retentionMs),
         });
         await this.#writeAudit("resource.trashed", `mutation:${input.idempotencyKey}`, trashed.id, {
           oldPath: source.storagePath,
@@ -691,40 +724,69 @@ export class FileService {
     });
   }
 
-  async purgeTrashFile(resourceId: string, input: ResourceMutationInput): Promise<Resource> {
+  purgeTrashResource(resourceId: string, input: ResourceMutationInput): Promise<Resource> {
+    const active = this.#activePurges.get(resourceId);
+    if (active !== undefined) return active;
+    const execution = this.#executeTrashPurge(resourceId, input);
+    const tracked = execution.finally(() => {
+      if (this.#activePurges.get(resourceId) === tracked) this.#activePurges.delete(resourceId);
+    });
+    this.#activePurges.set(resourceId, tracked);
+    return tracked;
+  }
+
+  async #executeTrashPurge(resourceId: string, input: ResourceMutationInput): Promise<Resource> {
     const source = await this.getResource(resourceId);
     const completed = await this.#completedMutation("purge", input.idempotencyKey, resourceId);
     if (completed !== undefined) return completed;
-    if (source.type !== "file" || source.status !== "trashed" || source.trashedFromParentId === undefined) {
-      throw new Error("Only a file in trash can be permanently deleted");
+    if (source.status !== "trashed" || source.trashedFromParentId === undefined) {
+      throw new Error("Only a top-level resource in trash can be permanently deleted");
     }
-    const storagePaths = new Set<string>([source.storagePath]);
-    for (let offset = 0; ; offset += 500) {
-      const versions = await this.#repository.listVersions(source.id, offset, 500);
-      for (const version of versions) storagePaths.add(version.storagePath);
-      if (versions.length < 500) break;
+    const tree = await this.#repository.listTree(source.storagePath);
+    const versionStoragePaths = new Set<string>();
+    for (const item of tree) {
+      if (item.type !== "file") continue;
+      for (let offset = 0; ; offset += 500) {
+        const versions = await this.#repository.listVersions(item.id, offset, 500);
+        for (const version of versions) {
+          if (version.storagePath !== source.storagePath && !version.storagePath.startsWith(`${source.storagePath}/`)) {
+            versionStoragePaths.add(version.storagePath);
+          }
+        }
+        if (versions.length < 500) break;
+      }
     }
     const operation = await this.#beginMutation("purge", input.idempotencyKey, source.id, {
       storagePath: source.storagePath,
-      storageObjectCount: storagePaths.size,
+      resourceType: source.type,
+      resourceCount: tree.length,
+      versionStorageObjectCount: versionStoragePaths.size,
     });
     if (operation.state === "active" && operation.resourceId !== undefined) return this.getResource(operation.resourceId);
-    return this.#withMutationLocks(operation, [`resource:${source.id}`], async () => {
+    return this.#withMutationLocks(operation, tree.map((item) => `resource:${item.id}`), async () => {
       try {
         await this.#repository.setOperationState(operation.id, "storage_committing");
-        for (const storagePath of storagePaths) {
-          if (await this.#storage.exists(storagePath)) await this.#storage.delete(storagePath);
+        if (await this.#storage.exists(source.storagePath)) {
+          await this.#deleteStorageTree(source.storagePath, source.type === "folder" ? "directory" : "file");
+        }
+        const versionPaths = [...versionStoragePaths];
+        for (let offset = 0; offset < versionPaths.length; offset += PURGE_DELETE_CONCURRENCY) {
+          await this.#runDeletionBatch(versionPaths.slice(offset, offset + PURGE_DELETE_CONCURRENCY).map((storagePath) => async () => {
+            if (await this.#storage.exists(storagePath)) await this.#storage.delete(storagePath);
+          }));
         }
         await this.#repository.setOperationState(operation.id, "storage_committed");
-        const purged = await this.#repository.purgeTrashFile({ operationId: operation.id, resourceId: source.id });
+        const purged = await this.#repository.purgeTrashTree({ operationId: operation.id, resourceId: source.id });
         await this.#writeAudit("resource.purged_manually", `mutation:${input.idempotencyKey}`, purged.id, {
           storagePath: source.storagePath,
-          deletedStorageObjects: storagePaths.size,
+          resourceType: source.type,
+          resourceCount: tree.length,
+          versionStorageObjectCount: versionStoragePaths.size,
           previousPurgeAfter: source.purgeAfter,
         }, input.auditActor);
         return purged;
       } catch (error) {
-        await this.#repository.setOperationState(operation.id, "failed_retryable", { errorCode: "purge_database_failed" });
+        await this.#repository.setOperationState(operation.id, "failed_retryable", { errorCode: "purge_commit_failed" });
         throw error;
       }
     });
@@ -885,6 +947,18 @@ export class FileService {
     }
   }
 
+  async #acquireLocksWithin(operationId: string, keys: readonly string[], lockTtlMs: number, waitMs: number): Promise<boolean> {
+    const deadline = Date.now() + waitMs;
+    const maximumAttempts = Math.ceil(waitMs / 50) + 1;
+    for (let attempt = 0; attempt < maximumAttempts; attempt += 1) {
+      if (await this.#repository.acquireLocks(operationId, keys, new Date(Date.now() + lockTtlMs))) return true;
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) return false;
+      await new Promise<void>((resolve) => setTimeout(resolve, Math.min(50, remaining)));
+    }
+    return false;
+  }
+
   async #rollbackPartialChunk(storagePath: string, offset: number): Promise<void> {
     if (!(await this.#storage.exists(storagePath))) return;
     if (offset === 0) await this.#storage.delete(storagePath);
@@ -906,6 +980,29 @@ export class FileService {
       current = current ? `${current}/${segment}` : segment;
       if (!(await this.#storage.exists(current))) await this.#storage.mkdir(current);
     }
+  }
+
+  async #deleteStorageTree(storagePath: string, knownType?: "file" | "directory"): Promise<void> {
+    const entryType = knownType ?? (await this.#storage.stat(storagePath)).type;
+    if (entryType === "file") {
+      await this.#storage.delete(storagePath);
+      return;
+    }
+    for (;;) {
+      const page = await this.#storage.list(storagePath, undefined, 500);
+      for (let offset = 0; offset < page.entries.length; offset += PURGE_DELETE_CONCURRENCY) {
+        const children = page.entries.slice(offset, offset + PURGE_DELETE_CONCURRENCY);
+        await this.#runDeletionBatch(children.map((child) => async () => this.#deleteStorageTree(child.path, child.type)));
+      }
+      if (page.nextCursor === undefined) break;
+    }
+    await this.#storage.delete(storagePath);
+  }
+
+  async #runDeletionBatch(actions: readonly (() => Promise<void>)[]): Promise<void> {
+    const results = await Promise.allSettled(actions.map(async (action) => action()));
+    const failed = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
+    if (failed !== undefined) throw failed.reason;
   }
 
   async #cleanupPaths(paths: readonly string[]): Promise<void> {

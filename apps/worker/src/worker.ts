@@ -25,6 +25,7 @@ export interface WorkerJobsPort {
   backup?(): Promise<void>;
   maintain?(): Promise<void>;
   drain?(): Promise<unknown>;
+  archive?(): Promise<unknown>;
   close?(): Promise<void>;
 }
 
@@ -128,12 +129,12 @@ export function buildWorker(
         }, config.recovery.backupIntervalMs);
         backupTimer.unref();
       }
-      if (jobs.drain !== undefined) {
+      if (jobs.drain !== undefined || jobs.archive !== undefined) {
         const drain = () => {
           if (dropDrainRunning) return;
           dropDrainRunning = true;
-          void runMutation(async () => jobs.drain?.()).catch((error: unknown) => {
-            app.log.error({ error }, "Drop buffer drain failed");
+          void runMutation(async () => { await jobs.drain?.(); await jobs.archive?.(); }).catch((error: unknown) => {
+            app.log.error({ error }, "Background transfer worker failed");
           }).finally(() => { dropDrainRunning = false; });
         };
         drain();

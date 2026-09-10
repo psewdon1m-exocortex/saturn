@@ -57,8 +57,8 @@ const environmentSchema = z.object({
   UPLOAD_MAX_BYTES: z.coerce.number().int().min(1).max(Number.MAX_SAFE_INTEGER).default(20 * 1024 * 1024 * 1024),
   UPLOAD_CHUNK_MAX_BYTES: z.coerce.number().int().min(64 * 1024).max(64 * 1024 * 1024).default(8 * 1024 * 1024),
   UPLOAD_INCOMPLETE_TTL_MS: z.coerce.number().int().min(60_000).max(7 * 24 * 60 * 60 * 1_000).default(24 * 60 * 60 * 1_000),
-  TRASH_RETENTION_MS: z.coerce.number().int().min(24 * 60 * 60 * 1_000).max(365 * 24 * 60 * 60 * 1_000).default(90 * 24 * 60 * 60 * 1_000),
-  PURGE_ENABLED: booleanText.default(false),
+  TRASH_RETENTION_MS: z.coerce.number().int().min(24 * 60 * 60 * 1_000).max(365 * 24 * 60 * 60 * 1_000).default(30 * 24 * 60 * 60 * 1_000),
+  PURGE_ENABLED: booleanText.default(true),
   READINESS_REQUIRE_STORAGE: booleanText.default(true),
   READINESS_TIMEOUT_MS: z.coerce.number().int().min(500).max(4_500).default(3_000),
   LOG_LEVEL: z.enum(["fatal", "error", "warn", "info", "debug", "trace", "silent"]).default("info"),
@@ -74,6 +74,14 @@ const environmentSchema = z.object({
   RECOVERY_MAX_COMPRESSION_RATIO: z.coerce.number().min(1).max(1_000).default(200),
   RECOVERY_MAX_MANIFEST_BYTES: z.coerce.number().int().min(4_096).max(16 * 1024 * 1024).default(1024 * 1024),
   RECOVERY_BACKUP_INTERVAL_MS: z.coerce.number().int().min(60_000).max(7 * 24 * 60 * 60 * 1_000).default(6 * 60 * 60 * 1_000),
+  ARCHIVE_SPOOL_DIR: z.string().min(1).default("spool/archives"),
+  ARCHIVE_7Z_BIN: z.string().min(1).default(process.platform === "win32" ? "7z" : "7zz"),
+  ARCHIVE_MAX_ARCHIVE_BYTES: z.coerce.number().int().min(1_048_576).max(Number.MAX_SAFE_INTEGER).default(20 * 1024 * 1024 * 1024),
+  ARCHIVE_MAX_MEMBER_BYTES: z.coerce.number().int().min(1_048_576).max(Number.MAX_SAFE_INTEGER).default(20 * 1024 * 1024 * 1024),
+  ARCHIVE_MAX_EXTRACTED_BYTES: z.coerce.number().int().min(1_048_576).max(Number.MAX_SAFE_INTEGER).default(100 * 1024 * 1024 * 1024),
+  ARCHIVE_MAX_ENTRIES: z.coerce.number().int().min(1).max(100_000).default(10_000),
+  ARCHIVE_MAX_COMPRESSION_RATIO: z.coerce.number().min(1).max(1_000).default(200),
+  ARCHIVE_JOB_LEASE_MS: z.coerce.number().int().min(30_000).max(60 * 60 * 1_000).default(5 * 60 * 1_000),
   PG_DUMP_BIN: z.string().min(1).default("pg_dump"),
   PG_RESTORE_BIN: z.string().min(1).default("pg_restore"),
   PG_DUMP_PREFIX_ARGS: commandArguments,
@@ -87,7 +95,6 @@ const environmentSchema = z.object({
   AUTH_FAILURE_WINDOW_MS: z.coerce.number().int().min(60_000).max(24 * 60 * 60 * 1_000).default(15 * 60 * 1_000),
   DROP_PEPPER_FILE: z.string().min(1),
   DROP_CODE_TTL_MS: z.coerce.number().int().min(60_000).max(60 * 60 * 1_000).default(30 * 60 * 1_000),
-  DROP_LINK_CODE_TTL_MS: z.coerce.number().int().min(60_000).max(60 * 60 * 1_000).default(5 * 60 * 1_000),
   DROP_SESSION_TTL_MS: z.coerce.number().int().min(60_000).max(24 * 60 * 60 * 1_000).default(30 * 60 * 1_000),
   DROP_MAX_FILES: z.coerce.number().int().min(1).max(10_000).default(1_000),
   DROP_MAX_BYTES: z.coerce.number().int().min(1).max(Number.MAX_SAFE_INTEGER).default(100 * 1024 * 1024 * 1024),
@@ -103,13 +110,11 @@ const environmentSchema = z.object({
   DROP_FAILURE_LIMIT: z.coerce.number().int().min(1).max(100).default(5),
   DROP_GLOBAL_FAILURE_LIMIT: z.coerce.number().int().min(1).max(10_000).default(100),
   DROP_FAILURE_WINDOW_MS: z.coerce.number().int().min(60_000).max(24 * 60 * 60 * 1_000).default(15 * 60 * 1_000),
-  TELEGRAM_ENABLED: booleanText.default(false),
-  TELEGRAM_BOT_TOKEN_FILE: z.string().default(""),
-  TELEGRAM_WEBHOOK_SECRET_FILE: z.string().default(""),
-  TELEGRAM_API_BASE_URL: z.url().default("https://api.telegram.org/"),
-  TELEGRAM_PROVIDER_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(60_000).default(10_000),
-  TELEGRAM_WEBHOOK_MAX_BYTES: z.coerce.number().int().min(4_096).max(1024 * 1024).default(64 * 1024),
-  TELEGRAM_WEBHOOK_MAX_CONNECTIONS: z.coerce.number().int().min(1).max(100).default(8),
+  GRYPHON_ENABLED: booleanText.default(false),
+  GRYPHON_SERVICE_TOKEN_FILE: z.string().default(""),
+  GRYPHON_SOCKET_PATH: z.string().min(1).default("/run/gryphon/client.sock"),
+  GRYPHON_ADAPTER_URL: z.url().default("http://saturn:3000/internal/gryphon/command"),
+  GRYPHON_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(60_000).default(10_000),
   SHARE_PEPPER_FILE: z.string().min(1),
   SHARE_ENABLED: booleanText.default(true),
   SHARE_DEFAULT_EXPIRY_MS: z.coerce.number().int().min(60_000).max(365 * 24 * 60 * 60 * 1_000).default(7 * 24 * 60 * 60 * 1_000),
@@ -196,6 +201,9 @@ const environmentSchema = z.object({
       message: "Recovery member limit cannot exceed the total extracted limit",
     });
   }
+  if (value.ARCHIVE_MAX_MEMBER_BYTES > value.ARCHIVE_MAX_EXTRACTED_BYTES) {
+    context.addIssue({ code: "custom", path: ["ARCHIVE_MAX_MEMBER_BYTES"], message: "Archive member limit cannot exceed the total extracted limit" });
+  }
   if (value.AUTH_SESSION_IDLE_TTL_MS >= value.AUTH_SESSION_ABSOLUTE_TTL_MS) {
     context.addIssue({
       code: "custom",
@@ -223,12 +231,8 @@ const environmentSchema = z.object({
   if (value.DROP_MAX_BYTES > value.DROP_BUFFER_MAX_BYTES) {
     context.addIssue({ code: "custom", path: ["DROP_MAX_BYTES"], message: "One Drop channel cannot reserve more than the local buffer budget" });
   }
-  if (value.TELEGRAM_ENABLED && (!value.TELEGRAM_BOT_TOKEN_FILE || !value.TELEGRAM_WEBHOOK_SECRET_FILE)) {
-    context.addIssue({
-      code: "custom",
-      path: ["TELEGRAM_ENABLED"],
-      message: "Enabled Telegram delivery requires bot-token and webhook-secret files",
-    });
+  if (value.GRYPHON_ENABLED && !value.GRYPHON_SERVICE_TOKEN_FILE) {
+    context.addIssue({ code: "custom", path: ["GRYPHON_ENABLED"], message: "Enabled Gryphon integration requires a service-token file" });
   }
   if (value.SHARE_DEFAULT_EXPIRY_MS > value.SHARE_MAX_EXPIRY_MS) {
     context.addIssue({ code: "custom", path: ["SHARE_DEFAULT_EXPIRY_MS"], message: "Default share expiry cannot exceed its maximum" });
@@ -273,17 +277,11 @@ const environmentSchema = z.object({
       ["LABORATORY_PEPPER_FILE", value.LABORATORY_PEPPER_FILE],
       ["STORAGE_HOST_FINGERPRINT", value.STORAGE_HOST_FINGERPRINT],
       ["STORAGE_PRIVATE_KEY_FILE", value.STORAGE_PRIVATE_KEY_FILE],
-      ...(value.TELEGRAM_ENABLED ? [
-        ["TELEGRAM_BOT_TOKEN_FILE", value.TELEGRAM_BOT_TOKEN_FILE],
-        ["TELEGRAM_WEBHOOK_SECRET_FILE", value.TELEGRAM_WEBHOOK_SECRET_FILE],
-      ] as const : []),
+      ...(value.GRYPHON_ENABLED ? [["GRYPHON_SERVICE_TOKEN_FILE", value.GRYPHON_SERVICE_TOKEN_FILE]] as const : []),
     ] as const) {
       if (placeholder.test(candidate)) {
         context.addIssue({ code: "custom", path: [field], message: "Production value contains a placeholder" });
       }
-    }
-    if (value.TELEGRAM_ENABLED && new URL(value.TELEGRAM_API_BASE_URL).protocol !== "https:") {
-      context.addIssue({ code: "custom", path: ["TELEGRAM_API_BASE_URL"], message: "Production Telegram API must use HTTPS" });
     }
     if (value.KERNEL_URL !== "" && new URL(value.KERNEL_URL).protocol !== "https:") {
       context.addIssue({ code: "custom", path: ["KERNEL_URL"], message: "Production Kernel URL must use HTTPS" });
@@ -321,7 +319,6 @@ export interface SaturnConfig {
   readonly drop: {
     readonly pepperFile: string;
     readonly codeTtlMs: number;
-    readonly linkCodeTtlMs: number;
     readonly sessionTtlMs: number;
     readonly maxFiles: number;
     readonly maxBytes: number;
@@ -338,14 +335,12 @@ export interface SaturnConfig {
     readonly globalFailureLimit: number;
     readonly failureWindowMs: number;
   };
-  readonly telegram: {
+  readonly gryphon: {
     readonly enabled: boolean;
-    readonly botTokenFile?: string;
-    readonly webhookSecretFile?: string;
-    readonly apiBaseUrl: string;
-    readonly providerTimeoutMs: number;
-    readonly webhookMaxBytes: number;
-    readonly webhookMaxConnections: number;
+    readonly serviceTokenFile?: string;
+    readonly socketPath: string;
+    readonly adapterUrl: string;
+    readonly timeoutMs: number;
   };
   readonly share: {
     readonly enabled: boolean;
@@ -428,6 +423,19 @@ export interface SaturnConfig {
       readonly maxManifestBytes: number;
     };
   };
+  readonly archive: {
+    readonly spoolDirectory: string;
+    readonly sevenZipExecutable: string;
+    readonly limits: {
+      readonly maxArchiveBytes: number;
+      readonly maxMemberBytes: number;
+      readonly maxExtractedBytes: number;
+      readonly maxEntries: number;
+      readonly maxCompressionRatio: number;
+      readonly uploadChunkBytes: number;
+      readonly leaseMs: number;
+    };
+  };
   readonly logLevel: "fatal" | "error" | "warn" | "info" | "debug" | "trace" | "silent";
 }
 
@@ -459,8 +467,7 @@ export function loadEnvironment(
   const passwordFile = optionalResolved(value.STORAGE_PASSWORD_FILE, baseDirectory);
   const privateKeyFile = optionalResolved(value.STORAGE_PRIVATE_KEY_FILE, baseDirectory);
   const databasePasswordFile = optionalResolved(value.DATABASE_PASSWORD_FILE, baseDirectory);
-  const telegramBotTokenFile = optionalResolved(value.TELEGRAM_BOT_TOKEN_FILE, baseDirectory);
-  const telegramWebhookSecretFile = optionalResolved(value.TELEGRAM_WEBHOOK_SECRET_FILE, baseDirectory);
+  const gryphonServiceTokenFile = optionalResolved(value.GRYPHON_SERVICE_TOKEN_FILE, baseDirectory);
   const kernelTokenFile = optionalResolved(value.KERNEL_TOKEN_FILE, baseDirectory);
   return {
     environment: value.NODE_ENV,
@@ -492,7 +499,6 @@ export function loadEnvironment(
     drop: {
       pepperFile: path.resolve(baseDirectory, value.DROP_PEPPER_FILE),
       codeTtlMs: value.DROP_CODE_TTL_MS,
-      linkCodeTtlMs: value.DROP_LINK_CODE_TTL_MS,
       sessionTtlMs: value.DROP_SESSION_TTL_MS,
       maxFiles: value.DROP_MAX_FILES,
       maxBytes: value.DROP_MAX_BYTES,
@@ -509,14 +515,12 @@ export function loadEnvironment(
       globalFailureLimit: value.DROP_GLOBAL_FAILURE_LIMIT,
       failureWindowMs: value.DROP_FAILURE_WINDOW_MS,
     },
-    telegram: {
-      enabled: value.TELEGRAM_ENABLED,
-      ...(telegramBotTokenFile === undefined ? {} : { botTokenFile: telegramBotTokenFile }),
-      ...(telegramWebhookSecretFile === undefined ? {} : { webhookSecretFile: telegramWebhookSecretFile }),
-      apiBaseUrl: value.TELEGRAM_API_BASE_URL,
-      providerTimeoutMs: value.TELEGRAM_PROVIDER_TIMEOUT_MS,
-      webhookMaxBytes: value.TELEGRAM_WEBHOOK_MAX_BYTES,
-      webhookMaxConnections: value.TELEGRAM_WEBHOOK_MAX_CONNECTIONS,
+    gryphon: {
+      enabled: value.GRYPHON_ENABLED,
+      ...(gryphonServiceTokenFile === undefined ? {} : { serviceTokenFile: gryphonServiceTokenFile }),
+      socketPath: path.resolve(value.GRYPHON_SOCKET_PATH),
+      adapterUrl: value.GRYPHON_ADAPTER_URL,
+      timeoutMs: value.GRYPHON_TIMEOUT_MS,
     },
     share: {
       enabled: value.SHARE_ENABLED,
@@ -597,6 +601,19 @@ export function loadEnvironment(
         maxManifestBytes: value.RECOVERY_MAX_MANIFEST_BYTES,
       },
     },
+    archive: {
+      spoolDirectory: path.resolve(baseDirectory, value.ARCHIVE_SPOOL_DIR),
+      sevenZipExecutable: value.ARCHIVE_7Z_BIN,
+      limits: {
+        maxArchiveBytes: value.ARCHIVE_MAX_ARCHIVE_BYTES,
+        maxMemberBytes: value.ARCHIVE_MAX_MEMBER_BYTES,
+        maxExtractedBytes: value.ARCHIVE_MAX_EXTRACTED_BYTES,
+        maxEntries: value.ARCHIVE_MAX_ENTRIES,
+        maxCompressionRatio: value.ARCHIVE_MAX_COMPRESSION_RATIO,
+        uploadChunkBytes: value.UPLOAD_CHUNK_MAX_BYTES,
+        leaseMs: value.ARCHIVE_JOB_LEASE_MS,
+      },
+    },
     readinessRequireStorage: value.READINESS_REQUIRE_STORAGE,
     readinessTimeoutMs: value.READINESS_TIMEOUT_MS,
     logLevel: value.LOG_LEVEL,
@@ -617,7 +634,6 @@ export function publicConfig(config: SaturnConfig): Record<string, unknown> {
     },
     drop: {
       codeTtlMs: config.drop.codeTtlMs,
-      linkCodeTtlMs: config.drop.linkCodeTtlMs,
       sessionTtlMs: config.drop.sessionTtlMs,
       maxFiles: config.drop.maxFiles,
       maxBytes: config.drop.maxBytes,
@@ -633,12 +649,7 @@ export function publicConfig(config: SaturnConfig): Record<string, unknown> {
       globalFailureLimit: config.drop.globalFailureLimit,
       failureWindowMs: config.drop.failureWindowMs,
     },
-    telegram: {
-      enabled: config.telegram.enabled,
-      providerTimeoutMs: config.telegram.providerTimeoutMs,
-      webhookMaxBytes: config.telegram.webhookMaxBytes,
-      webhookMaxConnections: config.telegram.webhookMaxConnections,
-    },
+    gryphon: { enabled: config.gryphon.enabled, timeoutMs: config.gryphon.timeoutMs },
     share: {
       enabled: config.share.enabled,
       defaultExpiryMs: config.share.defaultExpiryMs,
@@ -693,6 +704,7 @@ export function publicConfig(config: SaturnConfig): Record<string, unknown> {
       backupIntervalMs: config.recovery.backupIntervalMs,
       limits: config.recovery.limits,
     },
+    archive: { limits: config.archive.limits },
     readinessRequireStorage: config.readinessRequireStorage,
     readinessTimeoutMs: config.readinessTimeoutMs,
     logLevel: config.logLevel,

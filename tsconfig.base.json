@@ -24,6 +24,7 @@
     "baseUrl": ".",
     "paths": {
       "@saturn/audit": ["packages/audit/src/index.ts"],
+      "@saturn/archive": ["packages/archive/src/index.ts"],
       "@saturn/auth": ["packages/auth/src/index.ts"],
       "@saturn/backup-ingest": ["packages/backup-ingest/src/index.ts"],
       "@saturn/config": ["packages/config/src/index.ts"],

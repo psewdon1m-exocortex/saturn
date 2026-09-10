@@ -24,6 +24,7 @@ export interface LaboratoryAsset {
   readonly resourceId: string;
   readonly mode: LaboratoryAssetMode;
   readonly pinnedVersionId?: string;
+  readonly sourceShareId?: string;
   readonly publicFilename: string;
   readonly label: string;
   readonly disposition: "inline" | "attachment";
@@ -40,6 +41,7 @@ export interface LaboratoryRepository {
   revokeClient(id: string, now: Date): Promise<LaboratoryClient>;
   authenticateClient(tokenHash: string, now: Date): Promise<{ readonly client: LaboratoryClient; readonly usedPreviousToken: boolean } | undefined>;
   createAsset(value: LaboratoryAsset): Promise<LaboratoryAsset>;
+  findActiveSharedAsset(resourceId: string, versionId: string, sourceShareId: string): Promise<LaboratoryAsset | undefined>;
   getAsset(id: string): Promise<LaboratoryAsset | undefined>;
   listAssets(offset: number, limit: number): Promise<readonly LaboratoryAsset[]>;
   updateAsset(id: string, input: { readonly mode?: LaboratoryAssetMode; readonly pinnedVersionId?: string | null; readonly label?: string; readonly disposition?: "inline" | "attachment" }, now: Date): Promise<LaboratoryAsset>;

@@ -38,9 +38,12 @@ export interface FileVersion {
 export interface OwnerPreferences {
   readonly accentColor: string;
   readonly sidebarMode: "fixed" | "auto-hide";
-  readonly navigationOrder: readonly ("dashboard" | "files" | "inbox" | "shared" | "trash" | "settings")[];
+  readonly navigationOrder: readonly ("dashboard" | "files" | "inbox" | "shared" | "synchronization" | "trash" | "settings")[];
   readonly dashboardOrder: readonly ("cpu" | "ram" | "disk" | "uptime" | "storage" | "drop" | "reachability" | "tasks")[];
-  readonly settingsOrder: readonly ("appearance" | "security" | "telegram" | "backup" | "updates" | "logs")[];
+  readonly settingsOrder: readonly ("appearance" | "security" | "backup" | "gryphon" | "updates" | "logs")[];
+  readonly trashRetentionDays: number;
+  readonly uploadBufferGiB: number;
+  readonly maximumUploadFileGiB: number;
   readonly updatedAt: string;
 }
 
@@ -50,6 +53,7 @@ export interface DropSessionInfo {
   readonly expiresAt: string;
   readonly maxFiles: number;
   readonly maxBytes: number;
+  readonly maxFileBytes?: number;
   readonly reservedFiles?: number;
   readonly reservedBytes?: number;
   readonly buffer?: { readonly state: "available" | "warning" | "critical" | "refusing"; readonly reservedBytes: number; readonly maxBytes: number; readonly freeBytes: number; readonly ratio: number };
@@ -64,11 +68,6 @@ export interface DropUploadStatus {
   readonly completed: boolean;
   readonly filename?: string;
   readonly failureCode?: string;
-}
-
-export interface TelegramStatus {
-  readonly provider: { readonly state: "disabled" | "starting" | "ready" | "degraded"; readonly bot?: { readonly id: string; readonly username?: string } };
-  readonly binding?: { readonly userId: string; readonly chatId: string; readonly displayName?: string; readonly boundAt: string; readonly updatedAt: string };
 }
 
 export interface ShareInfo {
@@ -95,6 +94,7 @@ export interface ShareChild {
   readonly name: string;
   readonly sizeBytes: number;
   readonly mimeType?: string;
+  readonly sha256?: string;
   readonly updatedAt: string;
 }
 
@@ -113,6 +113,10 @@ export interface DeviceInfo {
 export interface BackupServiceInfo {
   readonly id: string;
   readonly slug: string;
+  readonly namespaceSlug: string;
+  readonly deploymentId: string;
+  readonly mirrorRoot?: "volt" | "mastermind";
+  readonly mirrorDeviceId?: string;
   readonly name: string;
   readonly state: "active" | "revoked";
   readonly requireEncryption: boolean;
@@ -140,6 +144,7 @@ export interface OperatorOverview {
     readonly state: "available";
     readonly indexedBytes: number;
     readonly fileCount: number;
+    readonly directoryCount: number;
     readonly capacity: { readonly state: "available"; readonly totalBytes: number; readonly availableBytes: number; readonly usedBytes: number } | { readonly state: "unavailable"; readonly reason: string };
   } | { readonly state: "unavailable"; readonly reason?: string };
   readonly transfers: {
@@ -153,20 +158,43 @@ export interface OperatorOverview {
 
 export interface TransferTaskInfo {
   readonly id: string;
-  readonly direction: "upload" | "download";
+  readonly direction: "upload" | "download" | "archive";
   readonly filename: string;
-  readonly state: "queued" | "uploading" | "verifying" | "committing" | "waiting_retry" | "downloading" | "completed" | "failed";
+  readonly state: "queued" | "uploading" | "scanning" | "compressing" | "extracting" | "verifying" | "committing" | "waiting_retry" | "downloading" | "paused" | "cancelled" | "completed" | "failed";
   readonly transferredBytes: number;
   readonly totalBytes: number;
   readonly percent: number;
   readonly bytesPerSecond?: number;
   readonly queuePosition?: number;
+  readonly canPause: boolean;
+  readonly canResume: boolean;
+  readonly canCancel: boolean;
   readonly updatedAt: string;
+}
+
+export interface ArchiveJobInfo {
+  readonly id: string;
+  readonly kind: "compress_zip" | "extract";
+  readonly format: "zip" | "rar";
+  readonly state: "queued" | "scanning" | "compressing" | "extracting" | "verifying" | "committing" | "paused" | "completed" | "failed" | "cancelled";
+  readonly requestedState: "running" | "paused" | "cancelled";
+  readonly destinationParentId: string;
+  readonly sourceResourceId?: string;
+  readonly sourceResourceIds: readonly string[];
+  readonly outputName: string;
+  readonly totalBytes: number;
+  readonly processedBytes: number;
+  readonly currentItem?: string;
+  readonly resultResourceId?: string;
+  readonly failureCode?: string;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+  readonly completedAt?: string;
 }
 
 export interface UpdateStatus {
   readonly installedVersion: string;
-  readonly updater: { readonly state: "ready" | "unavailable" | "busy"; readonly reason?: string };
+  readonly updater: { readonly state: "ready" | "unavailable" | "busy"; readonly version?: string; readonly reason?: string };
   readonly registry: { readonly state: "ready" | "unavailable"; readonly reason?: string };
   readonly discoveryEnabled: boolean;
 }
@@ -178,6 +206,98 @@ export interface RecoveryStatus {
   readonly maxArchiveBytes: number;
   readonly maxChunkBytes: number;
   readonly reason?: string;
+}
+
+export interface NeptuneStatus {
+  readonly product: "neptune-linux";
+  readonly version: string;
+  readonly client_instance_id: string;
+  readonly active: boolean;
+  readonly last_success_at?: string;
+  readonly latest_error?: string;
+  readonly latest_run_state?: string;
+  readonly project: {
+    readonly enabled: boolean;
+    readonly interval_hours: number;
+    readonly next_run_at?: string;
+    readonly mirror?: {
+      readonly enabled: boolean;
+      readonly interval_minutes: number;
+      readonly next_run_at?: string;
+      readonly root: "volt" | "mastermind";
+      readonly mode: "single-file" | "zip-tree";
+    } | null;
+  };
+  readonly mirror_active?: boolean;
+  readonly mirror?: {
+    readonly state: string;
+    readonly lastAttemptAt?: string;
+    readonly lastSuccessAt?: string;
+    readonly uploadedFiles?: number;
+    readonly deletedEntries?: number;
+    readonly error?: string;
+  };
+}
+
+export interface NeptuneAvailability {
+  readonly installed: boolean;
+  readonly linked: boolean;
+  readonly state: "linked" | "unlinked" | "unavailable";
+  readonly version?: string | null;
+}
+
+export interface GryphonChallenge {
+  readonly code: string;
+  readonly expiresAt: string;
+  readonly command: string;
+  readonly botUsername?: string;
+}
+
+export interface NeptuneReleaseCheck {
+  readonly installed_version: string;
+  readonly available_version?: string;
+  readonly update_available: boolean;
+}
+
+export interface NeptuneAgentInfo {
+  readonly serviceId: string;
+  readonly desired: {
+    readonly revision: number;
+    readonly archiveEnabled: boolean;
+    readonly archiveIntervalHours: number;
+    readonly mirrorEnabled: boolean;
+    readonly mirrorIntervalMinutes: number;
+    readonly version?: string;
+  };
+  readonly observed: {
+    readonly clientInstanceId?: string;
+    readonly projectId?: string;
+    readonly version?: string;
+    readonly appliedRevision: number;
+    readonly archive: Record<string, unknown>;
+    readonly mirror: Record<string, unknown>;
+    readonly latestError?: string;
+    readonly lastSeenAt?: string;
+  };
+  readonly updatedAt: string;
+}
+
+export interface GryphonStatus {
+  readonly version: string;
+  readonly serviceId: "saturn";
+  readonly state: string;
+  readonly connected: boolean;
+  readonly commandPrefix: string | null;
+  readonly bot: { readonly id: string; readonly alias: string; readonly username?: string; readonly state: string } | null;
+  readonly binding: { readonly linkedAt: string } | null;
+}
+
+export interface GryphonBot {
+  readonly id: string;
+  readonly alias: string;
+  readonly username?: string;
+  readonly state: string;
+  readonly selected: boolean;
 }
 
 export interface RecoveryRestoreCandidate {

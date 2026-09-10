@@ -29,7 +29,7 @@ Evidence SHA-256: `0b3bf1a2fbf81de96780aa7995bb404b1357d33e9089bc9a35b9f9164faf4
 | Concurrency | Upload and resource-tree mutations acquire database-backed expiring locks; upload offset updates use compare-and-set |
 | Recovery hooks | Every multi-system mutation is journaled; failed database commits attempt a storage rollback and otherwise remain marked for reconciliation |
 | HTTP API | Owner-bearer-protected endpoints for resources, folders, resumable uploads, downloads, Range, move, copy and soft-delete |
-| Runtime limits | Upload maximum 20 GiB, incomplete TTL 24 h, trash retention 90 d, SFTP pool 8 and operation timeout 60 s are validated configuration values |
+| Runtime limits | Upload maximum defaults to 20 GiB and is owner-configurable from 1–4096 GiB; it must remain at or below 90% of the configured 1–8192 GiB local upload-buffer capacity. Changes are database-backed and apply to owner and Drop uploads without restart. Incomplete TTL is 24 h, trash retention defaults to 30 d and is owner-configurable from 1–365 d for newly trashed resources, automatic purge is enabled by default, and SFTP pool 8 plus operation timeout 60 s remain validated configuration values |
 
 ## HTTP contract
 

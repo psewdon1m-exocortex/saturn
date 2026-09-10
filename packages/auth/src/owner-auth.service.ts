@@ -253,6 +253,14 @@ export class OwnerAuthService {
 
   updatePreferences(input: Omit<OwnerPreferences, "updatedAt">): Promise<OwnerPreferences> {
     if (!/^#[0-9a-fA-F]{6}$/.test(input.accentColor)) throw new Error("Appearance color is invalid");
+    if (!Number.isSafeInteger(input.trashRetentionDays) || input.trashRetentionDays < 1 || input.trashRetentionDays > 365) {
+      throw new Error("Trash retention is invalid");
+    }
+    if (!Number.isSafeInteger(input.uploadBufferGiB) || input.uploadBufferGiB < 1 || input.uploadBufferGiB > 8_192
+      || !Number.isSafeInteger(input.maximumUploadFileGiB) || input.maximumUploadFileGiB < 1 || input.maximumUploadFileGiB > 4_096
+      || input.maximumUploadFileGiB * 10 > input.uploadBufferGiB * 9) {
+      throw new Error("Upload limits are invalid");
+    }
     return this.#repository.updatePreferences(input);
   }
 

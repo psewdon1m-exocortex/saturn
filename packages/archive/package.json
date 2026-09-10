@@ -1,0 +1,32 @@
+{
+  "name": "@saturn/archive",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsup src/index.ts --format esm --dts --clean",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@saturn/audit": "workspace:*",
+    "@saturn/database": "workspace:*",
+    "@saturn/file-core": "workspace:*",
+    "archiver": "7.0.1",
+    "uuid": "14.0.2",
+    "yauzl": "3.4.0"
+  },
+  "devDependencies": {
+    "@types/archiver": "6.0.3",
+    "@types/yauzl": "3.4.0",
+    "tsup": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}

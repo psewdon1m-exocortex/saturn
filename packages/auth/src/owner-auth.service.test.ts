@@ -9,9 +9,12 @@ class MemoryRepository implements OwnerAuthRepository {
   preferences: OwnerPreferences = {
     accentColor: "#00a8ff",
     sidebarMode: "fixed",
-    navigationOrder: ["dashboard", "files", "inbox", "shared", "trash", "settings"],
+    navigationOrder: ["dashboard", "files", "inbox", "shared", "synchronization", "trash", "settings"],
     dashboardOrder: ["cpu", "ram", "disk", "uptime", "storage", "drop", "reachability", "tasks"],
-    settingsOrder: ["appearance", "security", "telegram", "backup", "updates", "logs"],
+    settingsOrder: ["appearance", "security", "backup", "gryphon", "updates", "logs"],
+    trashRetentionDays: 30,
+    uploadBufferGiB: 110,
+    maximumUploadFileGiB: 20,
     updatedAt: new Date(0),
   };
 
@@ -177,7 +180,7 @@ describe("OwnerAuthService", () => {
   });
 
   it("requires recent proof and supports revoke-all plus validated appearance", async () => {
-    const { service } = fixture();
+    const { repository, service } = fixture();
     const now = new Date("2026-08-26T00:00:00.000Z");
     const created = await service.authenticate("owner-access-key-that-is-at-least-32-characters-long", "127.0.0.1", "browser", now);
     await expect(service.validateSession({
@@ -190,24 +193,38 @@ describe("OwnerAuthService", () => {
     await expect(service.updatePreferences({
       accentColor: "#22bbff",
       sidebarMode: "auto-hide",
-      navigationOrder: ["dashboard", "inbox", "files", "shared", "trash", "settings"],
+      navigationOrder: ["dashboard", "inbox", "files", "shared", "synchronization", "trash", "settings"],
       dashboardOrder: ["ram", "cpu", "disk", "uptime", "storage", "drop", "reachability", "tasks"],
-      settingsOrder: ["security", "appearance", "telegram", "backup", "updates", "logs"],
-    })).resolves.toMatchObject({ accentColor: "#22bbff", sidebarMode: "auto-hide" });
+      settingsOrder: ["security", "appearance", "backup", "gryphon", "updates", "logs"],
+      trashRetentionDays: 45,
+      uploadBufferGiB: 220,
+      maximumUploadFileGiB: 40,
+    })).resolves.toMatchObject({ accentColor: "#22bbff", sidebarMode: "auto-hide", trashRetentionDays: 45 });
     await expect(service.updatePreferences({
       accentColor: "#111111",
       sidebarMode: "fixed",
-      navigationOrder: ["dashboard", "files", "inbox", "shared", "trash", "settings"],
+      navigationOrder: ["dashboard", "files", "inbox", "shared", "synchronization", "trash", "settings"],
       dashboardOrder: ["cpu", "ram", "disk", "uptime", "storage", "drop", "reachability", "tasks"],
-      settingsOrder: ["appearance", "security", "telegram", "backup", "updates", "logs"],
+      settingsOrder: ["appearance", "security", "backup", "gryphon", "updates", "logs"],
+      trashRetentionDays: 30,
+      uploadBufferGiB: 110,
+      maximumUploadFileGiB: 20,
     })).resolves.toMatchObject({ accentColor: "#111111" });
     expect(() => service.updatePreferences({
       accentColor: "#11111",
       sidebarMode: "fixed",
-      navigationOrder: ["dashboard", "files", "inbox", "shared", "trash", "settings"],
+      navigationOrder: ["dashboard", "files", "inbox", "shared", "synchronization", "trash", "settings"],
       dashboardOrder: ["cpu", "ram", "disk", "uptime", "storage", "drop", "reachability", "tasks"],
-      settingsOrder: ["appearance", "security", "telegram", "backup", "updates", "logs"],
+      settingsOrder: ["appearance", "security", "backup", "gryphon", "updates", "logs"],
+      trashRetentionDays: 30,
+      uploadBufferGiB: 110,
+      maximumUploadFileGiB: 20,
     })).toThrow(/invalid/);
+    expect(() => service.updatePreferences({
+      ...repository.preferences,
+      uploadBufferGiB: 10,
+      maximumUploadFileGiB: 10,
+    })).toThrow(/Upload limits/);
     expect(await service.revokeAll()).toBe(1);
   });
 

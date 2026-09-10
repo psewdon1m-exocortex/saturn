@@ -6,11 +6,6 @@ export interface TelegramIdentity {
   readonly displayName?: string;
 }
 
-export interface TelegramBinding extends TelegramIdentity {
-  readonly boundAt: Date;
-  readonly updatedAt: Date;
-}
-
 export interface DropSession {
   readonly id: string;
   readonly channelId: string;
@@ -60,7 +55,6 @@ export interface DropUpload {
 export interface DropOptions {
   readonly publicOrigin: string;
   readonly codeTtlMs: number;
-  readonly linkCodeTtlMs: number;
   readonly sessionTtlMs: number;
   readonly maxFiles: number;
   readonly maxBytes: number;
@@ -109,10 +103,6 @@ export interface DropCompletion {
 }
 
 export interface DropRepository {
-  createLinkChallenge(input: { readonly id: string; readonly codeHash: string; readonly createdAt: Date; readonly expiresAt: Date }): Promise<void>;
-  consumeLinkChallenge(codeHash: string, identity: TelegramIdentity, now: Date): Promise<TelegramBinding | undefined>;
-  getBinding(): Promise<TelegramBinding | undefined>;
-  unlink(now: Date): Promise<{ readonly sessions: number; readonly challenges: number }>;
   createDropChallenge(input: { readonly id: string; readonly codeHash: string; readonly identity?: TelegramIdentity; readonly createdAt: Date; readonly expiresAt: Date; readonly maxFiles: number; readonly maxBytes: number }): Promise<boolean>;
   redeemDropChallenge(input: { readonly codeHash: string; readonly tokenHash: string; readonly csrfHash: string; readonly userAgentHash: string; readonly sessionId: string; readonly now: Date; readonly expiresAt: Date; readonly maxFiles: number; readonly maxBytes: number }): Promise<DropSession | undefined>;
   beginDropAttempt(input: { readonly sourceIpHash: string; readonly since: Date; readonly sourceLimit: number; readonly globalLimit: number; readonly occurredAt: Date }): Promise<string | undefined>;
@@ -136,17 +126,15 @@ export interface DropRepository {
   markUploadVerifying?(id: string, uploadId: string, now: Date): Promise<DropUpload>;
   markUploadStored?(id: string, resourceId: string, sha256: string, now: Date): Promise<DropUpload>;
   markUploadFailed?(id: string, failureCode: string, now: Date): Promise<DropUpload>;
-  claimTelegramUpdate(updateId: string, telegramUserId: string | undefined, now: Date): Promise<"claimed" | "retry" | "duplicate" | "busy">;
-  completeTelegramUpdate(updateId: string, now: Date): Promise<void>;
-  failTelegramUpdate(updateId: string, failureCode: string, now: Date): Promise<void>;
 }
 
 export interface DropNotificationSink {
   securityAlert(): Promise<void>;
-  uploadCompleted(identity: TelegramIdentity, filename: string, sizeBytes: number): Promise<void>;
+  uploadCompleted(identity: TelegramIdentity, uploadId: string, filename: string, sizeBytes: number): Promise<void>;
 }
 
 export interface DropFileGateway {
+  getUploadLimits(): Promise<{ readonly bufferMaxBytes: number; readonly maximumFileBytes: number }>;
   listChildren(parentId: string, offset?: number, limit?: number): Promise<readonly { readonly id: string; readonly type: "file" | "folder"; readonly name: string }[]>;
   createFolder(parentId: string, name: string, auditActor?: { readonly type: string; readonly id: string }): Promise<{ readonly id: string; readonly type: "file" | "folder"; readonly name: string }>;
   createUpload(input: {
@@ -160,20 +148,4 @@ export interface DropFileGateway {
   getUpload(id: string): Promise<{ readonly receivedSize: number; readonly expectedSize: number; readonly expiresAt: Date; readonly status: string }>;
   appendUpload(id: string, offset: number, contentLength: number, source: Readable): Promise<{ readonly receivedSize: number }>;
   completeUpload(id: string): Promise<{ readonly resource: { readonly id: string; readonly name: string; readonly sizeBytes: number; readonly sha256?: string }; readonly upload: { readonly receivedSize: number; readonly expectedSize: number; readonly expiresAt: Date; readonly status: string } }>;
-}
-
-export interface TelegramProvider {
-  getMe(): Promise<{ readonly id: string; readonly isBot: boolean; readonly username?: string }>;
-  setWebhook(input: { readonly url: string; readonly secretToken: string; readonly maxConnections: number }): Promise<void>;
-  sendMessage(chatId: string, text: string): Promise<void>;
-}
-
-export interface TelegramUpdate {
-  readonly updateId: string;
-  readonly message?: {
-    readonly chatId: string;
-    readonly chatType: string;
-    readonly from?: { readonly userId: string; readonly isBot: boolean; readonly displayName?: string };
-    readonly text?: string;
-  };
 }

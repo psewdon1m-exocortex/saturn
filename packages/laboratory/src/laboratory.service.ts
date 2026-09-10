@@ -130,9 +130,36 @@ export class LaboratoryService {
   }
   async listAssets(offset = 0, limit = 100): Promise<readonly LaboratoryAsset[]> { this.#enabled(); page(offset, limit); return this.input.repository.listAssets(offset, limit); }
   async getAsset(id: string): Promise<LaboratoryAsset> { this.#enabled(); return this.#requiredAsset(id); }
+  async createSharedImmutableAsset(input: { readonly authorization?: string; readonly resourceId: string; readonly sourceShareId: string; readonly expectedSha256: string; readonly label?: string; readonly disposition?: "inline" | "attachment" }, now = new Date()) {
+    this.#enabled();
+    if (!this.input.options.publicEnabled || !/^[a-f0-9]{64}$/.test(input.expectedSha256)) throw new LaboratoryServiceError("unauthorized");
+    const context = await this.#authenticate(input.authorization, now);
+    const resource = await this.#resource(input.resourceId);
+    const version = await this.#currentVersion(resource);
+    if (version.sha256 !== input.expectedSha256) throw new LaboratoryServiceError("conflict");
+    const existing = await this.input.repository.findActiveSharedAsset(resource.id, version.id, input.sourceShareId);
+    if (existing !== undefined) return this.#sharedAssetResult(existing, version);
+    const value: LaboratoryAsset = {
+      id: uuidv7(), resourceId: resource.id, mode: "public_immutable", pinnedVersionId: version.id, sourceShareId: input.sourceShareId,
+      publicFilename: filename(resource.name), label: label(input.label ?? resource.name),
+      disposition: input.disposition ?? (resource.mimeType?.startsWith("image/") || resource.mimeType?.startsWith("video/") || resource.mimeType?.startsWith("audio/") ? "inline" : "attachment"),
+      state: "active", createdAt: now, updatedAt: now,
+    };
+    let created: LaboratoryAsset;
+    try { created = await this.input.repository.createAsset(value); }
+    catch (error) {
+      const raced = await this.input.repository.findActiveSharedAsset(resource.id, version.id, input.sourceShareId);
+      if (raced !== undefined) return this.#sharedAssetResult(raced, version);
+      if (error instanceof Error && /constraint|classification|active file|pinned version|source share/i.test(error.message)) throw new LaboratoryServiceError("invalid");
+      throw error;
+    }
+    await this.#audit("laboratory.asset.shared_imported", created.id, { resourceId: resource.id, versionId: version.id, sourceShareId: input.sourceShareId }, context.client.id, "laboratory_client");
+    return this.#sharedAssetResult(created, version);
+  }
   async updateAsset(id: string, input: { readonly mode?: LaboratoryAssetMode; readonly label?: string; readonly disposition?: "inline" | "attachment" }, now = new Date()): Promise<LaboratoryAsset> {
     this.#enabled(); const current = await this.#requiredAsset(id); if (current.state !== "active") throw new LaboratoryServiceError("conflict");
-    const resource = await this.#resource(current.resourceId); const mode = input.mode ?? current.mode; this.#modeAllowed(mode, resource);
+    if (current.sourceShareId !== undefined && input.mode !== undefined && input.mode !== "public_immutable") throw new LaboratoryServiceError("conflict");
+    const resource = await this.#resource(current.resourceId); const mode = input.mode ?? current.mode; this.#modeAllowed(mode, resource, current.sourceShareId);
     let pinnedVersionId: string | null | undefined;
     if (mode !== "public_immutable") pinnedVersionId = null;
     else if (current.mode !== "public_immutable") pinnedVersionId = (await this.#currentVersion(resource)).id;
@@ -143,7 +170,7 @@ export class LaboratoryService {
 
   async fragment(id: string): Promise<{ readonly asset: LaboratoryAsset; readonly url: string; readonly fragment: string; readonly format: "markdown_image" | "markdown_link" | "html_video" }> {
     const asset = await this.#requiredAsset(id); if (asset.state !== "active") throw new LaboratoryServiceError("not_found");
-    const resource = await this.#resource(asset.resourceId); this.#modeAllowed(asset.mode, resource);
+    const resource = await this.#resource(asset.resourceId); this.#modeAllowed(asset.mode, resource, asset.sourceShareId);
     const url = `${this.input.options.publicOrigin}/a/${encodeURIComponent(asset.id)}/${encodeURIComponent(asset.publicFilename)}`;
     if (resource.mimeType?.startsWith("image/")) return { asset, url, fragment: `![${markdownText(asset.label)}](${url})`, format: "markdown_image" };
     if (resource.mimeType?.startsWith("video/")) return { asset, url, fragment: `<video controls src="${htmlText(url)}" aria-label="${htmlText(asset.label)}"></video>`, format: "html_video" };
@@ -158,7 +185,7 @@ export class LaboratoryService {
     if (asset.mode === "private") {
       const context = await this.#authenticate(input.authorization, now);
       actor = { type: "laboratory_client", id: context.client.id };
-    } else if (!this.input.options.publicEnabled || resource.securityClassification !== "public") throw new LaboratoryServiceError("not_found");
+    } else if (!this.input.options.publicEnabled || (resource.securityClassification !== "public" && asset.sourceShareId === undefined)) throw new LaboratoryServiceError("not_found");
     const version = asset.mode === "public_immutable" ? await this.#version(resource, asset.pinnedVersionId) : await this.#currentVersion(resource);
     const etag = `"sha256-${version.sha256}"`; const selectedRange = parseRange(input.range, version.sizeBytes);
     const notModified = input.ifNoneMatch === "*" || input.ifNoneMatch?.split(",").map((value) => value.trim()).includes(etag) === true;
@@ -191,8 +218,18 @@ export class LaboratoryService {
     if (resource.type !== "file" || resource.status !== "active" || isVolt(resource)) throw new LaboratoryServiceError("invalid");
     return resource;
   }
-  #modeAllowed(mode: LaboratoryAssetMode, resource: Resource): void {
-    if (mode !== "private" && (!this.input.options.publicEnabled || resource.securityClassification !== "public")) throw new LaboratoryServiceError("unauthorized");
+  #modeAllowed(mode: LaboratoryAssetMode, resource: Resource, sourceShareId?: string): void {
+    if (mode !== "private" && (!this.input.options.publicEnabled || (resource.securityClassification !== "public" && sourceShareId === undefined))) throw new LaboratoryServiceError("unauthorized");
+  }
+  #sharedAssetResult(asset: LaboratoryAsset, version: FileVersion) {
+    return {
+      asset,
+      versionId: version.id,
+      sizeBytes: version.sizeBytes,
+      sha256: version.sha256,
+      mimeType: version.mimeType,
+      url: `${this.input.options.publicOrigin}/a/${encodeURIComponent(asset.id)}/${encodeURIComponent(asset.publicFilename)}`,
+    };
   }
   async #currentVersion(resource: Resource): Promise<FileVersion> {
     if (resource.currentVersionId === undefined) throw new LaboratoryServiceError("not_found"); return this.#version(resource, resource.currentVersionId);

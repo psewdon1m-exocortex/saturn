@@ -23,15 +23,18 @@ const accessKeyChangeSchema = z.object({
 const appearanceSchema = z.object({
   accentColor: z.string().regex(/^#[0-9a-fA-F]{6}$/),
   sidebarMode: z.enum(["fixed", "auto-hide"]),
-  navigationOrder: z.array(z.enum(["dashboard", "files", "inbox", "shared", "trash", "settings"]))
-    .length(6)
+  navigationOrder: z.array(z.enum(["dashboard", "files", "inbox", "shared", "synchronization", "trash", "settings"]))
+    .length(7)
     .refine((value) => new Set(value).size === value.length, "Navigation destinations must be unique"),
   dashboardOrder: z.array(z.enum(["cpu", "ram", "disk", "uptime", "storage", "drop", "reachability", "tasks"]))
     .length(8)
     .refine((value) => new Set(value).size === value.length, "Dashboard cards must be unique"),
-  settingsOrder: z.array(z.enum(["appearance", "security", "telegram", "backup", "updates", "logs"]))
+  settingsOrder: z.array(z.enum(["appearance", "security", "backup", "gryphon", "updates", "logs"]))
     .length(6)
     .refine((value) => new Set(value).size === value.length, "Settings cards must be unique"),
+  trashRetentionDays: z.number().int().min(1).max(365).optional(),
+  uploadBufferGiB: z.number().int().min(1).max(8_192).optional(),
+  maximumUploadFileGiB: z.number().int().min(1).max(4_096).optional(),
 }).strict();
 
 function requestCookies(request: FastifyRequest): Record<string, string> {
@@ -188,9 +191,15 @@ export class AuthController {
 
   @Put("preferences")
   @UseGuards(OwnerTokenGuard)
-  updatePreferences(@Body() body: unknown) {
+  async updatePreferences(@Body() body: unknown) {
     const parsed = appearanceSchema.safeParse(body);
     if (!parsed.success) throw new BadRequestException({ code: "invalid_preferences" });
-    return this.#auth.updatePreferences(parsed.data);
+    const current = await this.#auth.getPreferences();
+    return this.#auth.updatePreferences({
+      ...parsed.data,
+      trashRetentionDays: parsed.data.trashRetentionDays ?? current.trashRetentionDays,
+      uploadBufferGiB: parsed.data.uploadBufferGiB ?? current.uploadBufferGiB,
+      maximumUploadFileGiB: parsed.data.maximumUploadFileGiB ?? current.maximumUploadFileGiB,
+    });
   }
 }

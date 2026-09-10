@@ -33,6 +33,17 @@ describe("migration manifest", () => {
       "0022_drop_shared_channels",
       "0023_telegram_settings_section",
       "0024_runtime_storage_profiles",
+      "0025_preview_archive_jobs",
+      "0026_backup_connections_settings_section",
+      "0027_gryphon_gateway",
+      "0028_neptune_enrollment",
+      "0029_remove_legacy_telegram",
+      "0030_gryphon_settings_section",
+      "0031_synchronization_navigation",
+      "0032_trash_retention_setting",
+      "0033_upload_limits_settings",
+      "0034_laboratory_share_assets",
+      "0035_neptune_fleet_control",
     ]);
     for (const pair of pairs) {
       await expect(fs.readFile(pair.up, "utf8")).resolves.toMatch(/\S/);

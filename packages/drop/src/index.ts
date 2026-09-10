@@ -3,8 +3,8 @@ export { DropBufferStore } from "./buffer-store.js";
 export type { DropBufferCapacity, DropBufferStoreOptions } from "./buffer-store.js";
 export { DropDrainService } from "./drop-drain.service.js";
 export { PostgresDropRepository } from "./postgres-drop.repository.js";
-export { TelegramHttpProvider, TelegramProviderError } from "./telegram-provider.js";
-export { TelegramNotifier, TelegramSupervisor, TelegramWebhookService } from "./telegram.service.js";
+export { GryphonCommandService, GryphonNotificationSink } from "./gryphon.service.js";
+export type { GryphonCommandEnvelope, GryphonCommandResponse } from "./gryphon.service.js";
 export type {
   DropCompletion,
   DropFileGateway,
@@ -17,8 +17,5 @@ export type {
   DropUploadCreateInput,
   DropUploadStatus,
   NewDropSession,
-  TelegramBinding,
   TelegramIdentity,
-  TelegramProvider,
-  TelegramUpdate,
 } from "./types.js";

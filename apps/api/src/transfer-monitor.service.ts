@@ -3,7 +3,15 @@ import { Readable, Transform } from "node:stream";
 import { Injectable } from "@nestjs/common";
 
 export type TransferDirection = "upload" | "download";
-export type TransferTaskState = "queued" | "uploading" | "verifying" | "committing" | "waiting_retry" | "downloading" | "completed" | "failed";
+export type TransferTaskState = "queued" | "uploading" | "verifying" | "committing" | "waiting_retry" | "downloading" | "paused" | "cancelled" | "completed" | "failed";
+export type TransferTaskAction = "pause" | "resume" | "cancel";
+export type TransferTaskControlState = "running" | "paused" | "cancelled";
+
+export class TransferTaskControlError extends Error {
+  constructor(readonly code: "not_paused" | "cancelled" | "client_disconnected") {
+    super(code === "cancelled" ? "Transfer task was cancelled" : code === "client_disconnected" ? "Transfer client disconnected" : "Transfer task is not paused");
+  }
+}
 
 export interface UploadTaskSample {
   readonly id: string;
@@ -25,6 +33,9 @@ export interface TransferTaskSnapshot {
   readonly percent: number;
   readonly bytesPerSecond?: number;
   readonly queuePosition?: number;
+  readonly canPause: boolean;
+  readonly canResume: boolean;
+  readonly canCancel: boolean;
   readonly updatedAt: string;
 }
 
@@ -51,8 +62,17 @@ interface DownloadTask {
   lastRateBytes: number;
   lastRateAt: number;
   updatedAt: number;
-  state: "downloading" | "completed" | "failed";
+  state: "downloading" | "paused" | "cancelled" | "completed" | "failed";
+  source: Readable;
+  meter: Transform;
   terminalAt?: number;
+}
+
+interface TaskControl {
+  state: "paused" | "cancelled";
+  updatedAt: number;
+  terminalAt?: number;
+  readonly waiters: Set<{ readonly resolve: () => void; readonly reject: (error: Error) => void }>;
 }
 
 const TERMINAL_RETENTION_MS = 10_000;
@@ -72,24 +92,13 @@ function percent(transferredBytes: number, totalBytes: number): number {
 export class TransferMonitorService {
   readonly #downloads = new Map<string, DownloadTask>();
   readonly #uploadRates = new Map<string, UploadRateSample>();
+  readonly #controls = new Map<string, TaskControl>();
 
   trackDownload(source: Readable, input: { readonly filename: string; readonly totalBytes: number }): Readable {
     const now = Date.now();
-    const task: DownloadTask = {
-      id: randomUUID(),
-      filename: input.filename,
-      totalBytes: boundedBytes(input.totalBytes),
-      startedAt: now,
-      transferredBytes: 0,
-      lastRateBytes: 0,
-      lastRateAt: now,
-      updatedAt: now,
-      state: "downloading",
-    };
-    this.#downloads.set(task.id, task);
 
     const finish = (state: "completed" | "failed") => {
-      if (task.state !== "downloading") return;
+      if (task.state !== "downloading" && task.state !== "paused") return;
       const finishedAt = Date.now();
       this.#refreshDownloadRate(task, finishedAt, true);
       task.state = state;
@@ -105,14 +114,92 @@ export class TransferMonitorService {
       },
       final: (callback) => { finish("completed"); callback(); },
     });
+    const task: DownloadTask = {
+      id: randomUUID(),
+      filename: input.filename,
+      totalBytes: boundedBytes(input.totalBytes),
+      startedAt: now,
+      transferredBytes: 0,
+      lastRateBytes: 0,
+      lastRateAt: now,
+      updatedAt: now,
+      state: "downloading",
+      source,
+      meter,
+    };
+    this.#downloads.set(task.id, task);
     source.once("error", (error) => { finish("failed"); meter.destroy(error); });
     meter.once("close", () => {
-      if (task.state !== "downloading") return;
+      if (task.state !== "downloading" && task.state !== "paused") return;
       finish("failed");
       if (!source.destroyed) source.destroy();
     });
     source.pipe(meter);
     return meter;
+  }
+
+  hasDownload(id: string): boolean {
+    return this.#downloads.has(id);
+  }
+
+  downloadState(id: string): TransferTaskState | undefined {
+    return this.#downloads.get(id)?.state;
+  }
+
+  controlState(id: string): TransferTaskControlState {
+    const download = this.#downloads.get(id);
+    if (download !== undefined) return download.state === "paused" ? "paused" : download.state === "cancelled" ? "cancelled" : "running";
+    return this.#controls.get(id)?.state ?? "running";
+  }
+
+  control(id: string, action: TransferTaskAction): TransferTaskControlState {
+    const download = this.#downloads.get(id);
+    if (download !== undefined) return this.#controlDownload(download, action);
+    const current = this.#controls.get(id);
+    if (action === "pause") {
+      if (current?.state === "cancelled") throw new TransferTaskControlError("cancelled");
+      if (current?.state !== "paused") this.#controls.set(id, { state: "paused", updatedAt: Date.now(), waiters: new Set() });
+      return "paused";
+    }
+    if (action === "resume") {
+      if (current?.state === "cancelled") throw new TransferTaskControlError("cancelled");
+      if (current?.state !== "paused") throw new TransferTaskControlError("not_paused");
+      this.#controls.delete(id);
+      for (const waiter of current.waiters) waiter.resolve();
+      return "running";
+    }
+    if (current?.state === "cancelled") return "cancelled";
+    const cancelled: TaskControl = { state: "cancelled", updatedAt: Date.now(), terminalAt: Date.now(), waiters: current?.waiters ?? new Set() };
+    this.#controls.set(id, cancelled);
+    for (const waiter of cancelled.waiters) waiter.reject(new TransferTaskControlError("cancelled"));
+    cancelled.waiters.clear();
+    return "cancelled";
+  }
+
+  clearControl(id: string): void {
+    const current = this.#controls.get(id);
+    if (current === undefined) return;
+    this.#controls.delete(id);
+    for (const waiter of current.waiters) waiter.resolve();
+  }
+
+  async awaitRunnable(id: string, signal?: AbortSignal): Promise<void> {
+    const current = this.#controls.get(id);
+    if (current?.state === "cancelled") throw new TransferTaskControlError("cancelled");
+    if (current?.state !== "paused") return;
+    if (signal?.aborted === true) throw new TransferTaskControlError("client_disconnected");
+    await new Promise<void>((resolve, reject) => {
+      const aborted = () => {
+        current.waiters.delete(waiter);
+        reject(new TransferTaskControlError("client_disconnected"));
+      };
+      const waiter = {
+        resolve: () => { signal?.removeEventListener("abort", aborted); resolve(); },
+        reject: (error: Error) => { signal?.removeEventListener("abort", aborted); reject(error); },
+      };
+      current.waiters.add(waiter);
+      signal?.addEventListener("abort", aborted, { once: true });
+    });
   }
 
   snapshot(uploadRows: readonly UploadTaskSample[], sampledAt = Date.now()): TransferSnapshot {
@@ -130,13 +217,19 @@ export class TransferMonitorService {
         bytesPerSecond = (transferredBytes - previous.bytes) / ((sampledAt - previous.sampledAt) / 1_000);
       }
       this.#uploadRates.set(row.id, { bytes: transferredBytes, sampledAt });
-      const queued = row.status === "created" || row.status === "failed_retryable";
+      const control = this.#controls.get(row.id);
+      const queued = control === undefined && (row.status === "created" || row.status === "failed_retryable");
       if (queued) queuePosition += 1;
-      const state: TransferTaskState = row.status === "created"
-        ? "queued"
-        : row.status === "failed_retryable"
-          ? "waiting_retry"
-          : row.status;
+      const state: TransferTaskState = control?.state === "paused"
+        ? "paused"
+        : control?.state === "cancelled"
+          ? "cancelled"
+          : row.status === "created"
+            ? "queued"
+            : row.status === "failed_retryable"
+              ? "waiting_retry"
+              : row.status;
+      const mutable = ["created", "uploading", "failed_retryable"].includes(row.status);
       return {
         id: row.id,
         direction: "upload",
@@ -145,9 +238,12 @@ export class TransferMonitorService {
         transferredBytes,
         totalBytes,
         percent: percent(transferredBytes, totalBytes),
-        ...(bytesPerSecond === undefined ? {} : { bytesPerSecond }),
+        ...(control?.state === "paused" ? { bytesPerSecond: 0 } : bytesPerSecond === undefined ? {} : { bytesPerSecond }),
         ...(queued ? { queuePosition } : {}),
-        updatedAt: row.updatedAt.toISOString(),
+        canPause: mutable && control === undefined,
+        canResume: mutable && control?.state === "paused",
+        canCancel: mutable && control?.state !== "cancelled",
+        updatedAt: new Date(Math.max(row.updatedAt.getTime(), control?.updatedAt ?? 0)).toISOString(),
       };
     });
 
@@ -162,6 +258,9 @@ export class TransferMonitorService {
         totalBytes: task.totalBytes,
         percent: percent(task.transferredBytes, task.totalBytes),
         ...(task.bytesPerSecond === undefined ? {} : { bytesPerSecond: task.bytesPerSecond }),
+        canPause: task.state === "downloading",
+        canResume: task.state === "paused",
+        canCancel: task.state === "downloading" || task.state === "paused",
         updatedAt: new Date(task.updatedAt).toISOString(),
       };
     });
@@ -193,9 +292,44 @@ export class TransferMonitorService {
     task.lastRateAt = now;
   }
 
+  #controlDownload(task: DownloadTask, action: TransferTaskAction): TransferTaskControlState {
+    if (action === "pause") {
+      if (task.state === "cancelled") throw new TransferTaskControlError("cancelled");
+      if (task.state === "downloading") {
+        task.source.pause();
+        task.state = "paused";
+        task.bytesPerSecond = 0;
+        task.updatedAt = Date.now();
+      }
+      return task.state === "paused" ? "paused" : "running";
+    }
+    if (action === "resume") {
+      if (task.state === "cancelled") throw new TransferTaskControlError("cancelled");
+      if (task.state !== "paused") throw new TransferTaskControlError("not_paused");
+      task.state = "downloading";
+      task.updatedAt = Date.now();
+      task.lastRateAt = task.updatedAt;
+      task.lastRateBytes = task.transferredBytes;
+      task.source.resume();
+      return "running";
+    }
+    if (task.state === "cancelled") return "cancelled";
+    if (task.state !== "downloading" && task.state !== "paused") return "running";
+    task.state = "cancelled";
+    task.updatedAt = Date.now();
+    task.terminalAt = task.updatedAt;
+    task.source.unpipe(task.meter);
+    task.source.destroy();
+    task.meter.destroy();
+    return "cancelled";
+  }
+
   #prune(now: number): void {
     for (const [id, task] of this.#downloads) {
       if (task.terminalAt !== undefined && now - task.terminalAt > TERMINAL_RETENTION_MS) this.#downloads.delete(id);
+    }
+    for (const [id, control] of this.#controls) {
+      if (control.terminalAt !== undefined && now - control.terminalAt > TERMINAL_RETENTION_MS) this.#controls.delete(id);
     }
   }
 }

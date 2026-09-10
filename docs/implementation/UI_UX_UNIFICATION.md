@@ -1,5 +1,8 @@
 # Saturn UI/UX unification
 
+> The Telegram settings section described in this historical UI record was
+> removed when transport and binding moved to the CLI-managed Gryphon gateway.
+
 ## Authority
 
 This implementation adopts `PART_I_INTERFACE_AND_INTERACTION_UNIFICATION.md`
@@ -51,10 +54,18 @@ after Security without resetting the relative order of an existing five-card
 preference.
 
 Telegram is presentation-separated from Saturn's internal Drop-code issuer:
-the card manages provider reachability and operator binding only. The bot may
-activate the Gateway-owned Drop-code capability but does not own that
-capability. Drop-buffer health remains an operational status under Security's
+the card displays Gryphon reachability and selects a bot already connected by
+the Gryphon CLI; no bot credential enters Saturn. Telegram-user authorization
+remains a separate Gryphon CLI action. The bot may activate the Gateway-owned
+Drop-code capability but does not own that capability. Drop-buffer health remains an operational status under Security's
 collapsed advanced controls.
+
+The same advanced Security disclosure owns the runtime upload limits. It uses
+integer GiB controls for local buffer capacity and maximum file size, validates
+that a single file stays at or below the 90% refusal watermark, and shows the
+authoritative capacity returned by the Gateway. Saving affects both owner and
+Drop uploads without a process restart; environment values remain bootstrap
+fallbacks only.
 
 ## Input state
 

@@ -46,8 +46,9 @@ describe("loadEnvironment", () => {
       uploadMaxBytes: 20 * 1024 * 1024 * 1024,
       uploadChunkMaxBytes: 8 * 1024 * 1024,
       uploadIncompleteTtlMs: 24 * 60 * 60 * 1_000,
-      trashRetentionMs: 90 * 24 * 60 * 60 * 1_000,
+      trashRetentionMs: 30 * 24 * 60 * 60 * 1_000,
     });
+    expect(config.protection.purgeEnabled).toBe(true);
   });
 
   it("loads bounded PostgreSQL command prefixes without exposing them publicly", () => {

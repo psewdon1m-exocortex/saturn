@@ -83,7 +83,7 @@ describe("OwnerTokenGuard", () => {
 
   it("allows permanent Trash deletion in an authenticated owner session", () => {
     // eslint-disable-next-line @typescript-eslint/unbound-method
-    const purge = FileController.prototype.purgeTrashFile;
+    const purge = FileController.prototype.purgeTrashResource;
     expect(Reflect.getMetadata("vault:recent-reauthentication", purge)).toBeUndefined();
   });
 });

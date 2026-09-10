@@ -1,41 +1,16 @@
 import { createHash } from "node:crypto";
 import { Readable } from "node:stream";
 import { describe, expect, it } from "vitest";
-import { DropService, DropServiceError } from "./drop.service.js";
-import type { DropRepository, DropSession, DropUpload, TelegramBinding, TelegramIdentity } from "./types.js";
+import { DropService } from "./drop.service.js";
+import type { DropRepository, DropSession, DropUpload, TelegramIdentity } from "./types.js";
 
 class MemoryRepository implements DropRepository {
-  link = new Map<string, { state: string; expiresAt: Date }>();
   drops = new Map<string, { id: string; state: string; identity?: TelegramIdentity; expiresAt: Date; maxFiles: number; maxBytes: number; reservedFiles: number; reservedBytes: number }>();
-  binding: TelegramBinding | undefined;
   sessions = new Map<string, DropSession>();
   sessionById = new Map<string, DropSession>();
   attempts: Array<{ sequence: string; source: string; outcome: "pending" | "success" | "failure" | "rate_limited"; at: Date }> = [];
   uploads = new Map<string, DropUpload>();
-  updates = new Map<string, "processing" | "completed" | "failed">();
-
-  createLinkChallenge(input: { readonly codeHash: string; readonly expiresAt: Date }): Promise<void> {
-    for (const value of this.link.values()) if (value.state === "active") value.state = "revoked";
-    this.link.set(input.codeHash, { state: "active", expiresAt: input.expiresAt });
-    return Promise.resolve();
-  }
-  consumeLinkChallenge(codeHash: string, identity: TelegramIdentity, now: Date): Promise<TelegramBinding | undefined> {
-    const value = this.link.get(codeHash);
-    if (value === undefined || value.state !== "active" || value.expiresAt <= now) return Promise.resolve(undefined);
-    value.state = "consumed";
-    this.binding = { ...identity, boundAt: now, updatedAt: now };
-    return Promise.resolve(this.binding);
-  }
-  getBinding(): Promise<TelegramBinding | undefined> { return Promise.resolve(this.binding); }
-  unlink(): Promise<{ readonly sessions: number; readonly challenges: number }> {
-    this.binding = undefined;
-    let sessions = 0; let challenges = 0;
-    for (const value of this.sessions.values()) if (value.state === "active" && value.telegramUserId !== undefined) { Object.assign(value, { state: "revoked" }); sessions += 1; }
-    for (const value of this.drops.values()) if (value.state === "active" && value.identity !== undefined) { value.state = "revoked"; challenges += 1; }
-    return Promise.resolve({ sessions, challenges });
-  }
   createDropChallenge(input: { readonly id: string; readonly codeHash: string; readonly identity?: TelegramIdentity; readonly expiresAt: Date; readonly maxFiles: number; readonly maxBytes: number }): Promise<boolean> {
-    if (input.identity !== undefined && (this.binding?.userId !== input.identity.userId || this.binding.chatId !== input.identity.chatId)) return Promise.resolve(false);
     for (const value of this.drops.values()) if (value.state === "active") value.state = "revoked";
     this.drops.set(input.codeHash, { id: input.id, state: "active", ...(input.identity === undefined ? {} : { identity: input.identity }), expiresAt: input.expiresAt, maxFiles: input.maxFiles, maxBytes: input.maxBytes, reservedFiles: 0, reservedBytes: 0 });
     return Promise.resolve(true);
@@ -79,7 +54,6 @@ class MemoryRepository implements DropRepository {
   }
   revokeDropSession(tokenHash: string): Promise<void> { const value = this.sessions.get(tokenHash); if (value !== undefined) Object.assign(value, { state: "revoked" }); return Promise.resolve(); }
   revokeDropAccess(identity: TelegramIdentity): Promise<{ readonly sessions: number; readonly challenges: number }> {
-    if (identity.userId !== this.binding?.userId || identity.chatId !== this.binding.chatId) return Promise.reject(new Error("not bound"));
     let sessions = 0; let challenges = 0;
     for (const value of this.sessions.values()) if (value.state === "active" && value.telegramUserId === identity.userId && value.telegramChatId === identity.chatId) { Object.assign(value, { state: "revoked" }); sessions += 1; }
     for (const value of this.drops.values()) if (value.state === "active" && value.identity?.userId === identity.userId && value.identity.chatId === identity.chatId) { value.state = "revoked"; challenges += 1; }
@@ -115,14 +89,14 @@ class MemoryRepository implements DropRepository {
     const value = this.uploads.get(id); if (value === undefined || value.channelId !== channelId) return Promise.reject(new Error("missing"));
     const next = { ...value, resourceId, state: "completed" as const, completedAt }; this.uploads.set(id, next); return Promise.resolve(next);
   }
-  claimTelegramUpdate(updateId: string): Promise<"claimed" | "retry" | "duplicate" | "busy"> { const state = this.updates.get(updateId); if (state === undefined) { this.updates.set(updateId, "processing"); return Promise.resolve("claimed"); } return Promise.resolve(state === "completed" ? "duplicate" : state === "failed" ? "retry" : "busy"); }
-  completeTelegramUpdate(updateId: string): Promise<void> { this.updates.set(updateId, "completed"); return Promise.resolve(); }
-  failTelegramUpdate(updateId: string): Promise<void> { this.updates.set(updateId, "failed"); return Promise.resolve(); }
 }
 
 class MemoryFiles {
   folders: Array<{ id: string; type: "folder"; name: string }> = [];
   uploads = new Map<string, { expectedSize: number; receivedSize: number; expiresAt: Date; status: string; filename: string; chunks: Buffer[] }>();
+  bufferMaxBytes = 1_000;
+  maximumFileBytes = 1_000;
+  getUploadLimits(): Promise<{ readonly bufferMaxBytes: number; readonly maximumFileBytes: number }> { return Promise.resolve({ bufferMaxBytes: this.bufferMaxBytes, maximumFileBytes: this.maximumFileBytes }); }
   listChildren(): Promise<readonly { readonly id: string; readonly type: "file" | "folder"; readonly name: string }[]> { return Promise.resolve(this.folders); }
   createFolder(_parentId: string, name: string): Promise<{ readonly id: string; readonly type: "folder"; readonly name: string }> { const value = { id: `folder-${name}`, type: "folder" as const, name }; this.folders.push(value); return Promise.resolve(value); }
   createUpload(input: { readonly filename: string; readonly expectedSize: number; readonly idempotencyKey: string }): Promise<{ readonly id: string }> {
@@ -135,24 +109,18 @@ class MemoryFiles {
 
 function fixture(options: { maxFiles?: number; maxBytes?: number; failureLimit?: number } = {}) {
   const repository = new MemoryRepository(); const files = new MemoryFiles();
-  const service = new DropService({ repository, files, pepper: "drop-pepper-that-is-at-least-thirty-two-characters", options: { publicOrigin: "https://vault.test", codeTtlMs: 1_800_000, linkCodeTtlMs: 300_000, sessionTtlMs: 1_800_000, maxFiles: options.maxFiles ?? 20, maxBytes: options.maxBytes ?? 1024, failureLimit: options.failureLimit ?? 5, globalFailureLimit: 100, failureWindowMs: 900_000, failureDelayMs: 0 } });
+  const service = new DropService({ repository, files, pepper: "drop-pepper-that-is-at-least-thirty-two-characters", options: { publicOrigin: "https://vault.test", codeTtlMs: 1_800_000, sessionTtlMs: 1_800_000, maxFiles: options.maxFiles ?? 20, maxBytes: options.maxBytes ?? 1024, failureLimit: options.failureLimit ?? 5, globalFailureLimit: 100, failureWindowMs: 900_000, failureDelayMs: 0 } });
   return { repository, files, service };
 }
 
 async function boundDrop(service: DropService, identity = { userId: "12345", chatId: "12345" }) {
-  const link = await service.createLinkChallenge(); await service.linkTelegram(link.code, identity);
-  return { identity, challenge: await service.issueDropCodeForTelegram(identity) };
+  return { identity, challenge: await service.issueDropCodeForGryphon(identity) };
 }
 
 describe("DropService", () => {
-  it("keeps link challenges single-use while one Drop code opens a shared multi-client channel", async () => {
+  it("lets a Gryphon-verified identity open a shared multi-client channel", async () => {
     const { service } = fixture(); const identity = { userId: "12345", chatId: "12345" };
-    const link = await service.createLinkChallenge();
-    expect(link.code.replaceAll("-", "")).toHaveLength(12);
-    await expect(service.redeem(link.code, "192.0.2.1", "browser")).rejects.toBeInstanceOf(DropServiceError);
-    await service.linkTelegram(link.code, identity);
-    await expect(service.linkTelegram(link.code, identity)).rejects.toMatchObject({ code: "invalid_code" });
-    const drop = await service.issueDropCodeForTelegram(identity);
+    const drop = await service.issueDropCodeForGryphon(identity);
     expect(drop.code.replaceAll("-", "")).toHaveLength(8);
     const outcomes = await Promise.allSettled([service.redeem(drop.code, "192.0.2.2", "browser"), service.redeem(drop.code, "192.0.2.3", "browser")]);
     const sessions = outcomes.flatMap((value) => value.status === "fulfilled" ? [value.value.session] : []);
@@ -176,13 +144,12 @@ describe("DropService", () => {
     await expect(service.redeem(challenge.code, "192.0.2.22", "browser-three", absoluteExpiry)).rejects.toMatchObject({ code: "invalid_code" });
   });
 
-  it("issues owner Drop access without Telegram and keeps it active when Telegram is unlinked", async () => {
+  it("issues owner Drop access without a Telegram identity", async () => {
     const { service } = fixture();
     const challenge = await service.issueDropCode();
     const created = await service.redeem(challenge.code, "192.0.2.10", "owner-browser");
     expect(created.session.telegramUserId).toBeUndefined();
     expect(created.session.telegramChatId).toBeUndefined();
-    await expect(service.unlink()).resolves.toEqual({ sessions: 0, challenges: 0 });
     await expect(service.validateSession({ token: created.token, userAgent: "owner-browser", isMutation: false })).resolves.toMatchObject({ id: created.session.id });
   });
 
@@ -191,7 +158,7 @@ describe("DropService", () => {
     const created = await service.redeem(challenge.code, "192.0.2.1", "browser");
     await expect(service.validateSession({ token: created.token, userAgent: "browser", isMutation: true, origin: "https://vault.test", csrfCookie: created.csrfToken, csrfHeader: created.csrfToken })).resolves.toMatchObject({ id: created.session.id });
     await expect(service.validateSession({ token: created.token, userAgent: "browser", isMutation: true, origin: "https://evil.test", csrfCookie: created.csrfToken, csrfHeader: created.csrfToken })).rejects.toMatchObject({ code: "csrf_rejected" });
-    await service.revokeAccess(identity);
+    await service.revokeGryphonAccess(identity);
     await expect(service.validateSession({ token: created.token, userAgent: "browser", isMutation: false })).rejects.toMatchObject({ code: "invalid_session" });
   });
 
@@ -222,6 +189,18 @@ describe("DropService", () => {
     ]);
     expect(results.filter((value) => value.status === "fulfilled")).toHaveLength(1);
     expect(results.filter((value) => value.status === "rejected")).toHaveLength(1);
+  });
+
+  it("enforces the shared runtime maximum file size before reserving a Drop upload", async () => {
+    const { service, files } = fixture();
+    files.maximumFileBytes = 2;
+    const challenge = await service.issueDropCode();
+    const created = await service.redeem(challenge.code, "192.0.2.40", "browser");
+    await expect(service.createUpload(created.session, {
+      filename: "too-large.bin",
+      expectedSize: 3,
+      idempotencyKey: "drop-runtime-limit-001",
+    })).rejects.toThrow(/size/);
   });
 
   it("applies the configured brute-force boundary without retaining submitted codes", async () => {

@@ -1,6 +1,5 @@
 import "dotenv/config";
 import "reflect-metadata";
-import { Transform } from "node:stream";
 import { fastifyCookie } from "@fastify/cookie";
 import { RequestMethod } from "@nestjs/common";
 import { NestFactory } from "@nestjs/core";
@@ -44,25 +43,9 @@ adapter.getInstance().addContentTypeParser(
     done(null, payload);
   },
 );
-adapter.getInstance().addHook("preParsing", (request, _reply, payload, done) => {
-  if (!request.url.startsWith("/internal/telegram/webhook")) { done(null, payload); return; }
-  let received = 0;
-  const limiter = new Transform({
-    transform(chunk: Buffer, _encoding, callback) {
-      received += chunk.length;
-      if (received > config.telegram.webhookMaxBytes) {
-        const error = Object.assign(new Error("Telegram webhook body exceeds its configured limit"), { statusCode: 413 });
-        callback(error);
-      } else callback(null, chunk);
-    },
-  });
-  Object.defineProperty(limiter, "receivedEncodedLength", { get: () => received });
-  payload.pipe(limiter);
-  done(null, limiter);
-});
 const app = await NestFactory.create<NestFastifyApplication>(AppModule, adapter, { bufferLogs: true });
 app.enableShutdownHooks();
-app.setGlobalPrefix("api/v1", { exclude: ["health/live", "health/ready", "internal/telegram/webhook", { path: "a/:assetId/:filename", method: RequestMethod.ALL }] });
+app.setGlobalPrefix("api/v1", { exclude: ["health/live", "health/ready", "internal/gryphon/command", { path: "a/:assetId/:filename", method: RequestMethod.ALL }] });
 registerWebDav(adapter.getInstance(), app.get<DeviceService>(DEVICE_SERVICE), config, app.get(TransferMonitorService));
 adapter.getInstance().addHook("onSend", (request, reply, payload, done) => {
   reply
@@ -73,7 +56,7 @@ adapter.getInstance().addHook("onSend", (request, reply, payload, done) => {
     .header("Content-Security-Policy", request.url.includes("/preview")
       ? "default-src 'none'; sandbox; frame-ancestors 'self'; base-uri 'none'"
       : "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
-  if (request.url.startsWith("/api/v1/") || request.url.startsWith("/internal/telegram/")) reply.header("Cache-Control", "no-store");
+  if (request.url.startsWith("/api/v1/") || request.url.startsWith("/internal/gryphon/")) reply.header("Cache-Control", "no-store");
   done(null, payload);
 });
 await app.listen(config.api.port, config.api.host);

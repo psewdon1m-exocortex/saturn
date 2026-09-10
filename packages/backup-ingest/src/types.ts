@@ -13,6 +13,10 @@ export interface BackupRetentionPolicy {
 export interface BackupServiceRecord {
   readonly id: string;
   readonly slug: string;
+  readonly namespaceSlug: string;
+  readonly deploymentId: string;
+  readonly mirrorRoot?: "volt" | "mastermind";
+  readonly mirrorDeviceId?: string;
   readonly name: string;
   readonly tokenHash: string;
   readonly previousTokenHash?: string;
@@ -116,6 +120,9 @@ export interface BackupOptions {
 
 export interface BackupServiceCreateInput {
   readonly slug: string;
+  readonly namespaceSlug?: string;
+  readonly deploymentId?: string;
+  readonly mirrorRoot?: "volt" | "mastermind";
   readonly name: string;
   readonly requireEncryption?: boolean;
   readonly mtlsCertFingerprint?: string;
@@ -125,6 +132,15 @@ export interface BackupServiceCreateInput {
   readonly maxConcurrentRuns?: number;
   readonly freshnessSlaMs?: number;
   readonly retention?: Partial<BackupRetentionPolicy>;
+}
+
+export interface BackupEnrollmentRecord {
+  readonly id: string;
+  readonly serviceId: string;
+  readonly codeHash: string;
+  readonly expiresAt: Date;
+  readonly createdAt: Date;
+  readonly consumedAt?: Date;
 }
 
 export interface BackupRunCreateInput {
@@ -141,6 +157,7 @@ export interface BackupRunCreateInput {
 export interface BackupRepository {
   createService(value: BackupServiceRecord): Promise<void>;
   getService(id: string): Promise<BackupServiceRecord | undefined>;
+  getActiveServiceByDeployment(namespaceSlug: string, deploymentId: string): Promise<BackupServiceRecord | undefined>;
   listServices(offset: number, limit: number): Promise<readonly BackupServiceRecord[]>;
   updateService(id: string, input: Partial<Pick<BackupServiceRecord, "name" | "requireEncryption" | "mtlsCertFingerprint" | "maxBackupBytes" | "dailyQuotaBytes" | "storedQuotaBytes" | "maxConcurrentRuns" | "freshnessSlaMs" | "retention">>, now: Date): Promise<BackupServiceRecord>;
   rotateToken(id: string, tokenHash: string, previousTokenExpiresAt: Date, now: Date): Promise<BackupServiceRecord>;
@@ -159,6 +176,9 @@ export interface BackupRepository {
   usage(serviceId: string, since: Date): Promise<BackupUsage>;
   recordRestoreTest(value: BackupRestoreTestRecord): Promise<void>;
   latestRestoreTest(serviceId: string): Promise<BackupRestoreTestRecord | undefined>;
+  createEnrollment(value: BackupEnrollmentRecord): Promise<void>;
+  consumeEnrollment(codeHash: string, now: Date): Promise<BackupServiceRecord | undefined>;
+  attachMirrorDevice(serviceId: string, deviceId: string, now: Date): Promise<BackupServiceRecord>;
 }
 
 export interface BackupStorage {
@@ -171,4 +191,3 @@ export interface BackupStorage {
   delete(path: string): Promise<void>;
   exists(path: string): Promise<boolean>;
 }
-

@@ -12,7 +12,7 @@ paths in earlier stage narratives; historical migration names remain unchanged.
 ## 1. Program objective
 
 Deliver a production-capable personal storage Gateway where every browser,
-device, backup producer, Telegram integration and Laboratory consumer talks to
+device, backup producer, Gryphon integration and Laboratory consumer talks to
 the Gateway, while only the Gateway talks to Hetzner Storage Box through a
 dedicated SFTP sub-account.
 
@@ -289,36 +289,34 @@ machine-readable verification report.
 
 - UI deployment can roll back independently of stored file state.
 
-### Stage 7 — Telegram owner binding and Drop Point
+### Stage 7 — Gryphon-mediated Telegram Drop access
 
-Status: `COMPLETE` — see `STAGE_07_TELEGRAM_DROP.md` and the accepted
-16-check aggregate report.
+Status: `SUPERSEDED AND MIGRATED` — see `STAGE_07_TELEGRAM_DROP.md`.
 
 **Entry state**
 
 - owner authentication and audit are production-capable;
-- Telegram bot token is available through protected runtime injection.
+- a per-service Gryphon token is available through protected runtime injection.
 
 **Work**
 
-- implement supervised bot lifecycle and provider validation;
-- implement transactional operator binding with a separate one-time link code;
+- expose an authenticated neutral command adapter to Gryphon;
+- keep bot lifecycle and one-time service binding in Gryphon;
 - implement Drop codes, upload-only sessions, quotas and `drop point` destination;
-- implement webhook secret validation or a documented polling mode;
-- implement revoke and security alerts.
+- implement identity-scoped revoke and route security alerts through Gryphon.
 
 **Exit state**
 
-- only the bound stable Telegram identity can request Drop access;
+- only a Telegram identity verified by Gryphon for the Saturn connection can request Drop access;
 - a Drop session can upload but cannot list, read, overwrite or delete;
-- link codes remain single-use. Drop codes are distinct, short-lived
+- Gryphon link codes remain single-use. Drop codes are distinct, short-lived
   multi-client admission capabilities whose clients share one upload-only
   channel, absolute lifetime, quota and real-time queue.
 
 **Verification**
 
 - concurrent same-code channel admission and cross-channel isolation;
-- forged identity/webhook, brute-force, replay and revoke tests;
+- forged service identity, brute-force, replay and revoke tests;
 - complete Drop E2E with interrupted upload;
 - log and backup secret scans.
 
@@ -520,7 +518,7 @@ Status: `COMPLETE_WITH_ISOLATED_DECISIONS` — see
   responsive public states and owner folder ZIP download;
 - replace direct public Drop streaming with the bounded local buffer, durable
   upload states, resumable offsets and checksum-verifying drain workers;
-- expose Telegram connection and Drop buffer status in Settings.
+- expose Drop buffer status in Settings; manage Telegram bindings with Gryphon CLI.
 
 **Exit state**
 
@@ -549,7 +547,7 @@ Status: `COMPLETE_WITH_ISOLATED_DECISIONS` — see
 | Storage feasibility | 0-1 | Hetzner transport assumptions are measured |
 | Private alpha | 0-6 | Safe owner-only file system with tested recovery |
 | Personal production | 0-10 | External access, sync and backup ingest are production-capable |
-| Complete Saturn | 0-15 | Full documented scope, current Saturn UX, DR and runtime target selection are verified |
+| Complete Saturn | 0-16 | Full documented scope, current Saturn UX, DR, runtime target selection, archives and previews are verified |
 
 ## 5. Current state
 
@@ -571,6 +569,7 @@ Status: `COMPLETE_WITH_ISOLATED_DECISIONS` — see
 | 13 | `BLOCKED` — external PROD activation inputs required |
 | 14 | `COMPLETE_WITH_ISOLATED_DECISIONS` |
 | 15 | `COMPLETE_LOCAL` — production target switch remains an operator deployment action |
+| 16 | `COMPLETE_LOCAL` — archive and preview behavior verified against the active DEV target |
 
 Stage state changes are recorded in `VERIFICATION_MATRIX.md` with evidence.
 
@@ -589,3 +588,19 @@ migrated.
 
 **Rollback:** select the previous target again with its write-only credential.
 The previous storage contents are never removed by the switch.
+
+### Stage 16 — Archives and Quick Preview
+
+Status: `COMPLETE_LOCAL` — see `STAGE_16_ARCHIVES_AND_PREVIEWS.md`.
+
+**Entry state:** stable file resources, authenticated preview delivery, durable
+worker execution and one active runtime storage profile.
+
+**Exit state:** the owner can recognize and preview supported files, create ZIP
+archives from a selection and extract ZIP/RAR files through persistent,
+controllable tasks. All reads and commits remain Gateway-mediated and a live
+DEV round trip proves output bytes and cleanup.
+
+**Rollback:** stop new archive jobs, let active commits settle, roll back the UI
+and worker, and remove migration 0025 only when archive job history is no longer
+required. Completed resources remain ordinary Saturn data.

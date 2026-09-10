@@ -40,9 +40,6 @@
   handle /dav* {
     reverse_proxy api:3000
   }
-  handle /internal/telegram/* {
-    reverse_proxy api:3000
-  }
   handle /health/live {
     reverse_proxy api:3000
   }

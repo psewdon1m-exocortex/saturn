@@ -40,7 +40,6 @@ const portableMetadataMembers = new Set([
   "metadata/reconciliation_issues.jsonl",
   "metadata/backup_runs.jsonl",
   "metadata/recovery_runs.jsonl",
-  "metadata/telegram_binding.jsonl",
   "metadata/shares.jsonl",
   "metadata/devices.jsonl",
   "metadata/sync_conflicts.jsonl",

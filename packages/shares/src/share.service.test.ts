@@ -93,6 +93,7 @@ describe("ShareService", () => {
     const input = { sourceIp: "192.0.2.1", userAgent: "browser", ...(opened.session === undefined ? {} : { sessionToken: opened.session.token }) };
     const children = await service.listChildren(created.token, undefined, input);
     expect(children.map((value) => value.name)).toEqual(["file.txt", "Child"]);
+    expect(children.find((value) => value.id === "file")?.sha256).toBe("0".repeat(64));
     await expect(service.listChildren(created.token, "file", input)).rejects.toMatchObject({ code: "not_found" });
   });
 });
