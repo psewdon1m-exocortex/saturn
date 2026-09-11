@@ -1,4 +1,5 @@
 import path from "node:path";
+import { once } from "node:events";
 import type { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import type { Stats } from "ssh2";
@@ -114,6 +115,9 @@ export class SftpStorageAdapter implements StorageAdapter {
     stream.once("end", () => release(false));
     stream.once("close", () => release(false));
     stream.once("error", () => release(true));
+    // Pin the remote file handle before the caller releases its metadata lock.
+    try { await once(stream, "open", { signal: AbortSignal.timeout(this.#storage.operationTimeoutMs) }); }
+    catch (error) { stream.destroy(); release(true); throw error; }
     return stream;
   }
 

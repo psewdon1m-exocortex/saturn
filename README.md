@@ -6,9 +6,10 @@ the complete target architecture is documented in
 [docs/technical_solution_storage_gateway.md](docs/technical_solution_storage_gateway.md).
 
 После обычной установки создайте в Synchronization pipeline для namespace
-`saturn` и одноразовый Neptune setup code. Если локальный Neptune уже установлен,
-но Saturn ещё не связан с ним, в Settings → Backup нажмите **Initialize Neptune**
-и введите код. `sudo saturn-install backup` (старое имя `vaultctl backup` также
+`saturn` и одноразовый Neptune setup code. В Settings → Backup нажмите
+**Initialize Neptune** и введите код. Updater установит отсутствующий агент
+или подключит существующий. Neptune и Gryphon также устанавливаются автоматически
+после регистрации Saturn, настройки Kernel Register и доверия к релизам. `sudo saturn-install backup` (старое имя `vaultctl backup` также
 поддерживается) устанавливает отсутствующий агент и остаётся резервным
 CLI-сценарием. Расписание задаётся только в Synchronization.
 
@@ -54,3 +55,5 @@ The same Settings card can ask the privileged Updater to check or install a
 verified Gryphon Linux release.
 After linking, use `/saturn drop`, `/saturn status` and `/saturn revoke` (or the
 corresponding inline buttons).
+
+The current six-service deployment, trust, recovery and acceptance contract is documented in [Deployment readiness](DEPLOYMENT_READINESS.md).

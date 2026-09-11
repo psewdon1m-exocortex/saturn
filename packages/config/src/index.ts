@@ -1,6 +1,9 @@
 import fs from "node:fs";
 import path from "node:path";
 import { z } from "zod";
+import { randomUUID } from "node:crypto";
+import { isIP } from "node:net";
+import { recoveryEnvironmentKeys } from "./recovery-keys.js";
 
 const booleanText = z.enum(["true", "false"]).transform((value) => value === "true");
 const commandArguments = z.string().default("[]").transform((value, context): readonly string[] => {
@@ -33,6 +36,15 @@ const environmentSchema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
   PUBLIC_ORIGIN: z.url().default("http://localhost:5173"),
   API_HOST: z.string().min(1).default("127.0.0.1"),
+  API_TRUSTED_PROXIES: z.string().default("").transform((value, context) => {
+    const entries = value.split(",").map((entry) => entry.trim()).filter(Boolean);
+    if (entries.some((entry) => {
+      const [host, prefix, extra] = entry.split("/");
+      const version = isIP(host ?? "");
+      return !version || extra !== undefined || (prefix !== undefined && (!/^\d+$/.test(prefix) || Number(prefix) < 1 || Number(prefix) > (version === 4 ? 32 : 128)));
+    })) context.addIssue({ code: "custom", message: "must contain explicit proxy IP addresses or CIDRs" });
+    return entries;
+  }),
   API_PORT: z.coerce.number().int().min(1).max(65_535).default(3_000),
   WORKER_HOST: z.string().min(1).default("127.0.0.1"),
   WORKER_PORT: z.coerce.number().int().min(1).max(65_535).default(3_001),
@@ -293,6 +305,7 @@ export interface SaturnConfig {
   readonly environment: "development" | "test" | "production";
   readonly publicOrigin: string;
   readonly api: { readonly host: string; readonly port: number };
+  readonly trustedProxies: readonly string[];
   readonly worker: {
     readonly host: string;
     readonly port: number;
@@ -455,6 +468,7 @@ function databaseUrlWithPassword(value: string, passwordFile: string | undefined
 export function loadEnvironment(
   input: Readonly<Record<string, string | undefined>> = process.env,
   baseDirectory = process.cwd(),
+  applyRecovery = true,
 ): SaturnConfig {
   const parsed = environmentSchema.safeParse(input);
   if (!parsed.success) {
@@ -469,10 +483,11 @@ export function loadEnvironment(
   const databasePasswordFile = optionalResolved(value.DATABASE_PASSWORD_FILE, baseDirectory);
   const gryphonServiceTokenFile = optionalResolved(value.GRYPHON_SERVICE_TOKEN_FILE, baseDirectory);
   const kernelTokenFile = optionalResolved(value.KERNEL_TOKEN_FILE, baseDirectory);
-  return {
+  const config: SaturnConfig = {
     environment: value.NODE_ENV,
     publicOrigin: value.PUBLIC_ORIGIN,
     api: { host: value.API_HOST, port: value.API_PORT },
+    trustedProxies: value.API_TRUSTED_PROXIES,
     worker: {
       host: value.WORKER_HOST,
       port: value.WORKER_PORT,
@@ -618,6 +633,76 @@ export function loadEnvironment(
     readinessTimeoutMs: value.READINESS_TIMEOUT_MS,
     logLevel: value.LOG_LEVEL,
   };
+  if (applyRecovery) {
+    const filename = recoveryConfigurationPath(config);
+    if (fs.existsSync(filename)) {
+      if (fs.statSync(filename).size > 65_536) throw new Error("Recovered configuration exceeds the size limit");
+      const recovered: unknown = JSON.parse(fs.readFileSync(filename, "utf8"));
+      return loadEnvironment({ ...input, ...recoveredConfigurationEnvironment(recovered, config) }, baseDirectory, false);
+    }
+  }
+  return config;
+}
+
+export function recoveryConfigurationPath(config: SaturnConfig): string {
+  return path.join(config.storageRuntimeConfigDirectory, "public-recovery.json");
+}
+
+/** Local credentials, executable paths, bind addresses and deployment mode stay on the target host. */
+export function recoveredConfigurationEnvironment(value: unknown, config: SaturnConfig): Record<string, string> {
+  const result: Record<string, string> = {};
+  const visit = (source: unknown, expected: unknown, segments: string[]): void => {
+    const key = segments.join(".");
+    if (typeof expected === "object" && expected !== null) {
+      if (typeof source !== "object" || source === null || Array.isArray(source)) throw new Error(`Invalid recovery configuration: ${key}`);
+      const record = source as Record<string, unknown>;
+      const template = expected as Record<string, unknown>;
+      for (const name of Object.keys(record)) if (!Object.hasOwn(template, name)) throw new Error(`Unknown recovery configuration: ${key}.${name}`);
+      for (const [name, item] of Object.entries(template)) visit(record[name], item, [...segments, name]);
+      return;
+    }
+    if (typeof source !== typeof expected || (typeof source === "number" && !Number.isFinite(source)) || (typeof source === "string" && source.length > 2048))
+      throw new Error(`Invalid recovery configuration: ${key}`);
+    if (["environment", "api.host", "api.port", "worker.host", "worker.port"].includes(key)) return;
+    const environmentKey = recoveryEnvironmentKeys[key];
+    if (environmentKey === undefined) throw new Error(`Unsupported recovery configuration: ${key}`);
+    result[environmentKey] = String(source);
+  };
+  visit(value, publicConfig(config), []);
+  return result;
+}
+
+export function validateRecoveredConfiguration(value: unknown, config: SaturnConfig, input: Readonly<Record<string, string | undefined>> = process.env): SaturnConfig {
+  return loadEnvironment({ ...input, ...recoveredConfigurationEnvironment(value, config) }, process.cwd(), false);
+}
+
+export function writeRecoveredConfiguration(value: unknown, config: SaturnConfig): void {
+  recoveredConfigurationEnvironment(value, config);
+  const filename = recoveryConfigurationPath(config);
+  fs.mkdirSync(path.dirname(filename), { recursive: true, mode: 0o700 });
+  const temporary = `${filename}.${randomUUID()}.tmp`;
+  try {
+    fs.writeFileSync(temporary, JSON.stringify(value), { flag: "wx", mode: 0o600 });
+    fs.renameSync(temporary, filename);
+  } finally { fs.rmSync(temporary, { force: true }); }
+}
+
+/** Both supervised production processes restart after a committed configuration restore. */
+export function watchRecoveredConfiguration(config: SaturnConfig, restart: () => Promise<void>): () => void {
+  if (config.environment !== "production") return () => undefined;
+  const filename = recoveryConfigurationPath(config);
+  const initial = fs.existsSync(filename) ? fs.readFileSync(filename, "utf8") : null;
+  let restarting = false;
+  const listener = (): void => {
+    const current = fs.existsSync(filename) ? fs.readFileSync(filename, "utf8") : null;
+    if (!restarting && current !== initial) {
+      restarting = true;
+      fs.unwatchFile(filename, listener);
+      void restart().catch(() => { process.exitCode = 1; });
+    }
+  };
+  fs.watchFile(filename, { persistent: false, interval: 2000 }, listener);
+  return () => fs.unwatchFile(filename, listener);
 }
 
 export function publicConfig(config: SaturnConfig): Record<string, unknown> {

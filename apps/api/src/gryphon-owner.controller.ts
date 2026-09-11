@@ -1,13 +1,16 @@
 import fs from "node:fs";
 import { Body, ConflictException, Controller, Delete, Get, Inject, NotFoundException, Post, Put, UseFilters, UseGuards } from "@nestjs/common";
 import type { SaturnConfig } from "@saturn/config";
+import type { Database } from "@saturn/database";
 import { z } from "zod";
-import { APP_CONFIG } from "./tokens.js";
+import { APP_CONFIG, DATABASE } from "./tokens.js";
+import { registeredOrigin } from "./kernel-discovery.js";
 import { updater, unixJson } from "./neptune.controller.js";
 import { OwnerTokenGuard, RequireRecentReauthentication } from "./owner-token.guard.js";
 import { SaturnApiExceptionFilter } from "./saturn-api-exception.filter.js";
 
 const installSchema = z.object({ version: z.string().regex(/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/) }).strict();
+const botSchema = z.object({ alias: z.string().regex(/^[a-z][a-z0-9-]{1,47}$/), bot_token: z.string().regex(/^\d{5,}:[A-Za-z0-9_-]{20,200}$/) }).strict();
 const statusSchema = z.object({
   schema: z.literal("exocortex.gryphon.service-status.v1"),
   version: z.string().min(1),
@@ -33,7 +36,18 @@ type JsonObject = Record<string, unknown>;
 @UseGuards(OwnerTokenGuard)
 @UseFilters(SaturnApiExceptionFilter)
 export class GryphonOwnerController {
-  constructor(@Inject(APP_CONFIG) private readonly config: SaturnConfig) {}
+  constructor(@Inject(APP_CONFIG) private readonly config: SaturnConfig, @Inject(DATABASE) private readonly database: Database) {}
+
+  @Post("initialize")
+  @RequireRecentReauthentication()
+  initialize() { return updater("/v1/lifecycle/gryphon-initialization", { head_id: process.env.UPDATER_HEAD_ID?.trim() || "saturn" }); }
+
+  @Post("bots")
+  @RequireRecentReauthentication()
+  registerBot(@Body() body: unknown) {
+    const input = botSchema.parse(body);
+    return updater("/v1/lifecycle/gryphon-bot", { head_id: process.env.UPDATER_HEAD_ID?.trim() || "saturn", ...input });
+  }
 
   private request(method: string, route: string, body?: JsonObject) {
     const tokenFile = this.config.gryphon.serviceTokenFile;
@@ -51,7 +65,7 @@ export class GryphonOwnerController {
     return statusSchema.parse(await this.request("PUT", "/v1/service/connection", {
       botId: input.botId,
       commandPrefix: "saturn",
-      adapterUrl: this.config.gryphon.adapterUrl,
+      adapterUrl: new URL("/internal/gryphon/command", await registeredOrigin(this.database, this.config, "saturn")()).toString(),
     }));
   }
 

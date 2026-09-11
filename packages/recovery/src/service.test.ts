@@ -7,7 +7,7 @@ import { pipeline } from "node:stream/promises";
 import { afterEach, describe, expect, it } from "vitest";
 import yazl from "yazl";
 import { SaturnBackupService } from "./service.js";
-import type { BackupManifest, LogicalDatabaseToolchain, MetadataExporter, RecoveryLimits } from "./types.js";
+import type { BackupManifest, LogicalDatabaseToolchain, MetadataExporter, RecoveryLimits, RestoreInput } from "./types.js";
 
 const roots: string[] = [];
 const limits: RecoveryLimits = {
@@ -97,6 +97,38 @@ function fakeMetadata(): MetadataExporter {
 }
 
 describe("SaturnBackupService restore boundary", () => {
+  it("validates configuration before mutation and rolls back database and settings together", async () => {
+    const directory = await root();
+    const input = path.join(directory, "target.zip");
+    await archive(input, "target");
+    const compose = path.join(directory, "compose.yaml");
+    const migrations = path.join(directory, "migrations");
+    await fs.mkdir(migrations);
+    await fs.writeFile(compose, "services: {}");
+    await fs.writeFile(path.join(migrations, "0001_test.up.sql"), "SELECT 1;");
+    const database = new FakeDatabase();
+    const service = new SaturnBackupService({ spoolRoot: path.join(directory, "spool"), limits, database, metadata: fakeMetadata() });
+    let settings = "original";
+    const configuration: NonNullable<RestoreInput["configuration"]> = {
+      prepare: () => Promise.reject(new Error("credentials unavailable")),
+      apply: () => { settings = "target"; return Promise.reject(new Error("configuration write failed")); },
+      rollback: () => { settings = "original"; return Promise.resolve(); },
+    };
+    await expect(service.restore({ archivePath: input, mode: "clean", configuration })).rejects.toThrow("credentials unavailable");
+    expect(database.restores).toBe(0);
+    configuration.prepare = () => Promise.resolve();
+    await expect(service.restore({ archivePath: input, mode: "replace", configuration,
+      snapshotOutputPath: path.join(directory, "snapshot.zip"),
+      snapshotInput: { publicConfiguration: {}, deploymentManifestPath: compose, migrationsDirectory: migrations },
+    })).rejects.toThrow("configuration write failed");
+    expect(settings).toBe("original");
+    expect(database.value).toBe("original");
+    expect(database.restores).toBe(2);
+    configuration.apply = () => { settings = "target"; return Promise.resolve(); };
+    await service.restore({ archivePath: input, mode: "clean", configuration });
+    expect(settings).toBe("target");
+    expect(database.value).toBe("target");
+  });
   it("rejects a hostile archive before database mutation", async () => {
     const directory = await root();
     const input = path.join(directory, "hostile.zip");

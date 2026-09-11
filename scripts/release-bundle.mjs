@@ -105,7 +105,7 @@ if (command === "build") {
     version,
     sourceRevision,
     createdAt: new Date().toISOString(),
-    databaseSchemaGeneration: 14,
+    databaseSchemaGeneration: Math.max(...(await fs.readdir(path.join(root, "packages/database/migrations"))).map(name => Number.parseInt(name, 10)).filter(Number.isFinite)),
     minimumInstallerVersion: "1.0.0",
     bundle: { url: bundleUrl, sha256: sha(bundle), bytes: bundle.length },
     sbom: { sha256: sha(sbomBytes), format: "pnpm-licenses-json" },
@@ -114,6 +114,13 @@ if (command === "build") {
   const signed = deployment.signReleaseManifest(payload, await fs.readFile(path.resolve(privateKeyFile), "utf8"));
   const manifestPath = path.join(output, "release-manifest.json");
   await fs.writeFile(manifestPath, `${JSON.stringify(signed, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+  const [reference, digest] = appImage.split("@");
+  const compatible = { schema_version: 1, service: "saturn", version, image: { reference, digest }, web_image: webImage,
+    compose_bundle: { url: bundleUrl, sha256: payload.bundle.sha256.slice(7) }, database_schema: payload.databaseSchemaGeneration, minimum_updater_version: "0.4.0" };
+  const compatiblePath = path.join(output, "saturn-release.json");
+  await fs.writeFile(compatiblePath, `${JSON.stringify(compatible, null, 2)}\n`);
+  const signedCompatible = spawnSync(process.execPath, [path.join(root, "scripts/sign-release.mjs"), compatiblePath], { stdio: "inherit", windowsHide: true });
+  if (signedCompatible.status !== 0) throw new Error("Saturn Updater manifest signing failed");
   await fs.writeFile(`${bundlePath}.sha256`, `${payload.bundle.sha256.slice(7)}  ${path.basename(bundlePath)}\n`, { encoding: "utf8", mode: 0o600 });
   process.stdout.write(`${JSON.stringify({ state: "built", manifest: manifestPath, bundle: bundlePath, bundleSha256: payload.bundle.sha256, sbomSha256: payload.sbom.sha256, updaterVersion })}\n`);
 } else if (command === "verify") {

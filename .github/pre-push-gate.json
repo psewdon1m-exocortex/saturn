@@ -2,60 +2,56 @@
   "version": 1,
   "service": "saturn",
   "exposure_modes": [
-    "public/non-indexable",
-    "private"
+    "private",
+    "concealed"
   ],
   "profiles": {
     "backup_restore": {
       "applicable": true,
       "evidence": [
-        "docs/implementation/STAGE_05_SATURN_BACKUP_RECOVERY.md",
+        "DEPLOYMENT_READINESS.md",
         "packages/recovery/src/service.test.ts",
-        "packages/backup-ingest/src/backup.service.test.ts"
+        "packages/storage/src/recovery-configuration.ts"
       ]
     },
     "service_update": {
       "applicable": true,
       "evidence": [
-        "docs/implementation/PRODUCTION_READINESS.md",
-        ".github/workflows/release.yml",
-        "packages/deployment/src/index.test.ts"
+        "DEPLOYMENT_READINESS.md",
+        "apps/api/src/updater.controller.ts",
+        "scripts/release-bundle.mjs"
       ]
     },
     "internal_documentation": {
       "applicable": true,
       "evidence": [
-        "apps/web/src/app.tsx",
-        "apps/web/src/app.test.tsx",
-        "docs/implementation/README.md"
+        "apps/web/src/app.tsx"
       ]
     },
     "technical_documentation": {
       "applicable": true,
       "evidence": [
         "README.md",
-        "docs/implementation/README.md",
-        "docs/technical_solution_storage_gateway.md"
+        "DEPLOYMENT_READINESS.md"
       ]
     },
     "security": {
       "applicable": true,
       "evidence": [
-        "docs/implementation/EXPOSURE_AND_CONNECTION_MATRIX.md",
         "apps/api/src/owner-token.guard.test.ts",
-        "packages/auth/src/owner-auth.service.test.ts"
+        "infra/production/Caddyfile"
       ]
     },
     "public_seo_geo": {
       "applicable": false,
-      "reason": "Saturn has no intentionally public/indexable content surface."
+      "reason": "This service has no deliberately public/indexable content; crawler exclusion is checked in the private/concealed profile."
     },
     "private_concealed": {
       "applicable": true,
       "evidence": [
-        "docs/implementation/EXPOSURE_AND_CONNECTION_MATRIX.md",
-        "infra/production/Caddyfile.local",
-        "apps/api/src/owner-token.guard.test.ts"
+        "DEPLOYMENT_READINESS.md",
+        "apps/api/src/owner-token.guard.test.ts",
+        "infra/production/Caddyfile"
       ]
     }
   }

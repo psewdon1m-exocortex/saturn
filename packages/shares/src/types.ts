@@ -69,6 +69,7 @@ export interface SharePackage {
 export interface ShareOptions {
   readonly enabled: boolean;
   readonly publicOrigin: string;
+  readonly resolvePublicOrigin?: () => Promise<string>;
   readonly defaultExpiryMs: number;
   readonly maxExpiryMs: number;
   readonly sessionTtlMs: number;

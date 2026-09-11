@@ -105,7 +105,7 @@ export class BackupCapabilitiesController {
 @Controller("backups/:serviceSlug")
 @UseFilters(BackupApiExceptionFilter)
 export class BackupProducerController {
-  constructor(@Inject(BACKUP_INGEST_SERVICE) private readonly backups: BackupIngestService, private readonly transfers: TransferMonitorService) {}
+  constructor(@Inject(BACKUP_INGEST_SERVICE) private readonly backups: BackupIngestService, @Inject(TransferMonitorService) private readonly transfers: TransferMonitorService) {}
   authenticate(authorization: string | undefined, fingerprint: string | undefined): Promise<BackupContext> { return this.backups.authenticate(authorization, fingerprint); }
   @Post("runs") async create(@Param("serviceSlug") serviceSlug: string, @Headers("authorization") authorization: string | undefined, @Headers("x-vault-client-cert-sha256") fingerprint: string | undefined, @Headers("idempotency-key") idempotencyKey: string | undefined, @Body() body: unknown, @Res({ passthrough: true }) reply: FastifyReply) {
     if (idempotencyKey === undefined) throw new Error("Idempotency-Key is invalid"); const input = runSchema.parse(body); const context = await this.authenticate(authorization, fingerprint);

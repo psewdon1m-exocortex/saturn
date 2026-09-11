@@ -154,14 +154,18 @@ export class DeviceService {
     return entries;
   }
 
-  async openRead(context: DeviceContext, rawPath: string, range?: { readonly offset: number; readonly length?: number }): Promise<DavRead> {
+  async openRead(context: DeviceContext, rawPath: string, range?: { readonly offset: number; readonly length?: number } | ((size: number) => { readonly offset: number; readonly length?: number } | undefined)): Promise<DavRead> {
     this.#right(context, "read");
     const target = await this.#resolve(context, normalizeDavPath(rawPath));
     if (target.resource.type !== "file") throw new DeviceServiceError("not_found");
-    const offset = range?.offset ?? 0;
-    const length = range?.length ?? target.resource.sizeBytes - offset;
-    const opened = await this.input.files.openDownload(target.resource.id, offset, range?.length, this.#actor(context));
-    return { resource: opened.resource, stream: opened.stream, offset, length, partial: range !== undefined };
+    let selected: { readonly offset: number; readonly length?: number } | undefined;
+    const opened = await this.input.files.openDownload(target.resource.id, (resource) => {
+      selected = typeof range === "function" ? range(resource.sizeBytes) : range;
+      return selected ?? { offset: 0 };
+    }, undefined, this.#actor(context));
+    const offset = selected?.offset ?? 0;
+    const length = selected?.length ?? opened.resource.sizeBytes - offset;
+    return { resource: opened.resource, stream: opened.stream, offset, length, partial: selected !== undefined };
   }
 
   async put(context: DeviceContext, rawPath: string, source: Readable, size: number, conditions: { readonly ifMatch?: string; readonly ifNoneMatch?: string }): Promise<{ readonly resource: Resource; readonly created: boolean; readonly conflict: boolean }> {

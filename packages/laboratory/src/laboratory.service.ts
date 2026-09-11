@@ -171,7 +171,8 @@ export class LaboratoryService {
   async fragment(id: string): Promise<{ readonly asset: LaboratoryAsset; readonly url: string; readonly fragment: string; readonly format: "markdown_image" | "markdown_link" | "html_video" }> {
     const asset = await this.#requiredAsset(id); if (asset.state !== "active") throw new LaboratoryServiceError("not_found");
     const resource = await this.#resource(asset.resourceId); this.#modeAllowed(asset.mode, resource, asset.sourceShareId);
-    const url = `${this.input.options.publicOrigin}/a/${encodeURIComponent(asset.id)}/${encodeURIComponent(asset.publicFilename)}`;
+    const origin = await this.input.options.resolvePublicOrigin?.() ?? this.input.options.publicOrigin;
+    const url = `${origin}/a/${encodeURIComponent(asset.id)}/${encodeURIComponent(asset.publicFilename)}`;
     if (resource.mimeType?.startsWith("image/")) return { asset, url, fragment: `![${markdownText(asset.label)}](${url})`, format: "markdown_image" };
     if (resource.mimeType?.startsWith("video/")) return { asset, url, fragment: `<video controls src="${htmlText(url)}" aria-label="${htmlText(asset.label)}"></video>`, format: "html_video" };
     return { asset, url, fragment: `[${markdownText(asset.label)}](${url})`, format: "markdown_link" };
@@ -221,14 +222,15 @@ export class LaboratoryService {
   #modeAllowed(mode: LaboratoryAssetMode, resource: Resource, sourceShareId?: string): void {
     if (mode !== "private" && (!this.input.options.publicEnabled || (resource.securityClassification !== "public" && sourceShareId === undefined))) throw new LaboratoryServiceError("unauthorized");
   }
-  #sharedAssetResult(asset: LaboratoryAsset, version: FileVersion) {
+  async #sharedAssetResult(asset: LaboratoryAsset, version: FileVersion) {
+    const origin = await this.input.options.resolvePublicOrigin?.() ?? this.input.options.publicOrigin;
     return {
       asset,
       versionId: version.id,
       sizeBytes: version.sizeBytes,
       sha256: version.sha256,
       mimeType: version.mimeType,
-      url: `${this.input.options.publicOrigin}/a/${encodeURIComponent(asset.id)}/${encodeURIComponent(asset.publicFilename)}`,
+      url: `${origin}/a/${encodeURIComponent(asset.id)}/${encodeURIComponent(asset.publicFilename)}`,
     };
   }
   async #currentVersion(resource: Resource): Promise<FileVersion> {

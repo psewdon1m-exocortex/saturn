@@ -14,6 +14,8 @@ export class MaintenanceBarrierInterceptor implements NestInterceptor {
     const request = context.switchToHttp().getRequest<FastifyRequest>();
     if (!MUTATING_METHODS.has(request.method)
       || request.url.startsWith("/api/v1/operator/recovery")
+      || request.url.startsWith("/api/v1/operator/updates")
+      || request.url.split("?")[0] === "/api/v1/internal/neptune/backup"
       || request.url.startsWith("/api/v1/operator/storage")) return next.handle();
     return from(this.database.withSharedMaintenance(() => lastValueFrom(next.handle())));
   }

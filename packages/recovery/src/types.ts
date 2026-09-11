@@ -72,6 +72,11 @@ export interface RestoreInput {
   readonly mode: "clean" | "replace";
   readonly snapshotOutputPath?: string;
   readonly snapshotInput?: Omit<BackupRunInput, "outputPath" | "kind">;
+  readonly configuration?: {
+    prepare(value: unknown): Promise<void>;
+    apply(): Promise<void>;
+    rollback(): Promise<void>;
+  };
 }
 
 export interface RestoreResult {

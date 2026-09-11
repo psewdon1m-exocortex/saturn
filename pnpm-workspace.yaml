@@ -2,6 +2,9 @@ packages:
   - "apps/*"
   - "packages/*"
 
+overrides:
+  fastify: 5.12.1
+
 allowBuilds:
   cpu-features: false
   esbuild: true

@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Headers, Param, Post, Put, UseFilters, UseGuards } from "@nestjs/common";
+import { Body, Controller, Get, Headers, Inject, Param, Post, Put, UseFilters, UseGuards } from "@nestjs/common";
 import { z } from "zod";
 import { BackupApiExceptionFilter } from "./backup-api-exception.filter.js";
 import { NeptuneFleetService, type NeptuneFleetCheckIn } from "./neptune-fleet.service.js";
@@ -36,7 +36,7 @@ const commandSchema = z.discriminatedUnion("kind", [
 @Controller("neptune/agent")
 @UseFilters(BackupApiExceptionFilter)
 export class NeptuneAgentController {
-  constructor(private readonly fleet: NeptuneFleetService) {}
+  constructor(@Inject(NeptuneFleetService) private readonly fleet: NeptuneFleetService) {}
 
   @Post("check-in")
   async checkIn(@Headers("authorization") authorization: string | undefined, @Body() body: unknown) {
@@ -49,7 +49,7 @@ export class NeptuneAgentController {
 @UseGuards(OwnerTokenGuard)
 @UseFilters(SaturnApiExceptionFilter)
 export class NeptuneFleetOwnerController {
-  constructor(private readonly fleet: NeptuneFleetService) {}
+  constructor(@Inject(NeptuneFleetService) private readonly fleet: NeptuneFleetService) {}
 
   @Get() list() { return this.fleet.list(); }
   @Get(":serviceId") get(@Param("serviceId") serviceId: string) { return this.fleet.get(serviceId); }

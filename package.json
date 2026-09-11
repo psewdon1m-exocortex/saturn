@@ -12,7 +12,7 @@
     "typecheck": "pnpm -r --if-present typecheck",
     "lint": "eslint .",
     "test": "pnpm -r --if-present test",
-    "verify": "pnpm lint && pnpm typecheck && pnpm build && pnpm test",
+    "verify": "pnpm lint && pnpm build && pnpm typecheck && pnpm test",
     "dev": "concurrently -n api,worker,web -c cyan,magenta,green \"pnpm --filter @saturn/api dev\" \"pnpm --filter @saturn/worker dev\" \"pnpm --filter @saturn/web dev\"",
     "dev:prepare": "node scripts/prepare-dev.mjs",
     "dev:up": "node scripts/dev-up.mjs",

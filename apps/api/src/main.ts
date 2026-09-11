@@ -4,7 +4,7 @@ import { fastifyCookie } from "@fastify/cookie";
 import { RequestMethod } from "@nestjs/common";
 import { NestFactory } from "@nestjs/core";
 import { FastifyAdapter, type NestFastifyApplication } from "@nestjs/platform-fastify";
-import { loadEnvironment } from "@saturn/config";
+import { loadEnvironment, watchRecoveredConfiguration } from "@saturn/config";
 import type { FastifyPluginCallback, FastifyRequest } from "fastify";
 import { AppModule } from "./app.module.js";
 import type { DeviceService } from "@saturn/sync";
@@ -30,7 +30,7 @@ const adapter = new FastifyAdapter({
     },
   },
   bodyLimit: config.limits.uploadChunkMaxBytes,
-  trustProxy: config.environment === "production" ? 1 : false,
+  trustProxy: config.trustedProxies.length ? [...config.trustedProxies] : false,
 });
 for (const method of ["PROPFIND", "MKCOL", "MOVE", "COPY"]) {
   adapter.getInstance().addHttpMethod(method);
@@ -60,3 +60,4 @@ adapter.getInstance().addHook("onSend", (request, reply, payload, done) => {
   done(null, payload);
 });
 await app.listen(config.api.port, config.api.host);
+watchRecoveredConfiguration(config, async () => { await app.close(); process.exit(75); });

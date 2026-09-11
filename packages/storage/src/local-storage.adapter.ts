@@ -1,5 +1,4 @@
 import fs from "node:fs/promises";
-import { createReadStream } from "node:fs";
 import path from "node:path";
 import type { Readable } from "node:stream";
 import { normalizeStoragePath, resolveLocalPath, storageBasename } from "./paths.js";
@@ -56,17 +55,18 @@ export class LocalStorageAdapter implements StorageAdapter {
     };
   }
 
-  openRead(storagePath: string, options: StorageReadOptions = {}): Promise<Readable> {
+  async openRead(storagePath: string, options: StorageReadOptions = {}): Promise<Readable> {
     const offset = options.offset ?? 0;
     if (!Number.isSafeInteger(offset) || offset < 0) throw new Error("Read offset is invalid");
     if (options.length !== undefined && (!Number.isSafeInteger(options.length) || options.length < 1)) {
       throw new Error("Read length is invalid");
     }
     const end = options.length === undefined ? undefined : offset + options.length - 1;
-    return Promise.resolve(createReadStream(resolveLocalPath(this.#root, storagePath), {
+    const handle = await fs.open(resolveLocalPath(this.#root, storagePath), "r");
+    return handle.createReadStream({
       start: offset,
       ...(end === undefined ? {} : { end }),
-    }));
+    });
   }
 
   async write(storagePath: string, source: Readable, options: StorageWriteOptions): Promise<number> {

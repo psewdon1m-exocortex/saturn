@@ -59,6 +59,7 @@ export interface LaboratoryOptions {
   readonly enabled: boolean;
   readonly publicEnabled: boolean;
   readonly publicOrigin: string;
+  readonly resolvePublicOrigin?: () => Promise<string>;
   readonly tokenRotationGraceMs: number;
   readonly maxConcurrentPublicStreams: number;
 }

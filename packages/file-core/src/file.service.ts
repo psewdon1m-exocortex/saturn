@@ -381,10 +381,12 @@ export class FileService {
       );
       const mimeType = await detectContentType(upload.filename, probe);
       await this.#repository.setUploadState(id, "committing", { actualSha256: digest.sha256 });
-      const target = upload.overwriteResourceId === undefined
+      let target = upload.overwriteResourceId === undefined
         ? await this.#repository.getChild(upload.parentId, upload.filename)
         : await this.getResource(upload.overwriteResourceId);
       if (target !== undefined) {
+        if (!(await this.#acquireLocksWithin(lockId, [`resource:${target.id}`], UPLOAD_LOCK_MS, 30_000))) throw new Error("Overwrite target is locked");
+        target = await this.getResource(target.id);
         if (target.type !== "file" || target.status !== "active" || target.currentVersionId === undefined
           || target.parentId !== upload.parentId || target.name.toLocaleLowerCase() !== upload.filename.toLocaleLowerCase()) {
           await this.#repository.setUploadState(id, "failed_final", { errorCode: "overwrite_target_invalid" });
@@ -481,19 +483,23 @@ export class FileService {
     }
   }
 
-  async openDownload(resourceId: string, offset = 0, length?: number, auditActor?: { readonly type: string; readonly id: string }): Promise<{ readonly resource: Resource; readonly stream: Readable }> {
-    const resource = await this.getResource(resourceId);
-    if (resource.type !== "file" || resource.status !== "active") throw new Error("Resource is not an active file");
-    if (!Number.isSafeInteger(offset) || offset < 0 || offset > resource.sizeBytes) throw new Error("Download offset is invalid");
-    if (length !== undefined && (!Number.isSafeInteger(length) || length < 1 || offset + length > resource.sizeBytes)) {
-      throw new Error("Download length is invalid");
-    }
-    const stream = await this.#storage.openRead(resource.storagePath, { offset, ...(length === undefined ? {} : { length }) });
-    await this.#writeAudit("file.download.opened", `download:${uuidv7()}`, resource.id, {
-      offset,
-      length: length ?? resource.sizeBytes - offset,
-    }, auditActor);
-    return { resource, stream };
+  async openDownload(resourceId: string, offset: number | ((resource: Resource) => { readonly offset: number; readonly length?: number }) = 0, length?: number, auditActor?: { readonly type: string; readonly id: string }): Promise<{ readonly resource: Resource; readonly stream: Readable }> {
+    const lockId = uuidv7();
+    if (!(await this.#acquireLocksWithin(lockId, [`resource:${resourceId}`], MUTATION_LOCK_MS, 30_000))) throw new Error("Download resource is locked");
+    try {
+      const resource = await this.getResource(resourceId);
+      if (resource.type !== "file" || resource.status !== "active") throw new Error("Resource is not an active file");
+      if (typeof offset === "function") { const selected = offset(resource); offset = selected.offset; length = selected.length; }
+      if (!Number.isSafeInteger(offset) || offset < 0 || offset > resource.sizeBytes) throw new Error("Download offset is invalid");
+      if (length !== undefined && (!Number.isSafeInteger(length) || length < 1 || offset + length > resource.sizeBytes)) {
+        throw new Error("Download length is invalid");
+      }
+      const stream = await this.#storage.openRead(resource.storagePath, { offset, ...(length === undefined ? {} : { length }) });
+      try {
+        await this.#writeAudit("file.download.opened", `download:${uuidv7()}`, resource.id, { offset, length: length ?? resource.sizeBytes - offset }, auditActor);
+      } catch (error) { stream.destroy(); throw error; }
+      return { resource, stream };
+    } finally { await this.#repository.releaseLocks(lockId); }
   }
 
   async openVersionDownload(resourceId: string, versionId: string, offset = 0, length?: number, auditActor?: { readonly type: string; readonly id: string }): Promise<{ readonly resource: Resource; readonly version: FileVersion; readonly stream: Readable }> {

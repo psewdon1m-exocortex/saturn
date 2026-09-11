@@ -28,6 +28,7 @@ COPY --chown=node:node compose.production.yaml /app/recovery/compose.yaml
 COPY --chown=node:node packages/database/migrations /app/recovery/migrations
 COPY --chown=node:node scripts/validate-production.mjs scripts/migrate-runtime.mjs scripts/storage-bootstrap.mjs scripts/storage-smoke.mjs scripts/storage-exit.mjs /app/scripts/
 ENV VAULT_RUNTIME_ROOT=/app
+COPY --chown=node:node scripts/recovery-cli.mjs /app/scripts/
 USER node
 ENTRYPOINT ["/sbin/tini","--"]
 CMD ["node","/app/api/dist/main.js"]

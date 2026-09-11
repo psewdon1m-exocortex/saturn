@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { loadEnvironment, publicConfig } from "./index.js";
+import { loadEnvironment, publicConfig, validateRecoveredConfiguration, writeRecoveredConfiguration } from "./index.js";
 
 const valid = {
   NODE_ENV: "test",
@@ -24,6 +24,26 @@ const valid = {
 };
 
 describe("loadEnvironment", () => {
+  it("restores every public setting on a fresh process while retaining target host trust paths", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "saturn-config-restore-"));
+    try {
+      const input = { ...valid, STORAGE_RUNTIME_CONFIG_DIR: directory };
+      const target = loadEnvironment(input);
+      const source = loadEnvironment({ ...input, SHARE_DEFAULT_EXPIRY_MS: "7200000", TRASH_RETENTION_MS: "86400000", STORAGE_HOST: "restored-host", API_PORT: "4001" });
+      const data = publicConfig(source);
+      const checked = validateRecoveredConfiguration(data, target, input);
+      expect(checked.api.port).toBe(target.api.port);
+      expect(checked.storage.passwordFile).toBe(target.storage.passwordFile);
+      writeRecoveredConfiguration(data, target);
+      const restored = loadEnvironment(input);
+      expect(restored.share.defaultExpiryMs).toBe(7200000);
+      expect(restored.limits.trashRetentionMs).toBe(86400000);
+      expect(restored.storage.host).toBe("restored-host");
+      expect(publicConfig(restored)).toEqual({ ...data, api: target.api });
+      expect(() => validateRecoveredConfiguration({ ...data, databaseUrl: "postgres://injected" }, target, input)).toThrow(/Unknown recovery/);
+      expect(() => validateRecoveredConfiguration({ ...data, limits: { ...source.limits, uploadMaxBytes: -1 } }, target, input)).toThrow(/Invalid Saturn/);
+    } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+  });
   it("loads a validated development configuration with absolute secret references", () => {
     const config = loadEnvironment(valid, "C:/vault");
     expect(config.storage.passwordFile).toMatch(/vault[\\/].secrets[\\/]test-password$/);

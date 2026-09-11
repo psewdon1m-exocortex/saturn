@@ -187,12 +187,16 @@ services:
 
   api:
     <<: *vault-environment
+    environment:
+      API_TRUSTED_PROXIES: "${VAULT_PROXY_IP:-172.31.250.2}"
     image: ${VAULT_APP_IMAGE:?set VAULT_APP_IMAGE to an immutable digest}
     command: ["node", "/app/api/dist/main.js"]
     ports:
       - "127.0.0.1:3000:3000"
     networks:
       backend:
+      proxy:
+        ipv4_address: "${VAULT_API_PROXY_IP:-172.31.250.3}"
       exocortex-services:
         aliases:
           - saturn
@@ -247,8 +251,9 @@ services:
       - caddy_data:/data
       - caddy_config:/config
     networks:
-      - edge
-      - backend
+      edge:
+      proxy:
+        ipv4_address: "${VAULT_PROXY_IP:-172.31.250.2}"
     depends_on:
       api:
         condition: service_healthy
@@ -277,6 +282,11 @@ volumes:
 
 networks:
   edge:
+  proxy:
+    internal: true
+    ipam:
+      config:
+        - subnet: "${VAULT_PROXY_SUBNET:-172.31.250.0/29}"
   backend:
     internal: true
   exocortex-services:

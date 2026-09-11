@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { Readable } from "node:stream";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { LocalStorageAdapter } from "@saturn/storage";
 import { FileService } from "./file.service.js";
 import {
@@ -461,6 +461,46 @@ async function collect(stream: NodeJS.ReadableStream): Promise<Buffer> {
 }
 
 describe("FileService upload state machine", () => {
+  it("pins a download version while an overwrite changes both bytes and length", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "saturn-read-overwrite-"));
+    const storage = new LocalStorageAdapter(root);
+    const repository = new MemoryRepository();
+    const service = new FileService(repository, storage);
+    try {
+      await storage.initialize(); await service.initializeStorage();
+      const upload = async (body: string, key: string, overwriteResourceId?: string) => {
+        const value = await service.createUpload({ parentId: SYNC_RESOURCE_ID, filename: "changing.txt", expectedSize: Buffer.byteLength(body), idempotencyKey: key, ...(overwriteResourceId === undefined ? {} : { overwriteResourceId }) });
+        await service.appendUpload(value.id, 0, Buffer.byteLength(body), Readable.from(body));
+        return value;
+      };
+      const original = (await service.completeUpload((await upload("watcher-run", "read-old")).id)).resource;
+      const replacement = await upload("timer-run", "read-new", original.id);
+      let releaseOpen!: () => void;
+      let reachedOpen!: () => void;
+      const barrier = new Promise<void>((resolve) => { releaseOpen = resolve; });
+      const reached = new Promise<void>((resolve) => { reachedOpen = resolve; });
+      const realOpen = storage.openRead.bind(storage);
+      const spy = vi.spyOn(storage, "openRead").mockImplementation(async (file, options) => {
+        if (file === original.storagePath) { reachedOpen(); await barrier; }
+        return realOpen(file, options);
+      });
+      const reading = service.openDownload(original.id);
+      await reached;
+      const replacing = service.completeUpload(replacement.id);
+      releaseOpen();
+      const opened = await reading;
+      await replacing;
+      expect(opened.resource.sizeBytes).toBe(11);
+      expect((await collect(opened.stream)).toString()).toBe("watcher-run");
+      spy.mockRestore();
+      const latest = await service.openDownload(original.id, (resource) => ({ offset: resource.sizeBytes - 3, length: 3 }));
+      expect(latest.resource.sizeBytes).toBe(9);
+      expect((await collect(latest.stream)).toString()).toBe("run");
+      expect(repository.locks.size).toBe(0);
+    } finally {
+      await storage.close(); await fs.rm(root, { recursive: true, force: true });
+    }
+  });
   it("allows ordinary root folders while canonical roots remain renameable and copyable but immovable", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "saturn-root-policy-"));
     const storage = new LocalStorageAdapter(root);

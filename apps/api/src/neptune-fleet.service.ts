@@ -183,6 +183,10 @@ export class NeptuneFleetService {
         `;
       }
       await sql`
+        UPDATE neptune_agent_commands SET state = 'failed', error = 'command_expired', completed_at = now()
+        WHERE service_id = ${serviceId} AND state = 'pending' AND created_at < now() - interval '7 days'
+      `;
+      await sql`
         DELETE FROM neptune_agent_commands
         WHERE service_id = ${serviceId} AND completed_at < now() - interval '30 days'
       `;
@@ -222,7 +226,7 @@ export class NeptuneFleetService {
     return {
       schema: "saturn.neptune.control.v1",
       desired: publicAgent(result.row).desired,
-      commands: result.commands.map((command) => ({ id: command.id, kind: command.kind, payload: command.payload })),
+      commands: result.commands.map((command) => ({ id: command.id, kind: command.kind, payload: command.payload, expiresAt: new Date(new Date(command.created_at).getTime() + 7 * 86_400_000).toISOString() })),
     };
   }
 

@@ -4,6 +4,7 @@
   http_port 8080
   https_port 8443
   servers {
+    strict_sni_host on
     protocols h1 h2
     timeouts {
       read_body 2m
@@ -14,7 +15,15 @@
   }
 }
 
+# Unknown HTTP virtual hosts have no discovery response or product header.
+http://:8080 {
+  header -Server
+  header X-Robots-Tag "noindex, nofollow, noarchive"
+  respond 404
+}
+
 {$VAULT_DOMAIN} {
+  route {
   encode zstd gzip
 
   header {
@@ -31,7 +40,17 @@
   @blocked path /.git* /.env* /.secrets* /artifacts* /data* /spool* /docs* /*.map
   respond @blocked 404
 
+  # Operator and internal API surfaces are private. Public capabilities retain their own authentication.
+  @outsidePrivate {
+    not remote_ip {$VAULT_PRIVATE_CLIENT_CIDRS:127.0.0.1/32 ::1/128}
+    not path /s/* /drop /a/* /assets/* /robots.txt /api/v1/public/shares/* /api/v1/drop/redeem /api/v1/drop/session /api/v1/drop/uploads /api/v1/drop/uploads/* /api/v1/drop/complete /api/v1/drop/logout /dav /dav/* /api/v1/backups/* /api/v1/neptune/agent/* /api/v1/backup-enrollments/redeem /api/v1/sync/preferences
+  }
+  respond @outsidePrivate 404
+
   handle /api/* {
+    reverse_proxy api:3000
+  }
+  handle /internal/gryphon/command {
     reverse_proxy api:3000
   }
   handle /a/* {
@@ -56,7 +75,7 @@
     header Cache-Control "public, max-age=3600"
     file_server
   }
-  @spa path / /files /files/* /inbox /inbox/* /shared /trash /settings /drop /s/*
+  @spa path / /files /files/* /inbox /inbox/* /shared /trash /settings /synchronization /drop /s/*
   handle @spa {
     root * /srv
     rewrite * /index.html
@@ -64,4 +83,5 @@
     file_server
   }
   respond 404
+  }
 }

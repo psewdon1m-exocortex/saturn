@@ -305,15 +305,6 @@ export class OperatorController {
     };
   }
 
-  @Get("updates")
-  updates() {
-    return {
-      installedVersion: process.env.VAULT_RELEASE_VERSION ?? "0.1.0",
-      updater: { state: "unavailable", reason: "A privileged local updater is not configured." },
-      registry: { state: "unavailable", reason: "An approved Kernel release registry is not configured." },
-      discoveryEnabled: false,
-    };
-  }
 
   @Get("kernel")
   async kernel() {

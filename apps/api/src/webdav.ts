@@ -71,17 +71,26 @@ async function handler(request: FastifyRequest, reply: FastifyReply, devices: De
       return await reply.status(207).type("application/xml; charset=utf-8").send(multistatus(entries, rawPath === ""));
     }
     if (request.method === "GET" || request.method === "HEAD") {
-      const entries = await devices.propfind(context, rawPath, 0);
-      const resource = entries[0]?.resource;
+      let invalidRangeSize: number | undefined;
+      const chooseRange = (size: number): ReturnType<typeof range> => {
+        try { return range(request.headers.range, size); }
+        catch (error) { invalidRangeSize = size; throw error; }
+      };
+      const opened = request.method === "HEAD" ? undefined : await devices.openRead(context, rawPath, chooseRange).catch((error: unknown) => {
+        if (invalidRangeSize === undefined) throw error;
+        return undefined;
+      });
+      if (invalidRangeSize !== undefined) { reply.status(416).header("Content-Range", `bytes */${String(invalidRangeSize)}`).send(); return; }
+      const resource = opened?.resource ?? (await devices.propfind(context, rawPath, 0))[0]?.resource;
       if (resource === undefined || resource.type !== "file") throw new DeviceServiceError("not_found");
       let selected: ReturnType<typeof range>;
-      try { selected = range(request.headers.range, resource.sizeBytes); }
+      try { selected = opened === undefined ? chooseRange(resource.sizeBytes) : opened.partial ? { offset: opened.offset, length: opened.length } : undefined; }
       catch { reply.status(416).header("Content-Range", `bytes */${String(resource.sizeBytes)}`).send(); return; }
       const length = selected?.length ?? resource.sizeBytes;
       reply.header("Accept-Ranges", "bytes").header("Content-Length", length).header("ETag", resourceEtag(resource)).header("Last-Modified", resource.updatedAt.toUTCString()).type(resource.mimeType ?? "application/octet-stream");
       if (selected !== undefined) reply.status(206).header("Content-Range", `bytes ${String(selected.offset)}-${String(selected.offset + length - 1)}/${String(resource.sizeBytes)}`);
       if (request.method === "HEAD") { reply.send(); return; }
-      const opened = await devices.openRead(context, rawPath, selected);
+      if (opened === undefined) throw new DeviceServiceError("not_found");
       return await reply.send(transfers.trackDownload(opened.stream, { filename: resource.name, totalBytes: length }));
     }
     if (request.method === "PUT") {

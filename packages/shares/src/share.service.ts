@@ -135,6 +135,7 @@ export class ShareService {
     if (expiresAt !== undefined && (expiresAt <= now || expiresAt.getTime() - now.getTime() > this.#options.maxExpiryMs)) throw new Error("Share expiry is invalid");
     if (input.maxDownloads !== undefined && (!Number.isSafeInteger(input.maxDownloads) || input.maxDownloads < 1 || input.maxDownloads > 1_000_000)) throw new Error("Share download limit is invalid");
     const token = randomBytes(32).toString("base64url");
+    const publicOrigin = await this.#options.resolvePublicOrigin?.() ?? this.#options.publicOrigin;
     const record = await this.#repository.createShare({
       id: uuidv7(),
       tokenHash: this.#tokenHash(token),
@@ -149,7 +150,7 @@ export class ShareService {
       createdAt: now,
     });
     await this.#auditOwner("share.created", record.id, { resourceId: resource.id, mode: record.mode, passwordProtected: record.passwordHash !== undefined });
-    return { token, url: new URL(`/s/${token}`, this.#options.publicOrigin).toString(), share: publicValue(record, resource, record.passwordHash !== undefined) };
+    return { token, url: new URL(`/s/${token}`, publicOrigin).toString(), share: publicValue(record, resource, record.passwordHash !== undefined) };
   }
 
   async listShares(offset = 0, limit = 100): Promise<readonly PublicShare[]> {

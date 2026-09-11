@@ -7,7 +7,7 @@ import { Inject, Injectable, type OnApplicationShutdown, type OnModuleInit } fro
 import type { AuditService } from "@saturn/audit";
 import { publicConfig, type SaturnConfig } from "@saturn/config";
 import { Database, migrate } from "@saturn/database";
-import type { RuntimeStorageManager } from "@saturn/storage";
+import { createStorageRecoveryParticipant, type RuntimeStorageManager } from "@saturn/storage";
 import {
   BackupArchiveValidator,
   DatabaseMetadataExporter,
@@ -329,6 +329,7 @@ export class RecoveryWorkflowService implements OnModuleInit, OnApplicationShutd
         mode: "replace",
         snapshotOutputPath,
         snapshotInput: this.#requireInputs(),
+        configuration: await createStorageRecoveryParticipant(this.#config, this.#storage),
       }, () => migrate(this.#config.databaseUrl, this.#requireInputs().migrationsDirectory), (action) => this.#database.withExclusiveMaintenance(action));
       record.state = "complete";
       await this.#writeJournal(record);

@@ -1,7 +1,7 @@
 import "dotenv/config";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { loadEnvironment, publicConfig } from "@saturn/config";
+import { loadEnvironment, publicConfig, watchRecoveredConfiguration } from "@saturn/config";
 import { Database } from "@saturn/database";
 import { AuditService } from "@saturn/audit";
 import {
@@ -124,3 +124,4 @@ const shutdown = async (): Promise<void> => {
 };
 process.once("SIGINT", () => void shutdown());
 process.once("SIGTERM", () => void shutdown());
+watchRecoveredConfiguration(config, async () => { await shutdown(); process.exit(75); });

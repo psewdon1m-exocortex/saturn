@@ -108,6 +108,7 @@ jobs:
       - name: Build signed release bundle
         env:
           RELEASE_SIGNING_PRIVATE_KEY: ${{ secrets.VAULT_RELEASE_SIGNING_PRIVATE_KEY }}
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
           VAULT_BUNDLE_URL: https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/vault-${{ steps.identity.outputs.version }}.zip
         shell: bash
         run: |

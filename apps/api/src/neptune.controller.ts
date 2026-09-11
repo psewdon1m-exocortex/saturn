@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
-import { Body, Controller, Get, Headers, HttpCode, Inject, Post, Put, Res, UseFilters, UseGuards } from "@nestjs/common";
+import { Body, Controller, Get, Headers, HttpCode, Inject, Param, Post, Put, Res, UseFilters, UseGuards } from "@nestjs/common";
 import type { FastifyReply } from "fastify";
 import { z } from "zod";
 import { OwnerTokenGuard, RequireRecentReauthentication } from "./owner-token.guard.js";
@@ -66,7 +66,15 @@ function neptune(method: string, route: string, body?: JsonObject) {
 }
 
 export function updater(route: string, body: JsonObject, timeout?: number) {
-  return unixJson(process.env.UPDATER_SOCKET_PATH?.trim() || "/run/exocortex/updater.sock", "updater.local", "POST", route, ["X-Updater-Token", required("UPDATER_CONTROL_TOKEN")], body, timeout);
+  return unixJson(process.env.UPDATER_SOCKET_PATH?.trim() || "/run/exocortex/updater.sock", "updater.local", "POST", route, ["X-Updater-Token", updaterToken()], body, timeout);
+}
+export function updaterToken(): string {
+  const filename = process.env.UPDATER_CONTROL_TOKEN_FILE;
+  if (filename === undefined) return required("UPDATER_CONTROL_TOKEN");
+  if (fs.statSync(filename).size > 8192) throw new Error("Invalid Updater credential file");
+  const token = fs.readFileSync(filename, "utf8").trim();
+  if (token.length < 32) throw new Error("Invalid Updater credential");
+  return token;
 }
 
 function neptuneHealth() {
@@ -99,6 +107,14 @@ export class NeptuneExportController {
 @UseGuards(OwnerTokenGuard)
 @UseFilters(SaturnApiExceptionFilter)
 export class NeptuneOwnerController {
+  @Get("initializations/:id")
+  initialization(@Param("id") id: string) {
+    if (!/^neptune-[0-9]+-[a-f0-9]{16}$/.test(id)) throw new Error("Invalid initialization job ID");
+    const headId = process.env.UPDATER_HEAD_ID?.trim() || "saturn";
+    return unixJson(process.env.UPDATER_SOCKET_PATH?.trim() || "/run/exocortex/updater.sock", "updater.local", "GET",
+      `/v1/components/neptune-linux/initializations/${encodeURIComponent(id)}?head_id=${encodeURIComponent(headId)}`,
+      ["X-Updater-Token", updaterToken()]);
+  }
   @Get("status") status() { return neptune("GET", "/status"); }
 
   @Get("availability")

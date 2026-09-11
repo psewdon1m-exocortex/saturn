@@ -196,6 +196,11 @@ export class SaturnBackupService {
     try {
       const validated = await this.#validator.validate(path.resolve(input.archivePath), extractionDirectory);
       const dumpPath = path.join(extractionDirectory, "database", "database.dump");
+      if (input.configuration !== undefined) {
+        const publicPath = path.join(extractionDirectory, "config", "public.json");
+        if ((await fs.stat(publicPath)).size > 65_536) throw new Error("Recovered configuration exceeds the size limit");
+        await input.configuration.prepare(JSON.parse(await fs.readFile(publicPath, "utf8")) as unknown);
+      }
       if (input.mode === "replace") {
         if (input.snapshotOutputPath === undefined || input.snapshotInput === undefined) {
           throw new Error("Replacement restore requires a pre-restore snapshot destination and inputs");
@@ -211,6 +216,7 @@ export class SaturnBackupService {
           await this.#database.restoreDump(dumpPath, input.mode);
           await migrateTarget();
           const verification = await this.#database.verifyRestoredDatabase();
+          await input.configuration?.apply();
           const finished = new Date();
           return {
             backupId: validated.manifest.backupId,
@@ -223,7 +229,10 @@ export class SaturnBackupService {
             ...(snapshot === undefined ? {} : { snapshotPath: snapshot.archivePath }),
           };
         } catch (restoreError) {
-          if (snapshot === undefined) throw restoreError;
+          if (snapshot === undefined) {
+            await input.configuration?.rollback();
+            throw restoreError;
+          }
           const rollbackDirectory = path.join(restoreDirectory, "rollback");
           try {
             await this.#validator.validate(snapshot.archivePath, rollbackDirectory);
@@ -231,8 +240,11 @@ export class SaturnBackupService {
             await migrateTarget();
             await this.#database.verifyRestoredDatabase();
           } catch (rollbackError) {
+            try { await input.configuration?.rollback(); }
+            catch (configurationError) { throw new AggregateError([restoreError, rollbackError, configurationError], "Database and configuration rollback failed"); }
             throw new AggregateError([restoreError, rollbackError], "Restore and snapshot rollback both failed");
           }
+          await input.configuration?.rollback();
           throw restoreError;
         }
       });

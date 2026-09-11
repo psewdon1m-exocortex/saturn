@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { createRequire } from "node:module";
 
 const vaultRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const [command, archiveArgument, confirmation] = process.argv.slice(2);
@@ -10,10 +11,13 @@ if (command === undefined || !validCommands.has(command)) {
   throw new Error("Usage: recovery-cli.mjs backup | validate <archive> | restore-clean <archive> | restore-replace <archive> --confirm-replace");
 }
 
-const recovery = await import(pathToFileURL(path.join(vaultRoot, "packages", "recovery", "dist", "index.js")));
-const configModule = await import(pathToFileURL(path.join(vaultRoot, "packages", "config", "dist", "index.js")));
-const databaseModule = await import(pathToFileURL(path.join(vaultRoot, "packages", "database", "dist", "index.js")));
-const storageModule = await import(pathToFileURL(path.join(vaultRoot, "packages", "storage", "dist", "index.js")));
+const runtimeRoot = process.env.VAULT_RUNTIME_ROOT;
+const runtimeRequire = runtimeRoot === undefined ? undefined : createRequire(path.join(runtimeRoot, "api/package.json"));
+const moduleUrl = name => pathToFileURL(runtimeRequire === undefined ? path.join(vaultRoot, "packages", name, "dist/index.js") : runtimeRequire.resolve(`@saturn/${name}`));
+const recovery = await import(moduleUrl("recovery"));
+const configModule = await import(moduleUrl("config"));
+const databaseModule = await import(moduleUrl("database"));
+const storageModule = await import(moduleUrl("storage"));
 const config = configModule.loadEnvironment(process.env, vaultRoot);
 
 if (command === "validate") {
@@ -42,7 +46,8 @@ if (command === "validate") {
 }
 
 const database = new databaseModule.Database(config.databaseUrl, { max: 3 });
-const storage = command === "backup" ? new storageModule.SftpStorageAdapter(config.storage) : undefined;
+const storage = new storageModule.RuntimeStorageManager(config.storage, config.storageRuntimeConfigDirectory);
+await storage.initialize();
 try {
   const databaseUrl = new URL(config.databaseUrl);
   const knownSecrets = [
@@ -71,9 +76,9 @@ try {
     ...(storage === undefined ? {} : { storage }),
   });
   const safeInputs = {
-    publicConfiguration: configModule.publicConfig(config),
-    deploymentManifestPath: path.join(vaultRoot, "compose.yaml"),
-    migrationsDirectory: path.join(vaultRoot, "packages", "database", "migrations"),
+    publicConfiguration: configModule.publicConfig({ ...config, storage: storage.current().config }),
+    deploymentManifestPath: runtimeRoot === undefined ? path.join(vaultRoot, "compose.yaml") : path.join(runtimeRoot, "recovery/compose.yaml"),
+    migrationsDirectory: runtimeRoot === undefined ? path.join(vaultRoot, "packages", "database", "migrations") : path.join(runtimeRoot, "recovery/migrations"),
   };
 
   if (command === "backup") {
@@ -94,8 +99,9 @@ try {
     const result = await service.restore({
       archivePath: path.resolve(archiveArgument),
       mode,
+      configuration: await storageModule.createStorageRecoveryParticipant(config, storage),
       ...(mode === "clean" ? {} : { snapshotOutputPath, snapshotInput: safeInputs }),
-    }, () => databaseModule.migrate(config.databaseUrl, safeInputs.migrationsDirectory));
+    }, () => databaseModule.migrate(config.databaseUrl, safeInputs.migrationsDirectory), action => database.withExclusiveMaintenance(action));
     process.stdout.write(`${JSON.stringify({ state: "complete", ...result })}\n`);
   }
 } finally {

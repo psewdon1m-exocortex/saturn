@@ -64,6 +64,8 @@ import {
 } from "./tokens.js";
 import { ArchiveController } from "./archive.controller.js";
 import { OperatorController } from "./operator.controller.js";
+import { UpdaterController } from "./updater.controller.js";
+import { HelperRecoveryController } from "./helper-recovery.controller.js";
 import { TransferMonitorService } from "./transfer-monitor.service.js";
 import { TransferTaskController } from "./transfer-task.controller.js";
 import { MaintenanceBarrierInterceptor } from "./maintenance-barrier.interceptor.js";
@@ -79,7 +81,7 @@ import { NeptuneFleetService } from "./neptune-fleet.service.js";
 const config = loadEnvironment();
 
 @Module({
-  controllers: [HealthController, AuthController, OperatorController, TransferTaskController, ArchiveController, StorageConnectionController, RecoveryController, NeptuneExportController, NeptuneOwnerController, NeptuneAgentController, NeptuneFleetOwnerController, GryphonOwnerController, FileController, ActivityController, ProtectionController, DropController, GryphonController, ShareOwnerController, ResourceClassificationController, PublicShareController, DeviceController, SyncClientController, BackupOwnerController, BackupRestoreController, BackupEnrollmentController, BackupCapabilitiesController, BackupProducerController, LaboratoryClientController, LaboratoryAssetController, LaboratoryImportController, LaboratoryDeliveryController],
+  controllers: [HelperRecoveryController, UpdaterController, HealthController, AuthController, OperatorController, TransferTaskController, ArchiveController, StorageConnectionController, RecoveryController, NeptuneExportController, NeptuneOwnerController, NeptuneAgentController, NeptuneFleetOwnerController, GryphonOwnerController, FileController, ActivityController, ProtectionController, DropController, GryphonController, ShareOwnerController, ResourceClassificationController, PublicShareController, DeviceController, SyncClientController, BackupOwnerController, BackupRestoreController, BackupEnrollmentController, BackupCapabilitiesController, BackupProducerController, LaboratoryClientController, LaboratoryAssetController, LaboratoryImportController, LaboratoryDeliveryController],
   providers: [
     { provide: APP_CONFIG, useValue: config },
     { provide: DATABASE, useFactory: () => new Database(config.databaseUrl, { max: 10, maintenanceBarrier: true }) },
@@ -178,7 +180,7 @@ const config = loadEnvironment();
     { provide: LABORATORY_REPOSITORY, useFactory: (database: Database) => new PostgresLaboratoryRepository(database), inject: [DATABASE] },
     {
       provide: LABORATORY_SERVICE,
-      useFactory: async (repository: LaboratoryRepository, files: FileService, audit: AuditService) => new LaboratoryService({
+      useFactory: async (repository: LaboratoryRepository, files: FileService, audit: AuditService, database: Database) => new LaboratoryService({
         repository,
         files,
         pepper: (await fs.readFile(config.laboratory.pepperFile, "utf8")).replace(/[\r\n]+$/, ""),
@@ -186,12 +188,13 @@ const config = loadEnvironment();
           enabled: config.laboratory.enabled,
           publicEnabled: config.laboratory.publicEnabled,
           publicOrigin: config.publicOrigin,
+          resolvePublicOrigin: registeredOrigin(database, config, "saturn"),
           tokenRotationGraceMs: config.laboratory.tokenRotationGraceMs,
           maxConcurrentPublicStreams: config.laboratory.maxConcurrentPublicStreams,
         },
         audit,
       }),
-      inject: [LABORATORY_REPOSITORY, FILE_SERVICE, AUDIT_SERVICE],
+      inject: [LABORATORY_REPOSITORY, FILE_SERVICE, AUDIT_SERVICE, DATABASE],
     },
     {
       provide: BACKUP_INGEST_SERVICE,
@@ -240,7 +243,7 @@ const config = loadEnvironment();
     },
     {
       provide: SHARE_SERVICE,
-      useFactory: async (repository: ShareRepository, files: FileService, storage: StorageAdapter, audit: AuditService) => new ShareService({
+      useFactory: async (repository: ShareRepository, files: FileService, storage: StorageAdapter, audit: AuditService, database: Database) => new ShareService({
         repository,
         files,
         storage,
@@ -248,6 +251,7 @@ const config = loadEnvironment();
         options: {
           enabled: config.share.enabled,
           publicOrigin: config.publicOrigin,
+          resolvePublicOrigin: registeredOrigin(database, config, "saturn"),
           defaultExpiryMs: config.share.defaultExpiryMs,
           maxExpiryMs: config.share.maxExpiryMs,
           sessionTtlMs: config.share.sessionTtlMs,
@@ -260,7 +264,7 @@ const config = loadEnvironment();
         },
         audit,
       }),
-      inject: [SHARE_REPOSITORY, FILE_SERVICE, STORAGE_ADAPTER, AUDIT_SERVICE],
+      inject: [SHARE_REPOSITORY, FILE_SERVICE, STORAGE_ADAPTER, AUDIT_SERVICE, DATABASE],
     },
     {
       provide: RECONCILIATION_SERVICE,
@@ -304,3 +308,4 @@ const config = loadEnvironment();
 // Nest modules are declarative metadata containers by design.
 // eslint-disable-next-line @typescript-eslint/no-extraneous-class
 export class AppModule {}
+import { registeredOrigin } from "./kernel-discovery.js";

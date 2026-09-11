@@ -112,10 +112,25 @@ export const api = {
     body: JSON.stringify({ action }),
   }),
   updateStatus: () => request<UpdateStatus>("/operator/updates"),
+  exportHelpers: async (passphrase: string): Promise<Blob> => {
+    const headers = new Headers({ "Content-Type": "application/json" }); const csrf = csrfToken(); if (csrf !== undefined) headers.set("X-Vault-CSRF", csrf);
+    const response = await fetch("/api/v1/operator/helper-recovery/export", { method: "POST", headers, credentials: "same-origin", body: JSON.stringify({ passphrase }) });
+    if (!response.ok) throw new ApiError(response.status, await response.json().catch(() => undefined) as unknown);
+    return response.blob();
+  },
+  restoreHelpers: (passphrase: string, archive_base64: string, confirmation: string) => request<{ id: string; state: string }>("/operator/helper-recovery/restore", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ passphrase, archive_base64, confirmation }) }),
+  checkSaturnUpdate: () => request<{ update_available: boolean; available_version?: string; installed_version: string }>("/operator/updates/check", { method: "POST" }),
+  installSaturnUpdate: (version: string) => request<{ id: string; state: string; message?: string }>("/operator/updates/install", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ version }) }),
+  agentJob: (id: string) => request<{ id: string; state: string; message?: string; rollback_available?: boolean }>(`/operator/updates/jobs/${encodeURIComponent(id)}`),
+  rollbackSaturnUpdate: (id: string) => request<{ id: string; state: string }>(`/operator/updates/jobs/${encodeURIComponent(id)}/rollback`, { method: "POST" }),
+  installUpdater: () => request<{ id: string; state: string }>("/operator/updates/updater/install", { method: "POST" }),
+  initializeGryphon: () => request<{ id: string; state: string }>("/operator/gryphon/initialize", { method: "POST" }),
+  registerGryphonBot: (alias: string, bot_token: string) => request<{ id: string; state: string }>("/operator/gryphon/bots", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ alias, bot_token }) }),
   recoveryStatus: () => request<RecoveryStatus>("/operator/recovery"),
   neptuneStatus: () => request<NeptuneStatus>("/operator/neptune/status"),
   neptuneAvailability: () => request<NeptuneAvailability>("/operator/neptune/availability"),
   initializeNeptune: (enrollmentCode: string) => request<{ readonly id: string; readonly state: string }>("/operator/neptune/initialize", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enrollment_code: enrollmentCode }) }),
+  neptuneInitialization: (id: string) => request<{ readonly id: string; readonly state: string; readonly message?: string }>(`/operator/neptune/initializations/${encodeURIComponent(id)}`),
   updateNeptuneSchedule: (enabled: boolean, intervalHours: number) => request<undefined>("/operator/neptune/schedule", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled, interval_hours: intervalHours }) }),
   runNeptune: () => request<Record<string, unknown>>("/operator/neptune/runs", { method: "POST" }),
   updateNeptuneMirrorSchedule: (enabled: boolean, intervalMinutes: number) => request<undefined>("/operator/neptune/mirror/schedule", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled, interval_minutes: intervalMinutes }) }),
