@@ -38,7 +38,10 @@ pinned in `.release/updater.version`; CI refuses to build with another version.
    configuration, replace the domain and certificate paths, add the exact
    owner VPN/internal CIDRs to all protected locations, run `nginx -t`, and
    reload Nginx. Keep upstreams aligned with `SATURN_API_BIND_PORT` and
-   `SATURN_WEB_BIND_PORT`.
+   `SATURN_WEB_BIND_PORT`. Preserve the fail-closed HTTP/HTTPS `default_server`
+   blocks. The global `client_max_body_size 16m` remains in force except in the
+   exact `/dav` and prefix `/dav/` locations, where `0` permits a streaming
+   whole-file PUT and Saturn remains the authoritative size limit.
 7. Run `pnpm prod:bootstrap-storage` and `vaultctl smoke` with the production
    environment. The smoke object must be deleted automatically.
 8. Verify canonical HTTPS, DNS, unauthorised external exposure and second-copy
@@ -82,8 +85,11 @@ static web process by default. The independently managed server Nginx is the
 only component that owns public ports 80/443 and TLS certificates. PostgreSQL,
 worker health and SFTP transport remain on internal networks. Verify this from
 an unauthorized external network; an internal scan is insufficient evidence.
-All routes are non-indexable by default and unknown paths return bounded `404`
-responses.
+After every ingress change, verify that an unknown HTTP Host is closed without
+a response, an unknown TLS SNI is rejected during the handshake, spoofing
+`X-Forwarded-For: 127.0.0.1` does not bypass the owner CIDR, and owner routes
+return `403` outside that CIDR. All routes are non-indexable by default and
+unknown paths on the canonical host return bounded `404` responses.
 
 If a secret enters a log, screenshot, cache, image or archive, treat it as
 disclosed: stop promotion, revoke/rotate it from a clean environment,

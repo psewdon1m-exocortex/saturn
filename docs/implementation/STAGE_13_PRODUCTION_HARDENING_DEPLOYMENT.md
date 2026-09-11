@@ -81,7 +81,8 @@ and hand over a reproducible operating system rather than a developer setup.
    application/database rollback.
 6. Storage timeout, PostgreSQL loss after rename, process restart during upload,
    checksum mismatch, spool pressure and client disconnect injection.
-7. Complete owner/Drop/share/WebDAV/backup/Laboratory functional E2E.
+7. Complete owner/Drop/share/WebDAV/backup/Laboratory functional E2E, including
+   a whole-file WebDAV PUT larger than the global 16 MiB Nginx limit.
 8. Full backup plus independent second-copy verification and clean-host restore
    with measured RPO/RTO.
 9. Alternative-backend exit import/compare for bytes, SHA-256, stable IDs,
@@ -113,9 +114,12 @@ and hand over a reproducible operating system rather than a developer setup.
 
 The production implementation and isolated production-like gate pass locally.
 The machine report `artifacts/verification/stage-13-production-hardening.json`
-contains 12 passing checks, including 83 tests, hardened immutable images,
+contains 13 passing checks, including the complete workspace test suite,
+hardened immutable images,
 signed release tamper rejection, exact storage smoke cleanup, HTTPS Gateway
-E2E through server Nginx, loopback/probe isolation, SFTP/PostgreSQL outage recovery, rejected bad candidate,
+E2E through server Nginx, a verified 17 MiB WebDAV PUT, fail-closed unknown
+Host/SNI and simulated outside-CIDR/spoofed-forwarding-header denial,
+loopback/probe isolation, SFTP/PostgreSQL outage recovery, rejected bad candidate,
 clean-host database restore, alternative-backend exit and final secret scans.
 
 This evidence does not claim a real PROD deployment, independent second-copy

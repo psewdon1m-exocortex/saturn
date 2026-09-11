@@ -21,6 +21,10 @@ The aggregate gate covers:
   canonical release manifest;
 - migration, canonical six business roots plus hidden `_system` bootstrap and exact temporary-object cleanup;
 - HTTPS owner login, upload, metadata, Range, checksum and trash workflow;
+- a 17 MiB whole-file WebDAV PUT streamed through server Nginx, then read,
+  checksum verification and deletion;
+- fail-closed unknown Host/SNI plus spoofed `X-Forwarded-For` and simulated
+  outside-operator-CIDR denial;
 - SFTP and PostgreSQL outage/recovery plus fail-closed candidate rejection before
   traffic switch;
 - clean PostgreSQL dump/restore comparison and provider-exit byte/SHA comparison;
@@ -50,18 +54,20 @@ DEV credentials are not substitutes for any item in this table.
 1. Provision the dedicated PROD sub-account, host, DNS, second copy and secrets.
 2. Fill only operator inputs in `.env.production`; run `pnpm prod:validate`.
 3. After publishing the pinned `updater-v0.4.1`, push the protected
-   `saturn-v0.1.1` tag. The release workflow builds candidate images once,
+   `saturn-v0.1.2` tag. The release workflow builds candidate images once,
    tests those digests, signs the bundle and publishes only on pass. Unscoped
    `v*` tags run verification only and are not production-release identities.
 4. Install the independently trusted release public key on the clean host and
    run the pinned `bootstrap.sh` with the HTTPS manifest URL.
 5. Install the bundled Nginx example into the server configuration, set the
    real domain/certificates and exact private client CIDRs, then require a clean
-   `nginx -t` before reload.
+   `nginx -t` before reload. Preserve the fail-closed default servers and the
+   WebDAV-only body-limit exception.
 6. Run `vaultctl validate`, `vaultctl install`, `vaultctl bootstrap-storage` and
    `vaultctl smoke`. Confirm the generated smoke object was deleted.
-7. From the independent vantage, verify TLS, approved routes and that no internal
-   listener is reachable.
+7. From the independent vantage, verify TLS, approved routes, rejection of
+   unknown Host/SNI, denial outside the operator CIDR despite spoofed forwarding
+   headers, and that no internal listener is reachable.
 8. Exercise second-copy delivery and an isolated restore within the approved
    RPO/RTO. Keep the prior digest and verified database snapshot.
 9. Load real data only after all preceding evidence is attached to the release.

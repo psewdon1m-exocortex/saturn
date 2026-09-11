@@ -3,7 +3,7 @@ import test from "node:test";
 import { versionFromSaturnReleaseTag } from "./release-identity.mjs";
 
 test("derives the stable version from a module-scoped Saturn release tag", () => {
-  assert.equal(versionFromSaturnReleaseTag("saturn-v0.1.0"), "0.1.0");
+  assert.equal(versionFromSaturnReleaseTag("saturn-v0.1.2"), "0.1.2");
   assert.equal(versionFromSaturnReleaseTag("saturn-v12.34.56"), "12.34.56");
 });
 
