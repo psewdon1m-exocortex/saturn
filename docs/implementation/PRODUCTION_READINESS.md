@@ -48,8 +48,10 @@ DEV credentials are not substitutes for any item in this table.
 
 1. Provision the dedicated PROD sub-account, host, DNS, second copy and secrets.
 2. Fill only operator inputs in `.env.production`; run `pnpm prod:validate`.
-3. Push a protected semantic version tag. The release workflow builds candidate
-   images once, tests those digests, signs the bundle and publishes only on pass.
+3. After publishing the pinned `updater-v0.4.0`, push the protected
+   `saturn-v0.1.0` tag. The release workflow builds candidate images once,
+   tests those digests, signs the bundle and publishes only on pass. Unscoped
+   `v*` tags run verification only and are not production-release identities.
 4. Install the independently trusted release public key on the clean host and
    run the pinned `bootstrap.sh` with the HTTPS manifest URL.
 5. Run `vaultctl validate`, `vaultctl install`, `vaultctl bootstrap-storage` and

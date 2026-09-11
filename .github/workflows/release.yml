@@ -3,7 +3,7 @@ name: release
 on:
   push:
     tags:
-      - "v*.*.*"
+      - "saturn-v*.*.*"
 
 permissions:
   contents: write
@@ -14,7 +14,7 @@ env:
   UPDATER_REPOSITORY: ${{ vars.UPDATER_REPOSITORY || 'psewdon1m-exocortex/updater' }}
 
 concurrency:
-  group: vault-release-${{ github.ref }}
+  group: saturn-release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -38,8 +38,7 @@ jobs:
         id: identity
         shell: bash
         run: |
-          version="${GITHUB_REF_NAME#v}"
-          node -e 'if (!/^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/.test(process.argv[1])) process.exit(1)' "$version"
+          version="$(node scripts/release-identity.mjs "$GITHUB_REF_NAME")"
           repository="${GITHUB_REPOSITORY,,}"
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "image_root=ghcr.io/$repository" >> "$GITHUB_OUTPUT"
@@ -77,7 +76,7 @@ jobs:
           file: infra/production/Dockerfile
           target: app
           push: true
-          tags: ${{ steps.identity.outputs.image_root }}/vault-app:candidate-${{ github.sha }}
+          tags: ${{ steps.identity.outputs.image_root }}/saturn-app:candidate-${{ github.sha }}
           build-args: |
             VAULT_VERSION=${{ steps.identity.outputs.version }}
             VAULT_SOURCE_REVISION=${{ github.sha }}
@@ -91,7 +90,7 @@ jobs:
           file: infra/production/Dockerfile
           target: web
           push: true
-          tags: ${{ steps.identity.outputs.image_root }}/vault-web:candidate-${{ github.sha }}
+          tags: ${{ steps.identity.outputs.image_root }}/saturn-web:candidate-${{ github.sha }}
           build-args: |
             VAULT_VERSION=${{ steps.identity.outputs.version }}
             VAULT_SOURCE_REVISION=${{ github.sha }}
@@ -100,45 +99,45 @@ jobs:
       - name: Test the exact candidate image digests
         shell: bash
         run: |
-          docker pull "${{ steps.identity.outputs.image_root }}/vault-app@${{ steps.app.outputs.digest }}"
-          docker pull "${{ steps.identity.outputs.image_root }}/vault-web@${{ steps.web.outputs.digest }}"
-          docker tag "${{ steps.identity.outputs.image_root }}/vault-app@${{ steps.app.outputs.digest }}" vault-app:stage13
-          docker tag "${{ steps.identity.outputs.image_root }}/vault-web@${{ steps.web.outputs.digest }}" vault-web:stage13
+          docker pull "${{ steps.identity.outputs.image_root }}/saturn-app@${{ steps.app.outputs.digest }}"
+          docker pull "${{ steps.identity.outputs.image_root }}/saturn-web@${{ steps.web.outputs.digest }}"
+          docker tag "${{ steps.identity.outputs.image_root }}/saturn-app@${{ steps.app.outputs.digest }}" vault-app:stage13
+          docker tag "${{ steps.identity.outputs.image_root }}/saturn-web@${{ steps.web.outputs.digest }}" vault-web:stage13
           VAULT_STAGE13_PREBUILT=true pnpm verify:stage:13
       - name: Build signed release bundle
         env:
           RELEASE_SIGNING_PRIVATE_KEY: ${{ secrets.VAULT_RELEASE_SIGNING_PRIVATE_KEY }}
           RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
-          VAULT_BUNDLE_URL: https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/vault-${{ steps.identity.outputs.version }}.zip
+          SATURN_BUNDLE_URL: https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/saturn-${{ steps.identity.outputs.version }}.zip
         shell: bash
         run: |
           test -n "$RELEASE_SIGNING_PRIVATE_KEY"
-          install -m 0600 /dev/null "$RUNNER_TEMP/vault-release-key.pem"
-          printf '%s' "$RELEASE_SIGNING_PRIVATE_KEY" > "$RUNNER_TEMP/vault-release-key.pem"
+          install -m 0600 /dev/null "$RUNNER_TEMP/saturn-release-key.pem"
+          printf '%s' "$RELEASE_SIGNING_PRIVATE_KEY" > "$RUNNER_TEMP/saturn-release-key.pem"
           updater_version="$(tr -d '[:space:]' < .release/updater.version)"
           UPDATER_BUNDLE_DIR="$PWD/.release-inputs/updater" \
           UPDATER_BUNDLE_VERSION="$updater_version" \
             node scripts/release-bundle.mjs build \
             "${{ steps.identity.outputs.version }}" \
             "${{ github.sha }}" \
-            "${{ steps.identity.outputs.image_root }}/vault-app@${{ steps.app.outputs.digest }}" \
-            "${{ steps.identity.outputs.image_root }}/vault-web@${{ steps.web.outputs.digest }}" \
-            "$RUNNER_TEMP/vault-release-key.pem" \
+            "${{ steps.identity.outputs.image_root }}/saturn-app@${{ steps.app.outputs.digest }}" \
+            "${{ steps.identity.outputs.image_root }}/saturn-web@${{ steps.web.outputs.digest }}" \
+            "$RUNNER_TEMP/saturn-release-key.pem" \
             artifacts/release
-          rm -f "$RUNNER_TEMP/vault-release-key.pem"
+          rm -f "$RUNNER_TEMP/saturn-release-key.pem"
       - name: Promote tested digests to version tags
         shell: bash
         run: |
-          if docker buildx imagetools inspect "${{ steps.identity.outputs.image_root }}/vault-app:${{ steps.identity.outputs.version }}" >/dev/null 2>&1; then
+          if docker buildx imagetools inspect "${{ steps.identity.outputs.image_root }}/saturn-app:${{ steps.identity.outputs.version }}" >/dev/null 2>&1; then
             echo "application version tag already exists; refusing replacement" >&2
             exit 1
           fi
-          if docker buildx imagetools inspect "${{ steps.identity.outputs.image_root }}/vault-web:${{ steps.identity.outputs.version }}" >/dev/null 2>&1; then
+          if docker buildx imagetools inspect "${{ steps.identity.outputs.image_root }}/saturn-web:${{ steps.identity.outputs.version }}" >/dev/null 2>&1; then
             echo "web version tag already exists; refusing replacement" >&2
             exit 1
           fi
-          docker buildx imagetools create --tag "${{ steps.identity.outputs.image_root }}/vault-app:${{ steps.identity.outputs.version }}" "${{ steps.identity.outputs.image_root }}/vault-app@${{ steps.app.outputs.digest }}"
-          docker buildx imagetools create --tag "${{ steps.identity.outputs.image_root }}/vault-web:${{ steps.identity.outputs.version }}" "${{ steps.identity.outputs.image_root }}/vault-web@${{ steps.web.outputs.digest }}"
+          docker buildx imagetools create --tag "${{ steps.identity.outputs.image_root }}/saturn-app:${{ steps.identity.outputs.version }}" "${{ steps.identity.outputs.image_root }}/saturn-app@${{ steps.app.outputs.digest }}"
+          docker buildx imagetools create --tag "${{ steps.identity.outputs.image_root }}/saturn-web:${{ steps.identity.outputs.version }}" "${{ steps.identity.outputs.image_root }}/saturn-web@${{ steps.web.outputs.digest }}"
       - name: Publish under the existing immutable tag
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -157,7 +156,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: vault-release-${{ github.ref_name }}
+          name: saturn-release-${{ github.ref_name }}
           path: |
             artifacts/release/
             artifacts/verification/stage-13-production-hardening.json

@@ -8,10 +8,13 @@ HTTPS domain. Never copy the DEV `.env`, database, key or sub-account into PROD.
 The main Storage Box account is offline break-glass only.
 
 The repository has two separate pipelines. `.github/workflows/verify.yml` runs
-the complete production-like gate for pull requests and `main`. The release
-workflow accepts only protected semantic-version tag pushes, builds candidate
-OCI images once with SBOM/provenance, tests those exact digests, signs the
-release manifest and refuses replacement of existing version tags/releases.
+the complete production-like gate for pull requests, `main` and legacy
+unscoped `v*` tags. The release workflow accepts only protected
+`saturn-vMAJOR.MINOR.PATCH` tag pushes, builds candidate OCI images once with
+SBOM/provenance, tests those exact digests, signs the release manifest and
+refuses replacement of existing version tags/releases. Publish the pinned
+Updater release first; Updater 0.4.0 is the first version that resolves the
+module-scoped Saturn tag.
 The Ed25519 private key exists only in the protected release environment; the
 installer receives the public key through an independent trust channel.
 Every signed Saturn bundle also contains the checksum-verified Updater version

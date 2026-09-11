@@ -31,6 +31,16 @@ The final command evaluates the versioned seven-area policy in
 same policy after native verification on every push to `main` and before a tag
 release can publish artifacts.
 
+## Release identity
+
+Production releases are created only by tags matching
+`saturn-vMAJOR.MINOR.PATCH`. The first production identity is
+`saturn-v0.1.0`; its versioned OCI repositories are `saturn-app` and
+`saturn-web`, and its installation bundle is `saturn-0.1.0.zip`. Legacy
+unscoped tags such as `v0.0.1` run verification only and cannot publish a
+Saturn release. Publish the pinned `updater-v0.4.0` dependency before the
+Saturn tag so release discovery understands the module-scoped tag.
+
 ## Runtime storage profile
 
 The bootstrap `STORAGE_*` values remain the first-start fallback. API and worker

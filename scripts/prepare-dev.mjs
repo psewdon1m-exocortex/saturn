@@ -8,8 +8,6 @@ import { fileURLToPath } from "node:url";
 const vaultRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const secretDirectory = path.join(vaultRoot, ".secrets");
 const temporaryDirectory = path.join(vaultRoot, ".tmp");
-const sftpDirectory = path.join(temporaryDirectory, "sftp");
-const sftpDataDirectory = path.join(vaultRoot, "data", "sftp");
 const postgresPasswordFile = path.join(secretDirectory, "dev-postgres-password");
 const ownerTokenFile = path.join(secretDirectory, "dev-owner-bootstrap-token");
 const authPepperFile = path.join(secretDirectory, "dev-auth-pepper");
@@ -19,10 +17,6 @@ const devicePepperFile = path.join(secretDirectory, "dev-device-pepper");
 const backupPepperFile = path.join(secretDirectory, "dev-backup-pepper");
 const laboratoryPepperFile = path.join(secretDirectory, "dev-laboratory-pepper");
 const gryphonServiceTokenFile = path.join(secretDirectory, "dev-gryphon-service-token");
-const hostKeyFile = path.join(sftpDirectory, "ssh_host_ed25519_key");
-const clientKeyFile = path.join(sftpDirectory, "dev_client_ed25519");
-const usersFile = path.join(sftpDirectory, "users.conf");
-const runtimeEnvironmentFile = path.join(temporaryDirectory, "dev-runtime.env");
 const sshKeygenCommand = process.platform === "win32" ? "ssh-keygen.exe" : "ssh-keygen";
 
 function run(command, args, options = {}) {
@@ -69,7 +63,30 @@ function environmentLine(key, value) {
   return `${key}=${value}`;
 }
 
-export async function prepareDevelopmentEnvironment() {
+function developmentPort(value, fallback, name) {
+  const port = value ?? fallback;
+  if (!Number.isSafeInteger(port) || port < 1 || port > 65_535) throw new Error(`${name} is invalid`);
+  return port;
+}
+
+export async function prepareDevelopmentEnvironment(options = {}) {
+  const postgresPort = developmentPort(options.postgresPort, 55_432, "DEV PostgreSQL port");
+  const sftpPort = developmentPort(options.sftpPort, 2_222, "DEV SFTP port");
+  const runtimeNamespace = options.runtimeNamespace;
+  if (runtimeNamespace !== undefined && !/^[a-z0-9][a-z0-9-]{0,80}$/.test(runtimeNamespace)) {
+    throw new Error("DEV runtime namespace is invalid");
+  }
+  const scopedTemporaryDirectory = runtimeNamespace === undefined
+    ? temporaryDirectory
+    : path.join(temporaryDirectory, runtimeNamespace);
+  const sftpDirectory = path.join(scopedTemporaryDirectory, "sftp");
+  const sftpDataDirectory = runtimeNamespace === undefined
+    ? path.join(vaultRoot, "data", "sftp")
+    : path.join(scopedTemporaryDirectory, "sftp-data");
+  const hostKeyFile = path.join(sftpDirectory, "ssh_host_ed25519_key");
+  const clientKeyFile = path.join(sftpDirectory, "dev_client_ed25519");
+  const usersFile = path.join(sftpDirectory, "users.conf");
+  const runtimeEnvironmentFile = path.join(scopedTemporaryDirectory, "dev-runtime.env");
   await Promise.all([
     fs.mkdir(secretDirectory, { recursive: true }),
     fs.mkdir(sftpDirectory, { recursive: true }),
@@ -102,7 +119,7 @@ export async function prepareDevelopmentEnvironment() {
   }
 
   await fs.writeFile(usersFile, "vault::1001:1001:gateway\n", { encoding: "utf8", mode: 0o600 });
-  const databaseUrl = `postgres://vault:${encodeURIComponent(postgresPassword)}@127.0.0.1:55432/vault`;
+  const databaseUrl = `postgres://vault:${encodeURIComponent(postgresPassword)}@127.0.0.1:${postgresPort}/vault`;
   const environment = {
     NODE_ENV: "development",
     PUBLIC_ORIGIN: "http://127.0.0.1:5173",
@@ -111,6 +128,10 @@ export async function prepareDevelopmentEnvironment() {
     WORKER_HOST: "127.0.0.1",
     WORKER_PORT: "3001",
     DATABASE_URL: databaseUrl,
+    DEV_POSTGRES_BIND_PORT: String(postgresPort),
+    DEV_SFTP_BIND_PORT: String(sftpPort),
+    DEV_SFTP_CONFIG_DIR: `./${path.relative(vaultRoot, sftpDirectory).replaceAll("\\", "/")}`,
+    DEV_SFTP_DATA_DIR: `./${path.relative(vaultRoot, sftpDataDirectory).replaceAll("\\", "/")}`,
     OWNER_BOOTSTRAP_TOKEN_FILE: ownerTokenFile,
     AUTH_PEPPER_FILE: authPepperFile,
     AUTH_SESSION_IDLE_TTL_MS: "900000",
@@ -175,7 +196,7 @@ export async function prepareDevelopmentEnvironment() {
     GRYPHON_SOCKET_PATH: "/run/gryphon/client.sock",
     GRYPHON_TIMEOUT_MS: "10000",
     STORAGE_HOST: "127.0.0.1",
-    STORAGE_PORT: "2222",
+    STORAGE_PORT: String(sftpPort),
     STORAGE_USER: "vault",
     STORAGE_ROOT: "gateway",
     STORAGE_HOST_FINGERPRINT: hostFingerprint,

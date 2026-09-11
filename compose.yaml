@@ -10,7 +10,7 @@ services:
     secrets:
       - postgres_password
     ports:
-      - "127.0.0.1:55432:5432"
+      - "127.0.0.1:${DEV_POSTGRES_BIND_PORT:-55432}:5432"
     tmpfs:
       - /var/lib/postgresql:rw,noexec,nosuid,size=512m
     healthcheck:
@@ -43,13 +43,13 @@ services:
     image: atmoz/sftp:alpine@sha256:81fa92512bf8ead4849f33c1c153907b86d32d77704d1c62a9c70b4316ae9e50
     entrypoint: ["/bin/sh", "/bootstrap/entrypoint.sh"]
     ports:
-      - "127.0.0.1:2222:22"
+      - "127.0.0.1:${DEV_SFTP_BIND_PORT:-2222}:22"
     volumes:
-      - ./.tmp/sftp/users.conf:/etc/sftp/users.conf:ro
+      - ${DEV_SFTP_CONFIG_DIR:-./.tmp/sftp}/users.conf:/etc/sftp/users.conf:ro
       - ./infra/dev/sftp-entrypoint.sh:/bootstrap/entrypoint.sh:ro
-      - ./.tmp/sftp/ssh_host_ed25519_key:/hostkeys/ssh_host_ed25519_key:ro
-      - ./.tmp/sftp/dev_client_ed25519.pub:/home/vault/.ssh/keys/dev_client_ed25519.pub:ro
-      - ./data/sftp:/home/vault/gateway
+      - ${DEV_SFTP_CONFIG_DIR:-./.tmp/sftp}/ssh_host_ed25519_key:/hostkeys/ssh_host_ed25519_key:ro
+      - ${DEV_SFTP_CONFIG_DIR:-./.tmp/sftp}/dev_client_ed25519.pub:/home/vault/.ssh/keys/dev_client_ed25519.pub:ro
+      - ${DEV_SFTP_DATA_DIR:-./data/sftp}:/home/vault/gateway
     healthcheck:
       test: ["CMD-SHELL", "pgrep sshd >/dev/null"]
       interval: 2s

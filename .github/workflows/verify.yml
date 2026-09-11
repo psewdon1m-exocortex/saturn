@@ -6,6 +6,8 @@ on:
   push:
     branches:
       - main
+    tags:
+      - "v*.*.*"
 
 permissions:
   contents: read
@@ -31,7 +33,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: vault-verification-${{ github.sha }}
+          name: saturn-verification-${{ github.sha }}
           path: artifacts/verification/
           if-no-files-found: ignore
           retention-days: 14

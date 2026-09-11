@@ -60,10 +60,10 @@ if (command === "build") {
   if ([version, sourceRevision, appImage, webImage, privateKeyFile, outputArgument].some((value) => value === undefined)) {
     throw new Error("Usage: release-bundle.mjs build <version> <source-revision> <app-image@digest> <web-image@digest> <private-key.pem> <output-dir>");
   }
-  const bundleUrl = process.env.VAULT_BUNDLE_URL;
+  const bundleUrl = process.env.SATURN_BUNDLE_URL ?? process.env.VAULT_BUNDLE_URL;
   const updaterDirectoryValue = process.env.UPDATER_BUNDLE_DIR;
   const updaterVersion = process.env.UPDATER_BUNDLE_VERSION;
-  if (bundleUrl === undefined) throw new Error("VAULT_BUNDLE_URL is required");
+  if (bundleUrl === undefined) throw new Error("SATURN_BUNDLE_URL is required");
   if (updaterDirectoryValue === undefined || updaterVersion === undefined) throw new Error("UPDATER_BUNDLE_DIR and UPDATER_BUNDLE_VERSION are required");
   const pinnedUpdaterVersion = (await fs.readFile(path.join(root, ".release", "updater.version"), "utf8")).trim();
   if (updaterVersion !== pinnedUpdaterVersion) throw new Error(`Updater bundle version ${updaterVersion} does not match pin ${pinnedUpdaterVersion}`);
@@ -83,10 +83,10 @@ if (command === "build") {
   });
   if (licenses.status !== 0) throw new Error("SBOM dependency inventory failed");
   const sbomBytes = Buffer.from(licenses.stdout);
-  const sbomPath = path.join(output, `vault-${version}.sbom.json`);
+  const sbomPath = path.join(output, `saturn-${version}.sbom.json`);
   await fs.mkdir(output, { recursive: true });
   await fs.writeFile(sbomPath, sbomBytes, { mode: 0o600 });
-  const bundlePath = path.join(output, `vault-${version}.zip`);
+  const bundlePath = path.join(output, `saturn-${version}.zip`);
   await archive([
     "compose.production.yaml",
     "infra/production/Caddyfile",

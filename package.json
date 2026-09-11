@@ -33,7 +33,7 @@
     "verify:stage:9": "node scripts/verify-stage-09.mjs",
     "verify:stage:10": "node scripts/verify-stage-10.mjs",
     "verify:stage:12": "node scripts/verify-stage-12.mjs",
-    "verify:stage:13": "node scripts/verify-stage-13.mjs",
+    "verify:stage:13": "node --test scripts/release-identity.test.mjs && node scripts/verify-stage-13.mjs",
     "verify:stage:15": "node scripts/prepare-dev.mjs && node --env-file=.tmp/dev-runtime.env node_modules/tsx/dist/cli.mjs --tsconfig apps/api/tsconfig.json scripts/verify-stage-15.mts",
     "verify:archive:live": "node --env-file=.tmp/dev-runtime.env scripts/verify-archive-live.mjs",
     "prod:validate": "node scripts/validate-production.mjs",
