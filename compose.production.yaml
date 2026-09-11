@@ -187,16 +187,14 @@ services:
 
   api:
     <<: *vault-environment
-    environment:
-      API_TRUSTED_PROXIES: "${VAULT_PROXY_IP:-172.31.250.2}"
     image: ${VAULT_APP_IMAGE:?set VAULT_APP_IMAGE to an immutable digest}
     command: ["node", "/app/api/dist/main.js"]
     ports:
-      - "127.0.0.1:3000:3000"
+      - "${SATURN_API_BIND_ADDRESS:-127.0.0.1}:${SATURN_API_BIND_PORT:-3000}:3000"
     networks:
       backend:
-      proxy:
-        ipv4_address: "${VAULT_API_PROXY_IP:-172.31.250.3}"
+      ingress:
+        ipv4_address: "${SATURN_API_CONTAINER_IP:-172.31.250.3}"
       exocortex-services:
         aliases:
           - saturn
@@ -240,27 +238,22 @@ services:
     mem_limit: 1g
     cpus: 2.0
 
-  edge:
+  web:
     image: ${VAULT_WEB_IMAGE:?set VAULT_WEB_IMAGE to an immutable digest}
-    env_file:
-      - ./infra/production/.env.production
+    command: ["node", "/app/static-server.mjs"]
     ports:
-      - "80:8080"
-      - "443:8443"
-    volumes:
-      - caddy_data:/data
-      - caddy_config:/config
+      - "${SATURN_WEB_BIND_ADDRESS:-127.0.0.1}:${SATURN_WEB_BIND_PORT:-8080}:8080"
     networks:
-      edge:
-      proxy:
-        ipv4_address: "${VAULT_PROXY_IP:-172.31.250.2}"
-    depends_on:
-      api:
-        condition: service_healthy
+      ingress:
+        ipv4_address: "${SATURN_WEB_CONTAINER_IP:-172.31.250.2}"
     restart: unless-stopped
     read_only: true
-    tmpfs:
-      - /tmp:rw,noexec,nosuid,size=32m,mode=1777
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/health/live').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 18
+      start_period: 10s
     security_opt:
       - no-new-privileges:true
     cap_drop: ["ALL"]
@@ -277,16 +270,13 @@ volumes:
   recovery_archives:
   drop_buffer:
   storage_runtime:
-  caddy_data:
-  caddy_config:
 
 networks:
-  edge:
-  proxy:
+  ingress:
     internal: true
     ipam:
       config:
-        - subnet: "${VAULT_PROXY_SUBNET:-172.31.250.0/29}"
+        - subnet: "${SATURN_INGRESS_SUBNET:-172.31.250.0/29}"
   backend:
     internal: true
   exocortex-services:

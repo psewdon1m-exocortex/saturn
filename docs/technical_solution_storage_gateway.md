@@ -212,7 +212,7 @@ Gateway
 
 ### Reverse proxy
 
-- Caddy или Nginx.
+- Серверный Nginx; Saturn не поднимает собственный reverse proxy и не занимает публичные порты.
 - Обязанности: TLS, ограничения размера и скорости запросов, security headers, проксирование, access logs.
 
 ### Передача больших файлов

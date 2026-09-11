@@ -34,12 +34,21 @@ release can publish artifacts.
 ## Release identity
 
 Production releases are created only by tags matching
-`saturn-vMAJOR.MINOR.PATCH`. The first production identity is
-`saturn-v0.1.0`; its versioned OCI repositories are `saturn-app` and
-`saturn-web`, and its installation bundle is `saturn-0.1.0.zip`. Legacy
-unscoped tags such as `v0.0.1` run verification only and cannot publish a
-Saturn release. Publish the pinned `updater-v0.4.0` dependency before the
-Saturn tag so release discovery understands the module-scoped tag.
+`saturn-vMAJOR.MINOR.PATCH`. The current fix identity is `saturn-v0.1.1`; its
+versioned OCI repositories are `saturn-app` and `saturn-web`, and its
+installation bundle is `saturn-0.1.1.zip`. Legacy unscoped tags such as
+`v0.0.1` run verification only and cannot publish a Saturn release. Publish
+the pinned `updater-v0.4.1` dependency before the Saturn tag. The existing
+`saturn-v0.1.0` release remains immutable.
+
+## Production ingress
+
+Saturn does not launch a reverse proxy and never binds host ports 80/443. The
+production Compose file exposes API on `127.0.0.1:3000` and the static web
+process on `127.0.0.1:8080` by default. Install
+[`infra/production/nginx.saturn.conf.example`](infra/production/nginx.saturn.conf.example)
+in the server-managed Nginx, set the real domain, certificate paths and exact
+private client CIDRs, then require `nginx -t` before reload.
 
 ## Runtime storage profile
 

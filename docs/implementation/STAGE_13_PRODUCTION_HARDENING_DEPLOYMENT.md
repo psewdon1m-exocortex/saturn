@@ -25,12 +25,12 @@ and hand over a reproducible operating system rather than a developer setup.
 
 - `RELEASE_BUILT`: source/dependency lock produces immutable API, worker and web
   artifacts plus image digests and SBOM/provenance evidence.
-- `PROD_BOOTSTRAPPED`: restricted secret files, PostgreSQL, reverse proxy and
+- `PROD_BOOTSTRAPPED`: restricted secret files, PostgreSQL, server Nginx and
   the PROD Gateway sub-account exist; canonical `drive`, `backups` and `_system`
   structure is created through the Gateway/storage bootstrap only.
 - `CANDIDATE_HEALTHY`: new release runs on a secondary port, migrations and
   readiness pass, storage identity is pinned and no public route is switched.
-- `TRAFFIC_SWITCHED`: reverse proxy atomically directs traffic to the healthy
+- `TRAFFIC_SWITCHED`: server Nginx atomically directs traffic to the healthy
   candidate; prior immutable image and pre-migration database backup remain.
 - `ROLLBACK_PROVEN`: application/proxy rollback and compatible database restore
   return the previous release without silent data loss.
@@ -41,8 +41,9 @@ and hand over a reproducible operating system rather than a developer setup.
 
 ### Exit state
 
-- only the reverse proxy exposes approved HTTPS routes; PostgreSQL, worker and
-  SFTP transport are not publicly reachable from an unauthorized vantage.
+- Saturn API/web listeners remain on host loopback; only the server-managed
+  Nginx exposes approved HTTPS routes. PostgreSQL, worker and SFTP transport are
+  not publicly reachable from an unauthorized vantage.
 - PROD uses only its own sub-account/key/secrets/database; DEV remains a test
   sandbox and main account remains offline break-glass.
 - upload/read/download/checksum/delete smoke passes on generated PROD data
@@ -62,7 +63,8 @@ and hand over a reproducible operating system rather than a developer setup.
 4. Back up PostgreSQL and portable metadata; verify the backup before mutation.
 5. Start candidate API/worker on secondary ports and run migrations.
 6. Run readiness plus generated upload → read → Range → checksum → delete smoke.
-7. Switch reverse proxy and run authenticated/public external-vantage tests.
+7. Switch the server Nginx upstream and run authenticated/public
+   external-vantage tests.
 8. Observe bounded logs/metrics and execute a non-destructive failure drill.
 9. Retain previous image and execute the documented rollback rehearsal.
 10. Load real data only after the release gate is signed off; keep DEV intact.
@@ -103,7 +105,7 @@ and hand over a reproducible operating system rather than a developer setup.
 
 - PROD sub-account and verified key/fingerprint;
 - DNS and TLS control for the canonical domain;
-- VPS/reverse proxy target and authorized external test vantage;
+- VPS/server Nginx target and authorized external test vantage;
 - independent second-copy target;
 - operator-approved public Laboratory mode, RPO/RTO and maintenance window.
 
@@ -113,7 +115,7 @@ The production implementation and isolated production-like gate pass locally.
 The machine report `artifacts/verification/stage-13-production-hardening.json`
 contains 12 passing checks, including 83 tests, hardened immutable images,
 signed release tamper rejection, exact storage smoke cleanup, HTTPS Gateway
-E2E, edge-only probes, SFTP/PostgreSQL outage recovery, rejected bad candidate,
+E2E through server Nginx, loopback/probe isolation, SFTP/PostgreSQL outage recovery, rejected bad candidate,
 clean-host database restore, alternative-backend exit and final secret scans.
 
 This evidence does not claim a real PROD deployment, independent second-copy

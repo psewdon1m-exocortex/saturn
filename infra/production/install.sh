@@ -129,13 +129,16 @@ install_release() {
   docker network inspect exocortex-services >/dev/null 2>&1 || docker network create exocortex-services >/dev/null
   docker compose --env-file "$CONFIG_FILE" -f "$COMPOSE_FILE" up -d postgres
   docker compose --env-file "$CONFIG_FILE" -f "$COMPOSE_FILE" run --rm migrate
-  docker compose --env-file "$CONFIG_FILE" -f "$COMPOSE_FILE" up -d worker api
+  docker compose --env-file "$CONFIG_FILE" -f "$COMPOSE_FILE" up -d worker api web
   attempts=0
   until docker compose --env-file "$CONFIG_FILE" -f "$COMPOSE_FILE" exec -T api node -e "fetch('http://127.0.0.1:3000/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"; do
     attempts=$((attempts+1)); [ "$attempts" -lt 60 ] || { bounded_logs; die "candidate readiness timed out"; }; sleep 2
   done
-  docker compose --env-file "$CONFIG_FILE" -f "$COMPOSE_FILE" up -d edge
-  printf '%s\n' "Saturn candidate is healthy and registered with updater. Run vaultctl smoke before loading real data."
+  attempts=0
+  until docker compose --env-file "$CONFIG_FILE" -f "$COMPOSE_FILE" exec -T web node -e "fetch('http://127.0.0.1:8080/health/live').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"; do
+    attempts=$((attempts+1)); [ "$attempts" -lt 60 ] || { bounded_logs; die "web readiness timed out"; }; sleep 2
+  done
+  printf '%s\n' "Saturn API and web are healthy on loopback and registered with updater. Validate and reload the server Nginx configuration, then run vaultctl smoke before loading real data."
 }
 
 status() { docker compose --env-file "$CONFIG_FILE" -f "$COMPOSE_FILE" ps; }

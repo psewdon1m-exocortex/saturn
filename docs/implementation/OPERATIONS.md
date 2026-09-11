@@ -33,10 +33,15 @@ pinned in `.release/updater.version`; CI refuses to build with another version.
    `0600`, and keep the release signing private key outside the host.
 5. Run `vaultctl validate`, then `vaultctl install`. The latter installs or
    safely upgrades the bundled Updater and registers the `saturn` head before
-   starting Saturn.
-6. Run `pnpm prod:bootstrap-storage` and `vaultctl smoke` with the production
+   starting Saturn API and web processes on loopback only.
+6. Copy `infra/production/nginx.saturn.conf.example` into the server Nginx
+   configuration, replace the domain and certificate paths, add the exact
+   owner VPN/internal CIDRs to all protected locations, run `nginx -t`, and
+   reload Nginx. Keep upstreams aligned with `SATURN_API_BIND_PORT` and
+   `SATURN_WEB_BIND_PORT`.
+7. Run `pnpm prod:bootstrap-storage` and `vaultctl smoke` with the production
    environment. The smoke object must be deleted automatically.
-7. Verify canonical HTTPS, DNS, unauthorised external exposure and second-copy
+8. Verify canonical HTTPS, DNS, unauthorised external exposure and second-copy
    delivery before loading real data.
 
 `READINESS_TIMEOUT_MS` defaults to 3000 ms and bounds database, storage and
@@ -48,12 +53,12 @@ its validated 4500 ms ceiling.
 ## Update and rollback
 
 Before every migration, create and validate a Saturn recovery archive and a
-logical PostgreSQL snapshot. Start the candidate API/worker before switching
-the edge. Retain the prior image digests and snapshot until the new release has
+logical PostgreSQL snapshot. Start the candidate API/worker/web processes
+before switching server Nginx. Retain the prior image digests and snapshot until the new release has
 passed readiness, authenticated E2E and recovery verification.
 
 If a candidate gate fails, do not switch traffic. If post-switch health fails,
-restore the prior image references and edge configuration. Use a database
+restore the prior image references and server Nginx upstream configuration. Use a database
 rollback only when the release manifest declares the migration reversible;
 otherwise restore the verified pre-update snapshot. Preserve bounded redacted
 logs and reconciliation evidence.
@@ -72,10 +77,13 @@ logs and reconciliation evidence.
 
 ## Exposure and incidents
 
-Only the edge publishes ports 80/443. PostgreSQL, API, worker health and SFTP
-transport remain on internal networks. Verify this from an unauthorized
-external network; an internal scan is insufficient evidence. All routes are
-non-indexable by default and unknown paths return bounded `404` responses.
+Saturn publishes only `127.0.0.1:3000` for API and `127.0.0.1:8080` for its
+static web process by default. The independently managed server Nginx is the
+only component that owns public ports 80/443 and TLS certificates. PostgreSQL,
+worker health and SFTP transport remain on internal networks. Verify this from
+an unauthorized external network; an internal scan is insufficient evidence.
+All routes are non-indexable by default and unknown paths return bounded `404`
+responses.
 
 If a secret enters a log, screenshot, cache, image or archive, treat it as
 disclosed: stop promotion, revoke/rotate it from a clean environment,

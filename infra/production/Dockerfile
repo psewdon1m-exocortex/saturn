@@ -33,15 +33,18 @@ USER node
 ENTRYPOINT ["/sbin/tini","--"]
 CMD ["node","/app/api/dist/main.js"]
 
-FROM caddy:2-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648 AS web
+FROM node:24-alpine@sha256:d32cdf619f63fe0471182d08996dd516c6275bb5fd31ae06e55a570bd9e1ad43 AS web
 ARG VAULT_VERSION=0.0.0
 ARG VAULT_SOURCE_REVISION=unknown
-LABEL org.opencontainers.image.title="Saturn Gateway edge" \
+LABEL org.opencontainers.image.title="Saturn web runtime" \
       org.opencontainers.image.version=$VAULT_VERSION \
       org.opencontainers.image.revision=$VAULT_SOURCE_REVISION
-COPY infra/production/Caddyfile /etc/caddy/Caddyfile
 COPY --from=build --chown=1000:1000 /workspace/apps/web/dist /srv
-RUN setcap -r /usr/bin/caddy \
- && mkdir -p /data/caddy /config/caddy \
- && chown -R 1000:1000 /data /config /srv
+COPY --chown=1000:1000 infra/production/static-server.mjs /app/static-server.mjs
+ENV NODE_ENV=production \
+    SATURN_WEB_HOST=0.0.0.0 \
+    SATURN_WEB_PORT=8080 \
+    SATURN_WEB_ROOT=/srv
 USER 1000:1000
+EXPOSE 8080
+CMD ["node","/app/static-server.mjs"]

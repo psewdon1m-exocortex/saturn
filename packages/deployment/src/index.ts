@@ -25,6 +25,7 @@ export interface ProductionValidationResult {
   readonly rtoSeconds: number;
   readonly secretFiles: number;
   readonly immutableImages: 2;
+  readonly loopbackListeners: { readonly apiPort: number; readonly webPort: number };
   readonly config: SaturnConfig;
 }
 
@@ -107,6 +108,13 @@ export function validateProductionDeployment(
     hashes.add(valueHash);
   }
   const config = loadEnvironment(mapped, baseDirectory);
+  if (required(input, "SATURN_API_BIND_ADDRESS") !== "127.0.0.1" || required(input, "SATURN_WEB_BIND_ADDRESS") !== "127.0.0.1") {
+    throw new Error("Saturn production listeners must bind to IPv4 loopback for server Nginx");
+  }
+  const apiPort = positiveInteger(input, "SATURN_API_BIND_PORT", 65_535);
+  const webPort = positiveInteger(input, "SATURN_WEB_BIND_PORT", 65_535);
+  if (apiPort === webPort) throw new Error("Saturn API and web loopback ports must be distinct");
+  if (config.trustedProxies.length === 0) throw new Error("API_TRUSTED_PROXIES must identify the Docker ingress gateway used by server Nginx");
   const origin = new URL(config.publicOrigin); const domain = required(input, "VAULT_DOMAIN").toLowerCase();
   if (origin.protocol !== "https:" || origin.hostname.toLowerCase() !== domain || origin.port) throw new Error("PUBLIC_ORIGIN must be canonical HTTPS for VAULT_DOMAIN");
   if (profile === "production" && (domain === "localhost" || net.isIP(domain) !== 0 || domain.endsWith(".invalid") || domain.endsWith(".test"))) throw new Error("Production domain is not publicly valid");
@@ -120,7 +128,7 @@ export function validateProductionDeployment(
   if ((laboratoryExposure === "public_approved") !== config.laboratory.publicEnabled) throw new Error("Laboratory decision and LABORATORY_PUBLIC_ENABLED do not match");
   return { state: "valid", releaseVersion, domain, storageIdentity, laboratoryExposure,
     rpoSeconds: positiveInteger(input, "VAULT_RPO_SECONDS", 31_536_000), rtoSeconds: positiveInteger(input, "VAULT_RTO_SECONDS", 31_536_000),
-    secretFiles: hashes.size, immutableImages: 2, config };
+    secretFiles: hashes.size, immutableImages: 2, loopbackListeners: { apiPort, webPort }, config };
 }
 
 function canonical(value: unknown): string {

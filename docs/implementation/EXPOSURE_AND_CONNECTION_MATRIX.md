@@ -21,7 +21,7 @@ obscurity are publication metadata, never authorization.
 | Storage Box SFTP DEV | DEV Gateway -> Storage Box | Currently externally reachable for qualification | DEV sub-account credential | Local secret file, to be replaced by key | DEV namespace only | Rotate password/key | Host fingerprint and namespace tests |
 | Storage Box SFTP PROD | PROD Gateway -> Storage Box | Private Hetzner path target | PROD sub-account SSH key | PROD runtime secret mount | PROD namespace only | Rotate key; main account offline | External reachability and break-glass drill |
 
-The owner SPA allow-list at the edge is `/`, `/files`, `/files/*`, `/inbox`,
+The owner SPA allow-list at the server Nginx edge is `/`, `/files`, `/files/*`, `/inbox`,
 `/inbox/*`, `/shared`, `/trash` and `/settings`. These paths serve the same
 private/no-store application shell so direct folder URLs and browser refresh do
 not fall through to a public or API route.

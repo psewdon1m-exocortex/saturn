@@ -1,6 +1,6 @@
 # saturn deployment and recovery contract
 
-Owner and administration routes are private behind the configured client CIDRs. Public capability, backup enrollment/ingest, WebDAV and Neptune check-in routes retain their own authentication. Configure explicit trusted proxies; do not trust arbitrary forwarded IP headers. Caddy denies probes before proxy routing and serves /synchronization for authorized operators. Recovery validates archived public settings and SFTP access before database replacement, restores the active storage profile, and rolls back both configuration and PostgreSQL on failure. Updater installs matched app/web images, runs migrations and retains a database snapshot for rollback.
+Owner and administration routes are private behind the configured client CIDRs. Public capability, backup enrollment/ingest, WebDAV and Neptune check-in routes retain their own authentication. Configure explicit trusted proxies; do not trust arbitrary forwarded IP headers. The server-managed Nginx denies probes before proxy routing and serves `/synchronization` for authorized operators. Saturn owns no public listener or TLS state: its API and static web process bind only to host loopback. Recovery validates archived public settings and SFTP access before database replacement, restores the active storage profile, and rolls back both configuration and PostgreSQL on failure. Updater installs matched app/web images, runs migrations and retains a database snapshot for rollback.
 
 ## Trust and operator prerequisites
 

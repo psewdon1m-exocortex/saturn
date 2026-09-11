@@ -13,9 +13,10 @@ is computed independently after the last source-frozen run.
 The aggregate gate covers:
 
 - frozen install, lint, type checking, 83 tests and release build;
-- non-root read-only API/worker/edge images without source maps or secret files;
+- non-root read-only API/worker/web images without source maps or secret files;
 - HTTPS-only, key-only, file-secret and immutable-image production policy;
-- edge-only publication with internal API, worker and PostgreSQL networks;
+- loopback-only API/web publication behind the operator-managed server Nginx,
+  with internal worker and PostgreSQL networks;
 - tag-only pinned CI/release workflows, OCI SBOM/provenance and an Ed25519-signed
   canonical release manifest;
 - migration, canonical six business roots plus hidden `_system` bootstrap and exact temporary-object cleanup;
@@ -34,7 +35,7 @@ No real PROD Storage Box access or user data was used by this gate.
 | PROD Storage Box sub-account | Not the DEV username; access restricted to the PROD directory | Username, verified host fingerprint and empty namespace check |
 | PROD SSH key | Dedicated key-only identity; main account remains offline break-glass | Private key file mode `0600`, successful pinned-host validation and rotation owner |
 | Canonical domain | HTTPS public origin controlled by the operator | DNS result, ACME contact and valid external TLS chain |
-| Production host | Supported Docker/Compose host with only edge ports public | Host inventory, firewall result and unauthorized-vantage port scan |
+| Production host | Supported Docker/Compose host; Saturn listeners stay on loopback and only server Nginx owns public 80/443 | Host inventory, Nginx config test, firewall result and unauthorized-vantage port scan |
 | Production secret set | Nine distinct generated secret files, never copied from DEV | File ownership/mode validation and rotation record |
 | Independent second copy | Physically or administratively independent of the primary Storage Box | Destination identity, freshness check and restore evidence |
 | RPO/RTO | Explicit operator-approved numeric targets | Values in production policy and measured recovery result |
@@ -48,19 +49,22 @@ DEV credentials are not substitutes for any item in this table.
 
 1. Provision the dedicated PROD sub-account, host, DNS, second copy and secrets.
 2. Fill only operator inputs in `.env.production`; run `pnpm prod:validate`.
-3. After publishing the pinned `updater-v0.4.0`, push the protected
-   `saturn-v0.1.0` tag. The release workflow builds candidate images once,
+3. After publishing the pinned `updater-v0.4.1`, push the protected
+   `saturn-v0.1.1` tag. The release workflow builds candidate images once,
    tests those digests, signs the bundle and publishes only on pass. Unscoped
    `v*` tags run verification only and are not production-release identities.
 4. Install the independently trusted release public key on the clean host and
    run the pinned `bootstrap.sh` with the HTTPS manifest URL.
-5. Run `vaultctl validate`, `vaultctl install`, `vaultctl bootstrap-storage` and
+5. Install the bundled Nginx example into the server configuration, set the
+   real domain/certificates and exact private client CIDRs, then require a clean
+   `nginx -t` before reload.
+6. Run `vaultctl validate`, `vaultctl install`, `vaultctl bootstrap-storage` and
    `vaultctl smoke`. Confirm the generated smoke object was deleted.
-6. From the independent vantage, verify TLS, approved routes and that no internal
+7. From the independent vantage, verify TLS, approved routes and that no internal
    listener is reachable.
-7. Exercise second-copy delivery and an isolated restore within the approved
+8. Exercise second-copy delivery and an isolated restore within the approved
    RPO/RTO. Keep the prior digest and verified database snapshot.
-8. Load real data only after all preceding evidence is attached to the release.
+9. Load real data only after all preceding evidence is attached to the release.
 
 Stage 13 moves from `BLOCKED` to `READY` when the external inputs exist, and to
 `COMPLETE` only after this sequence succeeds against the real PROD environment.

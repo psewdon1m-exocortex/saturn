@@ -12,6 +12,7 @@ export default tseslint.config(
       "tools/pnpm-runner/**",
       "eslint.config.mjs",
       "scripts/**/*.mjs",
+      "infra/production/*.mjs",
       ".tmp/**",
     ],
   },
