@@ -124,6 +124,9 @@ jobs:
             "${{ steps.identity.outputs.image_root }}/saturn-web@${{ steps.web.outputs.digest }}" \
             "$RUNNER_TEMP/saturn-release-key.pem" \
             artifacts/release
+          openssl pkey -in "$RUNNER_TEMP/saturn-release-key.pem" -pubout -out artifacts/release/saturn-ed25519.pem
+          node scripts/sign-release.mjs --export-public-key artifacts/release/saturn.pem
+          install -m 0755 infra/production/bootstrap.sh artifacts/release/bootstrap.sh
           rm -f "$RUNNER_TEMP/saturn-release-key.pem"
       - name: Promote tested digests to version tags
         shell: bash

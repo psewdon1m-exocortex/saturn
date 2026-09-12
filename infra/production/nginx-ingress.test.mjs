@@ -4,6 +4,8 @@ import test from "node:test";
 
 const config = await fs.readFile(new URL("./nginx.saturn.conf.example", import.meta.url), "utf8");
 const environment = await fs.readFile(new URL("./.env.production.example", import.meta.url), "utf8");
+const bootstrap = await fs.readFile(new URL("./bootstrap.sh", import.meta.url), "utf8");
+const releaseWorkflow = await fs.readFile(new URL("../../.github/workflows/release.yml", import.meta.url), "utf8");
 
 function locationBody(pattern) {
   const match = config.match(pattern);
@@ -35,4 +37,13 @@ test("canonical public origin is an explicit operator input", () => {
   const operatorSection = environment.split("# RELEASE LOCK")[0];
   assert.match(operatorSection, /^VAULT_DOMAIN=drive\.replace-me\.example$/m);
   assert.match(operatorSection, /^PUBLIC_ORIGIN=https:\/\/drive\.replace-me\.example$/m);
+});
+
+test("clean-host bootstrap pins both Saturn public release keys", () => {
+  assert.match(bootstrap, /saturn-ed25519\.pem/);
+  assert.match(bootstrap, /release_base\/saturn\.pem/);
+  assert.match(bootstrap, /bootstrap_trust=true/);
+  assert.match(releaseWorkflow, /openssl pkey .*saturn-ed25519\.pem/);
+  assert.match(releaseWorkflow, /--export-public-key artifacts\/release\/saturn\.pem/);
+  assert.match(releaseWorkflow, /bootstrap\.sh artifacts\/release\/bootstrap\.sh/);
 });

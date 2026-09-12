@@ -34,12 +34,28 @@ release can publish artifacts.
 ## Release identity
 
 Production releases are created only by tags matching
-`saturn-vMAJOR.MINOR.PATCH`. The current fix identity is `saturn-v0.1.3`; its
+`saturn-vMAJOR.MINOR.PATCH`. The current fix identity is `saturn-v0.1.4`; its
 versioned OCI repositories are `saturn-app` and `saturn-web`, and its
-installation bundle is `saturn-0.1.3.zip`. Legacy unscoped tags such as
+installation bundle is `saturn-0.1.4.zip`. Legacy unscoped tags such as
 `v0.0.1` run verification only and cannot publish a Saturn release. Publish
-the pinned `updater-v0.4.1` dependency before the Saturn tag. The existing
-`saturn-v0.1.0`, `saturn-v0.1.1` and `saturn-v0.1.2` releases remain immutable.
+the pinned `updater-v0.4.2` dependency before the Saturn tag. The existing
+`saturn-v0.1.0` through `saturn-v0.1.3` releases remain immutable.
+
+## Production installation
+
+Each service keeps its own bootstrap and environment. For Saturn:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/psewdon1m-exocortex/saturn/main/infra/production/bootstrap.sh | sudo sh
+sudoedit /etc/vault/.env.production
+sudo vaultctl validate
+sudo vaultctl install
+```
+
+The clean-host bootstrap selects the latest stable Saturn release, verifies and
+pins its Ed25519 and RSA public keys, and prepares only Saturn. Kernel and Volt
+are installed by their own bootstraps. All three expose loopback listeners and
+share the single server-managed Nginx on ports 80/443.
 
 ## Production ingress
 

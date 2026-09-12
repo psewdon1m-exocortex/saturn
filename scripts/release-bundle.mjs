@@ -68,7 +68,7 @@ if (command === "build") {
   const pinnedUpdaterVersion = (await fs.readFile(path.join(root, ".release", "updater.version"), "utf8")).trim();
   if (updaterVersion !== pinnedUpdaterVersion) throw new Error(`Updater bundle version ${updaterVersion} does not match pin ${pinnedUpdaterVersion}`);
   const updaterDirectory = path.resolve(updaterDirectoryValue);
-  for (const required of ["install.sh", "updater-linux-amd64", "systemd/updater.service"]) {
+  for (const required of ["install.sh", "updater-linux-amd64", "systemd/updater.service", "release-trust/updater.pem"]) {
     const attributes = await fs.stat(path.join(updaterDirectory, required)).catch(() => undefined);
     if (!attributes?.isFile()) throw new Error(`Verified Updater install bundle is missing ${required}`);
   }
@@ -116,7 +116,7 @@ if (command === "build") {
   await fs.writeFile(manifestPath, `${JSON.stringify(signed, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
   const [reference, digest] = appImage.split("@");
   const compatible = { schema_version: 1, service: "saturn", version, image: { reference, digest }, web_image: webImage,
-    compose_bundle: { url: bundleUrl, sha256: payload.bundle.sha256.slice(7) }, database_schema: payload.databaseSchemaGeneration, minimum_updater_version: "0.4.1" };
+    compose_bundle: { url: bundleUrl, sha256: payload.bundle.sha256.slice(7) }, database_schema: payload.databaseSchemaGeneration, minimum_updater_version: "0.4.2" };
   const compatiblePath = path.join(output, "saturn-release.json");
   await fs.writeFile(compatiblePath, `${JSON.stringify(compatible, null, 2)}\n`);
   const signedCompatible = spawnSync(process.execPath, [path.join(root, "scripts/sign-release.mjs"), compatiblePath], { stdio: "inherit", windowsHide: true });

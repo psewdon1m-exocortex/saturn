@@ -15,15 +15,19 @@ SBOM/provenance, tests those exact digests, signs the release manifest and
 refuses replacement of existing version tags/releases. Publish the pinned
 Updater release first; Updater 0.4.0 is the first version that resolves the
 module-scoped Saturn tag.
-The Ed25519 private key exists only in the protected release environment; the
-installer receives the public key through an independent trust channel.
+The Ed25519 private key exists only in the protected release environment. On a
+clean host the HTTPS bootstrap obtains the public key from the selected GitHub
+release, verifies the signed manifest and pins the key locally. An existing
+pinned key is never replaced automatically.
 Every signed Saturn bundle also contains the checksum-verified Updater version
 pinned in `.release/updater.version`; CI refuses to build with another version.
 
 ## First installation
 
 1. Verify the signed release manifest and immutable image digests.
-2. Run the pinned HTTPS bootstrap as root. It prepares files, generates the
+2. Run the HTTPS bootstrap as root. With no `VAULT_MANIFEST_URL` it selects the
+   latest stable `saturn-v*` release. It bootstraps and pins the Ed25519 and RSA
+   public keys, prepares files, generates the
    Updater control token and socket group IDs, and preserves them on later runs.
    If Kernel is installed locally, its URL and service token are copied too.
 3. Edit only the remaining `OPERATOR INPUT` values in

@@ -44,7 +44,7 @@ No real PROD Storage Box access or user data was used by this gate.
 | Independent second copy | Physically or administratively independent of the primary Storage Box | Destination identity, freshness check and restore evidence |
 | RPO/RTO | Explicit operator-approved numeric targets | Values in production policy and measured recovery result |
 | Laboratory publication | Explicit `private` or approved public non-indexable decision | Recorded owner decision and route/cache test |
-| Release trust | Registry, tag policy, signing secret and independently trusted public key | Protected release environment and public-key fingerprint handoff |
+| Release trust | Registry, tag policy, signing secret and first-install HTTPS bootstrap policy | Protected release environment plus locally pinned public keys that are never auto-replaced |
 | External test vantage | Network not sharing the production host/private network | 80/443-only result and denial of DB/API/worker/SFTP transports |
 
 DEV credentials are not substitutes for any item in this table.
@@ -53,12 +53,13 @@ DEV credentials are not substitutes for any item in this table.
 
 1. Provision the dedicated PROD sub-account, host, DNS, second copy and secrets.
 2. Fill only operator inputs in `.env.production`; run `pnpm prod:validate`.
-3. After publishing the pinned `updater-v0.4.1`, push the protected
-   `saturn-v0.1.3` tag. The release workflow builds candidate images once,
+3. After publishing the pinned `updater-v0.4.2`, push the protected
+   `saturn-v0.1.4` tag. The release workflow builds candidate images once,
    tests those digests, signs the bundle and publishes only on pass. Unscoped
    `v*` tags run verification only and are not production-release identities.
-4. Install the independently trusted release public key on the clean host and
-   run the pinned `bootstrap.sh` with the HTTPS manifest URL.
+4. Run the HTTPS `bootstrap.sh` on the clean host. It selects the latest stable
+   release when no manifest URL is supplied, verifies the downloaded Ed25519
+   and RSA public keys against their manifests, and pins them locally.
 5. Install the bundled Nginx example into the server configuration, set the
    real domain/certificates, then require a clean `nginx -t` before reload.
    Confirm that owner login is public by IP, health remains host-local, and
