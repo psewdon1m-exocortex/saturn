@@ -121,8 +121,6 @@ export function validateProductionDeployment(
   const releaseVersion = required(input, "VAULT_RELEASE_VERSION"); if (!semanticVersion.test(releaseVersion)) throw new Error("VAULT_RELEASE_VERSION must be stable semantic versioning");
   for (const field of ["VAULT_APP_IMAGE", "VAULT_WEB_IMAGE"] as const) if (!immutableImage.test(required(input, field))) throw new Error(`${field} must be an immutable image reference`);
   const storageIdentity = `${config.storage.username}@${config.storage.host}#${config.storage.hostFingerprint}`;
-  if (config.storage.username === required(input, "VAULT_DEV_STORAGE_USER") || config.storage.hostFingerprint === required(input, "VAULT_DEV_STORAGE_FINGERPRINT")) throw new Error("Production reuses the declared DEV storage identity");
-  const secondCopy = required(input, "VAULT_SECOND_COPY_ID"); if (secondCopy === storageIdentity || secondCopy === config.storage.host) throw new Error("Second copy must be independent from primary storage");
   const laboratoryExposure = required(input, "VAULT_PUBLIC_LABORATORY_DECISION");
   if (laboratoryExposure !== "private" && laboratoryExposure !== "public_approved") throw new Error("Laboratory exposure decision must be explicit");
   if ((laboratoryExposure === "public_approved") !== config.laboratory.publicEnabled) throw new Error("Laboratory decision and LABORATORY_PUBLIC_ENABLED do not match");

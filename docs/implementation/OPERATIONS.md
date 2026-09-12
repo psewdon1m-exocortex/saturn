@@ -15,43 +15,73 @@ SBOM/provenance, tests those exact digests, signs the release manifest and
 refuses replacement of existing version tags/releases. Publish the pinned
 Updater release first; Updater 0.4.0 is the first version that resolves the
 module-scoped Saturn tag.
-The Ed25519 private key exists only in the protected release environment. On a
-clean host the HTTPS bootstrap obtains the public key from the selected GitHub
-release, verifies the signed manifest and pins the key locally. An existing
-pinned key is never replaced automatically.
+The Ed25519 and RSA private keys exist only in GitHub Secrets and are exposed
+only to the protected release-signing job. CI derives the public counterparts
+and embeds them in the exact versioned `bootstrap.sh`. On a clean host bootstrap
+creates `/etc/exocortex/release-trust/saturn.pem` and
+`/etc/vault/release-public-key.pem`, verifies the signed manifest before any
+service download and never replaces an existing mismatching key automatically.
+No `scp`, manual release-key fingerprint or separately downloaded public key is
+part of this trust path.
 Every signed Saturn bundle also contains the checksum-verified Updater version
 pinned in `.release/updater.version`; CI refuses to build with another version.
 
 ## First installation
 
-1. Verify the signed release manifest and immutable image digests.
-2. Run the HTTPS bootstrap as root. With no `VAULT_MANIFEST_URL` it selects the
-   latest stable `saturn-v*` release. It bootstraps and pins the Ed25519 and RSA
-   public keys, prepares files, generates the
-   Updater control token and socket group IDs, and preserves them on later runs.
-   If Kernel is installed locally, its URL and service token are copied too.
-3. Edit only the remaining `OPERATOR INPUT` values in
-   `/etc/vault/.env.production`; keep mode `0600`. A remote Kernel URL and token
-   are operator inputs; Updater and agent tokens are not. Set `VAULT_DOMAIN`
-   and `PUBLIC_ORIGIN=https://VAULT_DOMAIN` to the same canonical hostname.
-4. Place the nine distinct secret files in `VAULT_SECRET_ROOT`, each mode
-   `0600`, and keep the release signing private key outside the host.
-5. Run `vaultctl validate`, then `vaultctl install`. The latter installs or
+1. Select an explicit immutable `saturn-vX.Y.Z` release and run that release's
+   HTTPS `bootstrap.sh` as root. Its embedded Ed25519 and RSA public keys are
+   written to the two local trust paths before bootstrap verifies the signed
+   manifest; only after verification may it trust image digests or download
+   service files. It writes the verified release version and immutable image
+   digests into the machine-owned release lock, generates the database password,
+   six application peppers, a dedicated production SFTP key, the Updater token
+   and socket group IDs, and preserves existing values. If
+   `/root/saturn-storage-ed25519` already contains a dedicated SFTP key, it is
+   imported; otherwise a new key is generated. Release-signing keys are never
+   used for storage. If Kernel is installed locally, its URL and service token
+   are copied too.
+2. Confirm the bootstrap reported the verified manifest and immutable image
+   digests and that neither trust file conflicts with an existing key.
+3. Edit only `VAULT_DOMAIN`, `PUBLIC_ORIGIN`, `OWNER_ACCESS_KEY`, `KERNEL_URL`,
+   an otherwise automatically imported `KERNEL_SERVICE_TOKEN`, and the five
+   `STORAGE_*` values in `/etc/vault/.env.production`; keep mode `0600`.
+   `OWNER_ACCESS_KEY` is the value entered on the login page and must contain at
+   least 32 URL-safe characters. Set `VAULT_DOMAIN` and
+   `PUBLIC_ORIGIN=https://VAULT_DOMAIN` to the same canonical hostname.
+4. Authorize the output of `vaultctl storage-public-key` once on the production
+   Storage Box sub-account if that dedicated key was not already authorized.
+   The command emits RFC4716 for Hetzner SFTP port 22 and OpenSSH format for
+   other configured ports.
+   Do not copy or install a release-signing private key on the server.
+5. Run `vaultctl validate`, then `vaultctl install`. Validation materializes the
+   owner Access Key as a protected file secret. The latter installs or
    safely upgrades the bundled Updater and registers the `saturn` head before
    starting Saturn API and web processes on loopback only.
 6. Copy `infra/production/nginx.saturn.conf.example` into the server Nginx
    configuration, replace the domain and certificate paths, run `nginx -t`,
    and reload Nginx. Keep upstreams aligned with `SATURN_API_BIND_PORT` and
    `SATURN_WEB_BIND_PORT`. The owner login and authenticated UI/API are
-   reachable from every client IP; health remains loopback-only. Preserve the
+   reachable from every client IP; do not add `OPERATOR_CIDR`, a VPN prerequisite
+   or a source-IP allow-list. Health remains loopback-only. Preserve the
    fail-closed HTTP/HTTPS `default_server` blocks. The global
    `client_max_body_size 16m` remains in force except in the exact `/dav` and
    prefix `/dav/` locations, where `0` permits a streaming whole-file PUT and
    Saturn remains the authoritative size limit.
-7. Run `pnpm prod:bootstrap-storage` and `vaultctl smoke` with the production
+7. Run `vaultctl bootstrap-storage` and `vaultctl smoke` with the production
    environment. The smoke object must be deleted automatically.
-8. Verify canonical HTTPS, DNS, unauthorised external exposure and second-copy
-   delivery before loading real data.
+8. Verify canonical HTTPS, DNS and unauthorised external exposure before loading
+   real data. Independent second-copy delivery and restore evidence remain a
+   separate disaster-recovery procedure; they are not Saturn runtime variables.
+
+For a host where `0.1.4` was only downloaded/prepared and not started, run the
+`0.1.5` bootstrap with `--refresh`. It preserves
+`/etc/vault/.env.production`, removes the obsolete `VAULT_DEV_STORAGE_*` and
+`VAULT_SECOND_COPY_ID` entries, writes the new release lock, and preserves the
+old bundle under `/opt/vault.previous-<timestamp>`:
+
+```sh
+curl -fsSL https://github.com/psewdon1m-exocortex/saturn/releases/download/saturn-v0.1.5/bootstrap.sh | sudo sh -s -- --refresh
+```
 
 `READINESS_TIMEOUT_MS` defaults to 3000 ms and bounds database, storage and
 worker checks in parallel. `STORAGE_HEALTH_TIMEOUT_MS` defaults to 3000 ms and
@@ -74,10 +104,12 @@ logs and reconciliation evidence.
 
 ## Backup and disaster recovery
 
-- RPO and RTO are operator inputs checked by the production validator.
+- The baseline metadata RPO/RTO values are machine defaults. Change them only as
+  part of an approved disaster-recovery policy review.
 - The worker publishes portable Saturn recovery archives through the Gateway
   storage adapter. A separate independent second-copy system must copy and
-  verify those archives outside the primary Storage Box.
+  verify those archives outside the primary Storage Box. This evidence is
+  checked operationally and is not faked by a string in the runtime `.env`.
 - Quarterly, restore to a clean PostgreSQL instance and isolated Gateway,
   reconcile metadata/bytes, and record elapsed RPO/RTO evidence.
 - Deployment secrets are not part of application backup. Restore them from the

@@ -44,22 +44,27 @@ No real PROD Storage Box access or user data was used by this gate.
 | Independent second copy | Physically or administratively independent of the primary Storage Box | Destination identity, freshness check and restore evidence |
 | RPO/RTO | Explicit operator-approved numeric targets | Values in production policy and measured recovery result |
 | Laboratory publication | Explicit `private` or approved public non-indexable decision | Recorded owner decision and route/cache test |
-| Release trust | Registry, tag policy, signing secret and first-install HTTPS bootstrap policy | Protected release environment plus locally pinned public keys that are never auto-replaced |
+| Release trust | Per-service tag policy; Ed25519 and RSA private keys only in GitHub Secrets; public counterparts embedded in the versioned bootstrap | CI secret scope and leak scan; bootstrap-created `/etc/exocortex/release-trust/saturn.pem` and `/etc/vault/release-public-key.pem`; bad-manifest rejection before download; existing mismatching keys never auto-replaced |
 | External test vantage | Network not sharing the production host/private network | 80/443-only result and denial of DB/API/worker/SFTP transports |
 
 DEV credentials are not substitutes for any item in this table.
 
 ## Activation sequence
 
-1. Provision the dedicated PROD sub-account, host, DNS, second copy and secrets.
-2. Fill only operator inputs in `.env.production`; run `pnpm prod:validate`.
+1. Provision the dedicated PROD sub-account, host and DNS. Bootstrap generates
+   runtime secrets and a dedicated SFTP key; authorize its public counterpart on
+   the sub-account.
+2. Fill only the domain/origin, owner Access Key, Kernel coordinates and
+   production `STORAGE_*` inputs in `.env.production`; run `vaultctl validate`.
 3. After publishing the pinned `updater-v0.4.2`, push the protected
-   `saturn-v0.1.4` tag. The release workflow builds candidate images once,
+   `saturn-v0.1.5` tag. The release workflow builds candidate images once,
    tests those digests, signs the bundle and publishes only on pass. Unscoped
    `v*` tags run verification only and are not production-release identities.
-4. Run the HTTPS `bootstrap.sh` on the clean host. It selects the latest stable
-   release when no manifest URL is supplied, verifies the downloaded Ed25519
-   and RSA public keys against their manifests, and pins them locally.
+4. Run the exact `saturn-vX.Y.Z` release's HTTPS `bootstrap.sh` on the clean
+   host. It installs its embedded Ed25519 and RSA public keys in the two trust
+   paths, verifies the manifest before using its URLs or digests, and fails on
+   an existing mismatching key. No `scp`, fingerprint ceremony or separate key
+   preparation is allowed.
 5. Install the bundled Nginx example into the server configuration, set the
    real domain/certificates, then require a clean `nginx -t` before reload.
    Confirm that owner login is public by IP, health remains host-local, and
@@ -69,8 +74,9 @@ DEV credentials are not substitutes for any item in this table.
 7. From the independent vantage, verify TLS, public login, anonymous `401` on a
    protected owner route, rejection of unknown Host/SNI, health denial despite
    spoofed forwarding headers, and that no internal listener is reachable.
-8. Exercise second-copy delivery and an isolated restore within the approved
-   RPO/RTO. Keep the prior digest and verified database snapshot.
+8. As a separate DR gate, exercise second-copy delivery and an isolated restore
+   within the approved RPO/RTO. Do not represent this evidence as a runtime
+   `.env` identifier. Keep the prior digest and verified database snapshot.
 9. Load real data only after all preceding evidence is attached to the release.
 
 Stage 13 moves from `BLOCKED` to `READY` when the external inputs exist, and to

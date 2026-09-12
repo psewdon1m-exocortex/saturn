@@ -73,8 +73,9 @@ and hand over a reproducible operating system rather than a developer setup.
 
 1. Frozen install, reproducible build/digest, SBOM and known-secret/vulnerability
    gates with documented severity policy.
-2. Production configuration rejects HTTP origin, password SFTP, placeholders,
-   world-readable secrets and DEV credential/path reuse.
+2. Production configuration rejects HTTP origin, password SFTP, placeholders
+   and world-readable or duplicated runtime secrets. DEV identity and
+   second-copy evidence remain outside the runtime `.env` boundary.
 3. Network exposure scan from authorized and unauthorized vantage points.
 4. Empty-PROD directory bootstrap and exact smoke cleanup.
 5. Blue/green candidate health, migration compatibility, proxy switch and

@@ -6,6 +6,10 @@ INSTALL_ROOT=${VAULT_INSTALL_ROOT:-/opt/vault}
 CONFIG_FILE=${VAULT_CONFIG_FILE:-/etc/vault/.env.production}
 COMPOSE_FILE="$INSTALL_ROOT/compose.production.yaml"
 UPDATER_BUNDLE="$INSTALL_ROOT/updater"
+SECRET_ROOT=/etc/vault/secrets
+LEGACY_STORAGE_KEY=/root/saturn-storage-ed25519
+STORAGE_PUBLIC_KEY=/etc/vault/storage_public_key.pub
+STORAGE_PUBLIC_KEY_RFC4716=/etc/vault/storage_public_key.rfc4716.pub
 
 die() { printf '%s\n' "saturn install: $1" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "required command is missing: $1"; }
@@ -26,6 +30,12 @@ set_config() {
   chmod 0600 "$temporary"; mv -f "$temporary" "$CONFIG_FILE"
 }
 
+remove_config() {
+  key=$1; temporary="$CONFIG_FILE.tmp"
+  awk -v key="$key" 'index($0,key "=")!=1 { print }' "$CONFIG_FILE" >"$temporary"
+  chmod 0600 "$temporary"; mv -f "$temporary" "$CONFIG_FILE"
+}
+
 needs_generation() {
   current=$(get_config "$1")
   case "$current" in
@@ -36,6 +46,81 @@ needs_generation() {
 
 random_hex() {
   openssl rand -hex "$1"
+}
+
+apply_release_lock() {
+  [ -n "${SATURN_BOOTSTRAP_RELEASE_VERSION:-}" ] || die "verified release version was not supplied by bootstrap"
+  [ -n "${SATURN_BOOTSTRAP_APP_IMAGE:-}" ] || die "verified application image was not supplied by bootstrap"
+  [ -n "${SATURN_BOOTSTRAP_WEB_IMAGE:-}" ] || die "verified web image was not supplied by bootstrap"
+  set_config VAULT_RELEASE_VERSION "$SATURN_BOOTSTRAP_RELEASE_VERSION"
+  set_config VAULT_APP_IMAGE "$SATURN_BOOTSTRAP_APP_IMAGE"
+  set_config VAULT_WEB_IMAGE "$SATURN_BOOTSTRAP_WEB_IMAGE"
+}
+
+migrate_operator_config() {
+  for obsolete in VAULT_DEV_STORAGE_USER VAULT_DEV_STORAGE_FINGERPRINT VAULT_SECOND_COPY_ID; do
+    remove_config "$obsolete"
+  done
+  if ! grep -q '^OWNER_ACCESS_KEY=' "$CONFIG_FILE"; then
+    temporary="$CONFIG_FILE.tmp"
+    awk 'BEGIN { inserted=0 } { print } /^PUBLIC_ORIGIN=/ && !inserted { print "OWNER_ACCESS_KEY=replace-me-with-owner-access-key"; inserted=1 } END { if (!inserted) print "OWNER_ACCESS_KEY=replace-me-with-owner-access-key" }' "$CONFIG_FILE" >"$temporary"
+    chmod 0600 "$temporary"; mv -f "$temporary" "$CONFIG_FILE"
+  fi
+}
+
+prepare_generated_secrets() {
+  need openssl; need ssh-keygen
+  install -d -o root -g root -m 0700 "$SECRET_ROOT"
+  for name in database_password auth_pepper drop_pepper share_pepper device_pepper backup_pepper laboratory_pepper; do
+    target="$SECRET_ROOT/$name"
+    if [ -e "$target" ]; then
+      [ -f "$target" ] && [ ! -L "$target" ] && [ -s "$target" ] || die "invalid existing secret: $target"
+    else
+      random_hex 32 >"$target"
+    fi
+    chown root:root "$target"; chmod 0600 "$target"
+  done
+
+  storage_key="$SECRET_ROOT/storage_private_key"
+  if [ -e "$storage_key" ]; then
+    [ -f "$storage_key" ] && [ ! -L "$storage_key" ] && [ -s "$storage_key" ] || die "invalid existing SFTP private key: $storage_key"
+  elif [ -f "$LEGACY_STORAGE_KEY" ] && [ ! -L "$LEGACY_STORAGE_KEY" ] && [ -s "$LEGACY_STORAGE_KEY" ]; then
+    ssh-keygen -y -f "$LEGACY_STORAGE_KEY" >/dev/null 2>&1 || die "$LEGACY_STORAGE_KEY is not a valid OpenSSH private key"
+    install -o root -g root -m 0600 "$LEGACY_STORAGE_KEY" "$storage_key"
+    printf '%s\n' "Imported the dedicated Saturn SFTP key from $LEGACY_STORAGE_KEY."
+  else
+    temporary_key="$SECRET_ROOT/.storage_private_key.new"
+    rm -f "$temporary_key" "$temporary_key.pub"
+    ssh-keygen -q -t ed25519 -N '' -C saturn-production-storage -f "$temporary_key"
+    install -o root -g root -m 0600 "$temporary_key" "$storage_key"
+    rm -f "$temporary_key" "$temporary_key.pub"
+    printf '%s\n' "Generated a dedicated Saturn production SFTP key."
+  fi
+  chown root:root "$storage_key"; chmod 0600 "$storage_key"
+  public_key_temporary="$STORAGE_PUBLIC_KEY.tmp"
+  ssh-keygen -y -f "$storage_key" >"$public_key_temporary"
+  chmod 0644 "$public_key_temporary"; mv -f "$public_key_temporary" "$STORAGE_PUBLIC_KEY"
+  rfc4716_temporary="$STORAGE_PUBLIC_KEY_RFC4716.tmp"
+  ssh-keygen -e -m RFC4716 -f "$STORAGE_PUBLIC_KEY" >"$rfc4716_temporary"
+  chmod 0644 "$rfc4716_temporary"; mv -f "$rfc4716_temporary" "$STORAGE_PUBLIC_KEY_RFC4716"
+}
+
+sync_owner_access_key() {
+  owner_access_key=$(get_config OWNER_ACCESS_KEY)
+  case "$owner_access_key" in
+    ""|CHANGE_ME*|change-*|replace-*) die "set OWNER_ACCESS_KEY in $CONFIG_FILE" ;;
+    *[!A-Za-z0-9_-]*) die "OWNER_ACCESS_KEY must contain only URL-safe letters, digits, underscore or hyphen" ;;
+  esac
+  [ "${#owner_access_key}" -ge 32 ] || die "OWNER_ACCESS_KEY must contain at least 32 characters"
+  owner_temporary="$SECRET_ROOT/.owner_access_key.new"
+  printf '%s\n' "$owner_access_key" >"$owner_temporary"
+  chown root:root "$owner_temporary"; chmod 0600 "$owner_temporary"
+  mv -f "$owner_temporary" "$SECRET_ROOT/owner_access_key"
+}
+
+prepare_runtime_secrets() {
+  prepare_generated_secrets
+  sync_owner_access_key
 }
 
 copy_local_kernel_bootstrap() {
@@ -97,22 +182,41 @@ prepare() {
   verify_updater_bundle
   install -d -m 0700 "$(dirname "$CONFIG_FILE")"
   install -m 0600 "$INSTALL_ROOT/infra/production/.env.production.example" "$CONFIG_FILE"
+  apply_release_lock
   prepare_agent_mounts
+  prepare_generated_secrets
   copy_local_kernel_bootstrap
   printf '%s\n' "Prepared $CONFIG_FILE"
-  printf '%s\n' "Updater token and socket groups were generated automatically."
+  printf '%s\n' "Runtime secrets, a dedicated SFTP key, Updater token and socket groups were prepared automatically."
+  printf '%s\n' "Show the SFTP public key with: vaultctl storage-public-key"
   printf '%s\n' "Edit only OPERATOR INPUT, then run: vaultctl install"
 }
 
+refresh() {
+  [ "$(id -u)" -eq 0 ] || die "refresh requires root"
+  [ -f "$CONFIG_FILE" ] || die "missing existing $CONFIG_FILE"
+  [ "$(stat -c '%a' "$CONFIG_FILE")" = 600 ] || die "configuration mode must be 0600"
+  verify_updater_bundle
+  migrate_operator_config
+  apply_release_lock
+  prepare_agent_mounts
+  prepare_generated_secrets
+  copy_local_kernel_bootstrap
+  printf '%s\n' "Refreshed the prepared Saturn release and preserved $CONFIG_FILE."
+  printf '%s\n' "Deprecated DEV/second-copy fields were removed; set OWNER_ACCESS_KEY, then run: vaultctl validate && vaultctl install"
+}
+
 validate() {
+  [ "$(id -u)" -eq 0 ] || die "validate requires root"
   need docker
   docker compose version >/dev/null 2>&1 || die "Docker Compose v2 is required"
   [ -f "$CONFIG_FILE" ] || die "missing $CONFIG_FILE"
   [ "$(stat -c '%a' "$CONFIG_FILE")" = 600 ] || die "configuration mode must be 0600"
+  prepare_runtime_secrets
   set -a; . "$CONFIG_FILE"; set +a
   docker compose --env-file "$CONFIG_FILE" -f "$COMPOSE_FILE" config --quiet
   docker pull "$VAULT_APP_IMAGE" >/dev/null
-  docker run --rm --env-file "$CONFIG_FILE" -e VAULT_SECRET_ROOT=/run/secrets -v "$CONFIG_FILE:/config/.env.production:ro" -v "$VAULT_SECRET_ROOT:/run/secrets:ro" "$VAULT_APP_IMAGE" node /app/scripts/validate-production.mjs /config/.env.production >/dev/null
+  docker run --rm --env-file "$CONFIG_FILE" -e OWNER_ACCESS_KEY= -e VAULT_SECRET_ROOT=/run/secrets -v "$CONFIG_FILE:/config/.env.production:ro" -v "$VAULT_SECRET_ROOT:/run/secrets:ro" "$VAULT_APP_IMAGE" node /app/scripts/validate-production.mjs /config/.env.production >/dev/null
 }
 
 install_release() {
@@ -144,6 +248,16 @@ install_release() {
 status() { docker compose --env-file "$CONFIG_FILE" -f "$COMPOSE_FILE" ps; }
 bootstrap_storage() { docker compose --env-file "$CONFIG_FILE" -f "$COMPOSE_FILE" run --rm migrate node /app/scripts/storage-bootstrap.mjs; }
 smoke() { docker compose --env-file "$CONFIG_FILE" -f "$COMPOSE_FILE" run --rm migrate node /app/scripts/storage-smoke.mjs; }
+storage_public_key() {
+  storage_port=$(get_config STORAGE_PORT)
+  if [ "$storage_port" = 22 ]; then
+    [ -s "$STORAGE_PUBLIC_KEY_RFC4716" ] || die "missing $STORAGE_PUBLIC_KEY_RFC4716; run the signed bootstrap first"
+    cat "$STORAGE_PUBLIC_KEY_RFC4716"
+  else
+    [ -s "$STORAGE_PUBLIC_KEY" ] || die "missing $STORAGE_PUBLIC_KEY; run the signed bootstrap first"
+    cat "$STORAGE_PUBLIC_KEY"
+  fi
+}
 
 enable_backup() {
   [ "$(id -u)" -eq 0 ] || die "backup setup requires root"
@@ -160,11 +274,13 @@ enable_backup() {
 
 case "${1:-}" in
   prepare) prepare ;;
+  refresh) refresh ;;
   validate) validate ;;
   install) install_release ;;
   status) status ;;
   bootstrap-storage) bootstrap_storage ;;
   smoke) smoke ;;
+  storage-public-key) storage_public_key ;;
   backup) enable_backup ;;
-  *) die "usage: install.sh prepare|validate|install|status|bootstrap-storage|smoke|backup" ;;
+  *) die "usage: install.sh prepare|refresh|validate|install|status|bootstrap-storage|smoke|storage-public-key|backup" ;;
 esac

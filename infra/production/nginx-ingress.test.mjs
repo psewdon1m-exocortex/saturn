@@ -5,6 +5,8 @@ import test from "node:test";
 const config = await fs.readFile(new URL("./nginx.saturn.conf.example", import.meta.url), "utf8");
 const environment = await fs.readFile(new URL("./.env.production.example", import.meta.url), "utf8");
 const bootstrap = await fs.readFile(new URL("./bootstrap.sh", import.meta.url), "utf8");
+const installer = await fs.readFile(new URL("./install.sh", import.meta.url), "utf8");
+const compose = await fs.readFile(new URL("../../compose.production.yaml", import.meta.url), "utf8");
 const releaseWorkflow = await fs.readFile(new URL("../../.github/workflows/release.yml", import.meta.url), "utf8");
 
 function locationBody(pattern) {
@@ -33,10 +35,38 @@ test("health remains host-local and unknown TLS SNI fails closed", () => {
   assert.match(config, /ssl_reject_handshake on;/);
 });
 
-test("canonical public origin is an explicit operator input", () => {
+test("operator input is limited to the login, origin, Kernel and production storage", () => {
   const operatorSection = environment.split("# RELEASE LOCK")[0];
   assert.match(operatorSection, /^VAULT_DOMAIN=drive\.replace-me\.example$/m);
   assert.match(operatorSection, /^PUBLIC_ORIGIN=https:\/\/drive\.replace-me\.example$/m);
+  assert.match(operatorSection, /^OWNER_ACCESS_KEY=replace-me-with-owner-access-key$/m);
+  assert.deepEqual(
+    operatorSection.split(/\r?\n/).filter((line) => /^[A-Z][A-Z0-9_]*=/.test(line)).map((line) => line.split("=", 1)[0]),
+    ["VAULT_DOMAIN", "PUBLIC_ORIGIN", "OWNER_ACCESS_KEY", "KERNEL_URL", "KERNEL_SERVICE_TOKEN", "STORAGE_HOST", "STORAGE_PORT", "STORAGE_USER", "STORAGE_ROOT", "STORAGE_HOST_FINGERPRINT"],
+  );
+  assert.doesNotMatch(environment, /VAULT_DEV_STORAGE_|VAULT_SECOND_COPY_ID/);
+});
+
+test("installer prepares independent runtime secrets and a dedicated SFTP key", () => {
+  assert.match(installer, /for name in database_password auth_pepper drop_pepper share_pepper device_pepper backup_pepper laboratory_pepper/);
+  assert.match(installer, /sync_owner_access_key/);
+  assert.match(installer, /LEGACY_STORAGE_KEY=\/root\/saturn-storage-ed25519/);
+  assert.match(installer, /ssh-keygen -q -t ed25519 .*saturn-production-storage/);
+  assert.match(installer, /STORAGE_PUBLIC_KEY=\/etc\/vault\/storage_public_key\.pub/);
+  assert.match(installer, /STORAGE_PUBLIC_KEY_RFC4716=\/etc\/vault\/storage_public_key\.rfc4716\.pub/);
+  assert.match(installer, /ssh-keygen -e -m RFC4716/);
+  assert.match(compose, /\$\{VAULT_RUNTIME_ENV_FILE:-\.\/infra\/production\/\.env\.production\}/);
+  assert.match(environment, /^VAULT_RUNTIME_ENV_FILE=\/etc\/vault\/\.env\.production$/m);
+  assert.match(compose, /OWNER_ACCESS_KEY: ""/);
+  assert.doesNotMatch(installer, /release-public-key\.pem[^\n]*storage_private_key/);
+});
+
+test("verified bootstrap writes release locks and can refresh a prepared 0.1.4 bundle", () => {
+  assert.match(bootstrap, /SATURN_BOOTSTRAP_RELEASE_VERSION/);
+  assert.match(bootstrap, /SATURN_BOOTSTRAP_APP_IMAGE/);
+  assert.match(bootstrap, /SATURN_BOOTSTRAP_WEB_IMAGE/);
+  assert.match(bootstrap, /--refresh/);
+  assert.match(bootstrap, /Previous prepared bundle preserved/);
 });
 
 test("clean-host bootstrap pins both Saturn public release keys", () => {

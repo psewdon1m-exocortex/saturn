@@ -2,7 +2,11 @@ name: vault-prod
 
 x-vault-environment: &vault-environment
   env_file:
-    - ./infra/production/.env.production
+    - ${VAULT_RUNTIME_ENV_FILE:-./infra/production/.env.production}
+  environment:
+    # OWNER_ACCESS_KEY is materialized into the owner_access_key Compose secret.
+    # Never expose its plaintext .env value to application containers.
+    OWNER_ACCESS_KEY: ""
   networks:
     - backend
   restart: unless-stopped

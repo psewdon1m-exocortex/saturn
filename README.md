@@ -34,28 +34,69 @@ release can publish artifacts.
 ## Release identity
 
 Production releases are created only by tags matching
-`saturn-vMAJOR.MINOR.PATCH`. The current fix identity is `saturn-v0.1.4`; its
+`saturn-vMAJOR.MINOR.PATCH`. The current fix identity is `saturn-v0.1.5`; its
 versioned OCI repositories are `saturn-app` and `saturn-web`, and its
-installation bundle is `saturn-0.1.4.zip`. Legacy unscoped tags such as
+installation bundle is `saturn-0.1.5.zip`. Legacy unscoped tags such as
 `v0.0.1` run verification only and cannot publish a Saturn release. Publish
 the pinned `updater-v0.4.2` dependency before the Saturn tag. The existing
-`saturn-v0.1.0` through `saturn-v0.1.3` releases remain immutable.
+`saturn-v0.1.0` through `saturn-v0.1.4` releases remain immutable.
 
 ## Production installation
 
 Each service keeps its own bootstrap and environment. For Saturn:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/psewdon1m-exocortex/saturn/main/infra/production/bootstrap.sh | sudo sh
+curl -fsSL https://github.com/psewdon1m-exocortex/saturn/releases/download/saturn-v0.1.5/bootstrap.sh | sudo sh
 sudoedit /etc/vault/.env.production
 sudo vaultctl validate
 sudo vaultctl install
+sudo vaultctl bootstrap-storage
+sudo vaultctl smoke
 ```
 
-The clean-host bootstrap selects the latest stable Saturn release, verifies and
-pins its Ed25519 and RSA public keys, and prepares only Saturn. Kernel and Volt
-are installed by their own bootstraps. All three expose loopback listeners and
-share the single server-managed Nginx on ports 80/443.
+If `0.1.4` was bootstrapped but Saturn has not been started yet, refresh the
+prepared bundle without deleting the existing configuration:
+
+```sh
+curl -fsSL https://github.com/psewdon1m-exocortex/saturn/releases/download/saturn-v0.1.5/bootstrap.sh | sudo sh -s -- --refresh
+```
+
+Edit only these values in `/etc/vault/.env.production`:
+
+```dotenv
+VAULT_DOMAIN=exocortex-saturn.shmoza.net
+PUBLIC_ORIGIN=https://exocortex-saturn.shmoza.net
+OWNER_ACCESS_KEY=<at-least-32-url-safe-characters>
+KERNEL_URL=https://exocortex-kernel.shmoza.net
+KERNEL_SERVICE_TOKEN=<normally-imported-from-the-local-Kernel-install>
+STORAGE_HOST=<production-SFTP-host>
+STORAGE_PORT=22
+STORAGE_USER=<production-SFTP-user>
+STORAGE_ROOT=.
+STORAGE_HOST_FINGERPRINT=SHA256:<verified-fingerprint>
+```
+
+Bootstrap generates the database password and six independent application
+peppers. It imports `/root/saturn-storage-ed25519` when that dedicated key
+already exists; otherwise it generates a new production-only Ed25519 SFTP key.
+The public counterpart is available with `sudo vaultctl storage-public-key` in
+the format required by the configured SFTP port (RFC4716 for Hetzner port 22)
+and must be authorized once on the Storage Box sub-account. The release-signing
+key is never used for SFTP. `vaultctl validate` materializes `OWNER_ACCESS_KEY` as a
+mode-`0600` Compose secret without exposing the plaintext value to application
+containers. DEV identity and second-copy evidence are not runtime configuration
+and do not block installation.
+
+Saturn's private signing keys remain only in GitHub Secrets and are exposed only to the protected
+release job. CI derives and embeds the public counterparts in that versioned
+bootstrap. On a clean host bootstrap creates
+`/etc/exocortex/release-trust/saturn.pem` and
+`/etc/vault/release-public-key.pem`, verifies the manifest before downloading
+Saturn, and prepares only Saturn and `/etc/vault/.env.production`. An existing
+mismatching trust key fails closed. No `scp`, manual release-key fingerprint or
+separate public-key preparation is required. Kernel and Volt are installed by
+their own bootstraps. All three expose loopback listeners and share the single
+server-managed Nginx on ports 80/443.
 
 ## Production ingress
 
@@ -66,7 +107,10 @@ process on `127.0.0.1:8080` by default. Install
 in the server-managed Nginx, set the real domain, certificate paths and exact
 upstream ports, then require `nginx -t` before reload. The example exposes the
 login and authenticated UI/API from every client IP while keeping health
-host-local. It keeps
+host-local. Do not add `OPERATOR_CIDR`, a VPN prerequisite or a source-IP
+allow-list: the Access Key and bounded Saturn session protect all owner data.
+Saturn ships no embedded Nginx and uses no coturn; its HTTP/WebDAV/WebSocket
+traffic stays behind server Nginx. It keeps
 the global request-body limit at 16 MiB, exempts only streaming WebDAV PUTs so
 Saturn enforces their configured size, and rejects unknown Host/SNI values in a
 fail-closed default server.
