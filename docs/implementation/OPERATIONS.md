@@ -28,20 +28,22 @@ pinned in `.release/updater.version`; CI refuses to build with another version.
    If Kernel is installed locally, its URL and service token are copied too.
 3. Edit only the remaining `OPERATOR INPUT` values in
    `/etc/vault/.env.production`; keep mode `0600`. A remote Kernel URL and token
-   are operator inputs; Updater and agent tokens are not.
+   are operator inputs; Updater and agent tokens are not. Set `VAULT_DOMAIN`
+   and `PUBLIC_ORIGIN=https://VAULT_DOMAIN` to the same canonical hostname.
 4. Place the nine distinct secret files in `VAULT_SECRET_ROOT`, each mode
    `0600`, and keep the release signing private key outside the host.
 5. Run `vaultctl validate`, then `vaultctl install`. The latter installs or
    safely upgrades the bundled Updater and registers the `saturn` head before
    starting Saturn API and web processes on loopback only.
 6. Copy `infra/production/nginx.saturn.conf.example` into the server Nginx
-   configuration, replace the domain and certificate paths, add the exact
-   owner VPN/internal CIDRs to all protected locations, run `nginx -t`, and
-   reload Nginx. Keep upstreams aligned with `SATURN_API_BIND_PORT` and
-   `SATURN_WEB_BIND_PORT`. Preserve the fail-closed HTTP/HTTPS `default_server`
-   blocks. The global `client_max_body_size 16m` remains in force except in the
-   exact `/dav` and prefix `/dav/` locations, where `0` permits a streaming
-   whole-file PUT and Saturn remains the authoritative size limit.
+   configuration, replace the domain and certificate paths, run `nginx -t`,
+   and reload Nginx. Keep upstreams aligned with `SATURN_API_BIND_PORT` and
+   `SATURN_WEB_BIND_PORT`. The owner login and authenticated UI/API are
+   reachable from every client IP; health remains loopback-only. Preserve the
+   fail-closed HTTP/HTTPS `default_server` blocks. The global
+   `client_max_body_size 16m` remains in force except in the exact `/dav` and
+   prefix `/dav/` locations, where `0` permits a streaming whole-file PUT and
+   Saturn remains the authoritative size limit.
 7. Run `pnpm prod:bootstrap-storage` and `vaultctl smoke` with the production
    environment. The smoke object must be deleted automatically.
 8. Verify canonical HTTPS, DNS, unauthorised external exposure and second-copy
@@ -87,9 +89,10 @@ worker health and SFTP transport remain on internal networks. Verify this from
 an unauthorized external network; an internal scan is insufficient evidence.
 After every ingress change, verify that an unknown HTTP Host is closed without
 a response, an unknown TLS SNI is rejected during the handshake, spoofing
-`X-Forwarded-For: 127.0.0.1` does not bypass the owner CIDR, and owner routes
-return `403` outside that CIDR. All routes are non-indexable by default and
-unknown paths on the canonical host return bounded `404` responses.
+`X-Forwarded-For: 127.0.0.1` does not expose host-local health, the login page
+is reachable externally, and an anonymous protected API request returns
+`401`. All routes are non-indexable by default and unknown paths on the
+canonical host return bounded `404` responses.
 
 If a secret enters a log, screenshot, cache, image or archive, treat it as
 disclosed: stop promotion, revoke/rotate it from a clean environment,

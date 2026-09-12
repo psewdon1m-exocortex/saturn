@@ -2,6 +2,7 @@
   "version": 1,
   "service": "saturn",
   "exposure_modes": [
+    "public/non-indexable",
     "private",
     "concealed"
   ],
@@ -40,6 +41,7 @@
       "evidence": [
         "apps/api/src/owner-token.guard.test.ts",
         "infra/production/nginx.saturn.conf.example",
+        "infra/production/nginx-ingress.test.mjs",
         "infra/production/static-server.test.mjs"
       ]
     },
@@ -53,6 +55,7 @@
         "DEPLOYMENT_READINESS.md",
         "apps/api/src/owner-token.guard.test.ts",
         "infra/production/nginx.saturn.conf.example",
+        "infra/production/nginx-ingress.test.mjs",
         "infra/production/static-server.test.mjs"
       ]
     }

@@ -118,7 +118,7 @@ contains 13 passing checks, including the complete workspace test suite,
 hardened immutable images,
 signed release tamper rejection, exact storage smoke cleanup, HTTPS Gateway
 E2E through server Nginx, a verified 17 MiB WebDAV PUT, fail-closed unknown
-Host/SNI and simulated outside-CIDR/spoofed-forwarding-header denial,
+Host/SNI, public login, anonymous API denial and spoof-resistant local health,
 loopback/probe isolation, SFTP/PostgreSQL outage recovery, rejected bad candidate,
 clean-host database restore, alternative-backend exit and final secret scans.
 

@@ -34,12 +34,12 @@ release can publish artifacts.
 ## Release identity
 
 Production releases are created only by tags matching
-`saturn-vMAJOR.MINOR.PATCH`. The current fix identity is `saturn-v0.1.2`; its
+`saturn-vMAJOR.MINOR.PATCH`. The current fix identity is `saturn-v0.1.3`; its
 versioned OCI repositories are `saturn-app` and `saturn-web`, and its
-installation bundle is `saturn-0.1.2.zip`. Legacy unscoped tags such as
+installation bundle is `saturn-0.1.3.zip`. Legacy unscoped tags such as
 `v0.0.1` run verification only and cannot publish a Saturn release. Publish
 the pinned `updater-v0.4.1` dependency before the Saturn tag. The existing
-`saturn-v0.1.0` and `saturn-v0.1.1` releases remain immutable.
+`saturn-v0.1.0`, `saturn-v0.1.1` and `saturn-v0.1.2` releases remain immutable.
 
 ## Production ingress
 
@@ -48,7 +48,9 @@ production Compose file exposes API on `127.0.0.1:3000` and the static web
 process on `127.0.0.1:8080` by default. Install
 [`infra/production/nginx.saturn.conf.example`](infra/production/nginx.saturn.conf.example)
 in the server-managed Nginx, set the real domain, certificate paths and exact
-private client CIDRs, then require `nginx -t` before reload. The example keeps
+upstream ports, then require `nginx -t` before reload. The example exposes the
+login and authenticated UI/API from every client IP while keeping health
+host-local. It keeps
 the global request-body limit at 16 MiB, exempts only streaming WebDAV PUTs so
 Saturn enforces their configured size, and rejects unknown Host/SNI values in a
 fail-closed default server.
