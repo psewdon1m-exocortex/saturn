@@ -9,6 +9,7 @@ x-vault-environment: &vault-environment
     OWNER_ACCESS_KEY: ""
   networks:
     - backend
+    - storage-egress
   restart: unless-stopped
   read_only: true
   tmpfs:
@@ -193,6 +194,7 @@ services:
       - "${SATURN_API_BIND_ADDRESS:-127.0.0.1}:${SATURN_API_BIND_PORT:-3000}:3000"
     networks:
       backend:
+      storage-egress:
       ingress:
         ipv4_address: "${SATURN_API_CONTAINER_IP:-172.31.250.3}"
       exocortex-services:
@@ -281,6 +283,8 @@ networks:
         - subnet: "${SATURN_INGRESS_SUBNET:-172.31.250.0/29}"
   backend:
     internal: true
+  storage-egress:
+    driver: bridge
   exocortex-services:
     external: true
 

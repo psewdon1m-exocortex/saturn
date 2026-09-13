@@ -89,6 +89,21 @@ test("installer prepares independent runtime secrets and a dedicated SFTP key", 
   assert.doesNotMatch(installer, /release-public-key\.pem[^\n]*storage_private_key/);
 });
 
+test("storage clients have public egress without exposing internal-only services", () => {
+  const sharedApplicationConfig = compose.match(/^x-vault-environment:[\s\S]*?(?=^services:)/m)?.[0] ?? "";
+  const apiConfig = compose.match(/^  api:[\s\S]*?(?=^  web:)/m)?.[0] ?? "";
+  const postgresConfig = compose.match(/^  postgres:[\s\S]*?(?=^  migrate:)/m)?.[0] ?? "";
+  const webConfig = compose.match(/^  web:[\s\S]*?(?=^volumes:)/m)?.[0] ?? "";
+
+  assert.match(sharedApplicationConfig, /^    - backend$/m);
+  assert.match(sharedApplicationConfig, /^    - storage-egress$/m);
+  assert.match(apiConfig, /^      storage-egress:$/m);
+  assert.match(compose, /^  backend:\n    internal: true$/m);
+  assert.match(compose, /^  storage-egress:\n    driver: bridge$/m);
+  assert.doesNotMatch(postgresConfig, /storage-egress/);
+  assert.doesNotMatch(webConfig, /storage-egress/);
+});
+
 test("verified bootstrap writes release locks and can refresh a prepared 0.1.4 bundle", () => {
   assert.match(bootstrap, /SATURN_BOOTSTRAP_RELEASE_VERSION/);
   assert.match(bootstrap, /SATURN_BOOTSTRAP_APP_IMAGE/);
