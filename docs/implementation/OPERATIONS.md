@@ -56,7 +56,10 @@ pinned in `.release/updater.version`; CI refuses to build with another version.
 5. Run `vaultctl validate`, then `vaultctl install`. Validation materializes the
    owner Access Key as a protected file secret. The latter installs or
    safely upgrades the bundled Updater and registers the `saturn` head before
-   starting Saturn API and web processes on loopback only.
+   starting Saturn API and web processes on loopback only. Host secret files
+   remain `root:root 0600`; a root-only, networkless validation container reads
+   them, and a one-shot initializer copies application-readable forms into a
+   Docker-owned volume so the long-running containers remain non-root.
 6. Copy `infra/production/nginx.saturn.conf.example` into the server Nginx
    configuration, replace the domain and certificate paths, run `nginx -t`,
    and reload Nginx. Keep upstreams aligned with `SATURN_API_BIND_PORT` and
@@ -73,14 +76,15 @@ pinned in `.release/updater.version`; CI refuses to build with another version.
    real data. Independent second-copy delivery and restore evidence remain a
    separate disaster-recovery procedure; they are not Saturn runtime variables.
 
-For a host where `0.1.4` was only downloaded/prepared and not started, run the
-`0.1.5` bootstrap with `--refresh`. It preserves
+For a host where `0.1.4` or `0.1.5` was only prepared and not started, run the
+`0.1.6` bootstrap with `--refresh`. It preserves
 `/etc/vault/.env.production`, removes the obsolete `VAULT_DEV_STORAGE_*` and
-`VAULT_SECOND_COPY_ID` entries, writes the new release lock, and preserves the
-old bundle under `/opt/vault.previous-<timestamp>`:
+`VAULT_SECOND_COPY_ID` entries, repairs the absolute runtime env path, writes
+the new release lock, and preserves the old bundle under
+`/opt/vault.previous-<timestamp>`:
 
 ```sh
-curl -fsSL https://github.com/psewdon1m-exocortex/saturn/releases/download/saturn-v0.1.5/bootstrap.sh | sudo sh -s -- --refresh
+curl -fsSL https://github.com/psewdon1m-exocortex/saturn/releases/download/saturn-v0.1.6/bootstrap.sh | sudo sh -s -- --refresh
 ```
 
 `READINESS_TIMEOUT_MS` defaults to 3000 ms and bounds database, storage and

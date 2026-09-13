@@ -57,6 +57,13 @@ test("installer prepares independent runtime secrets and a dedicated SFTP key", 
   assert.match(installer, /ssh-keygen -e -m RFC4716/);
   assert.match(compose, /\$\{VAULT_RUNTIME_ENV_FILE:-\.\/infra\/production\/\.env\.production\}/);
   assert.match(environment, /^VAULT_RUNTIME_ENV_FILE=\/etc\/vault\/\.env\.production$/m);
+  assert.match(installer, /set_config VAULT_RUNTIME_ENV_FILE "\$CONFIG_FILE"/);
+  assert.match(installer, /docker run --rm --user 0:0 --network none --read-only --security-opt no-new-privileges --cap-drop ALL/);
+  assert.match(installer, /refresh_runtime_secrets/);
+  assert.match(compose, /^  secret-runtime-init:$/m);
+  assert.match(compose, /runtime_secrets:\/run\/secrets:ro/);
+  assert.match(compose, /^  runtime_secrets:$/m);
+  assert.doesNotMatch(compose, /uid: "1000"|gid: "1000"/);
   assert.match(compose, /OWNER_ACCESS_KEY: ""/);
   assert.doesNotMatch(installer, /release-public-key\.pem[^\n]*storage_private_key/);
 });

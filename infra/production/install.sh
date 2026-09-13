@@ -66,6 +66,9 @@ migrate_operator_config() {
     awk 'BEGIN { inserted=0 } { print } /^PUBLIC_ORIGIN=/ && !inserted { print "OWNER_ACCESS_KEY=replace-me-with-owner-access-key"; inserted=1 } END { if (!inserted) print "OWNER_ACCESS_KEY=replace-me-with-owner-access-key" }' "$CONFIG_FILE" >"$temporary"
     chmod 0600 "$temporary"; mv -f "$temporary" "$CONFIG_FILE"
   fi
+  # 0.1.4 used a Compose-relative runtime env file. A refresh must make the
+  # preserved machine config explicit before the new Compose file is evaluated.
+  set_config VAULT_RUNTIME_ENV_FILE "$CONFIG_FILE"
 }
 
 prepare_generated_secrets() {
@@ -216,7 +219,11 @@ validate() {
   set -a; . "$CONFIG_FILE"; set +a
   docker compose --env-file "$CONFIG_FILE" -f "$COMPOSE_FILE" config --quiet
   docker pull "$VAULT_APP_IMAGE" >/dev/null
-  docker run --rm --env-file "$CONFIG_FILE" -e OWNER_ACCESS_KEY= -e VAULT_SECRET_ROOT=/run/secrets -v "$CONFIG_FILE:/config/.env.production:ro" -v "$VAULT_SECRET_ROOT:/run/secrets:ro" "$VAULT_APP_IMAGE" node /app/scripts/validate-production.mjs /config/.env.production >/dev/null
+  docker run --rm --user 0:0 --network none --read-only --security-opt no-new-privileges --cap-drop ALL --env-file "$CONFIG_FILE" -e OWNER_ACCESS_KEY= -e VAULT_SECRET_ROOT=/run/secrets -v "$CONFIG_FILE:/config/.env.production:ro" -v "$VAULT_SECRET_ROOT:/run/secrets:ro" "$VAULT_APP_IMAGE" node /app/scripts/validate-production.mjs /config/.env.production >/dev/null
+}
+
+refresh_runtime_secrets() {
+  docker compose --env-file "$CONFIG_FILE" -f "$COMPOSE_FILE" run --rm --no-deps secret-runtime-init
 }
 
 install_release() {
@@ -231,6 +238,7 @@ install_release() {
   docker pull "$VAULT_APP_IMAGE"
   docker pull "$VAULT_WEB_IMAGE"
   docker network inspect exocortex-services >/dev/null 2>&1 || docker network create exocortex-services >/dev/null
+  refresh_runtime_secrets
   docker compose --env-file "$CONFIG_FILE" -f "$COMPOSE_FILE" up -d postgres
   docker compose --env-file "$CONFIG_FILE" -f "$COMPOSE_FILE" run --rm migrate
   docker compose --env-file "$CONFIG_FILE" -f "$COMPOSE_FILE" up -d worker api web
@@ -246,8 +254,8 @@ install_release() {
 }
 
 status() { docker compose --env-file "$CONFIG_FILE" -f "$COMPOSE_FILE" ps; }
-bootstrap_storage() { docker compose --env-file "$CONFIG_FILE" -f "$COMPOSE_FILE" run --rm migrate node /app/scripts/storage-bootstrap.mjs; }
-smoke() { docker compose --env-file "$CONFIG_FILE" -f "$COMPOSE_FILE" run --rm migrate node /app/scripts/storage-smoke.mjs; }
+bootstrap_storage() { refresh_runtime_secrets; docker compose --env-file "$CONFIG_FILE" -f "$COMPOSE_FILE" run --rm migrate node /app/scripts/storage-bootstrap.mjs; }
+smoke() { refresh_runtime_secrets; docker compose --env-file "$CONFIG_FILE" -f "$COMPOSE_FILE" run --rm migrate node /app/scripts/storage-smoke.mjs; }
 storage_public_key() {
   storage_port=$(get_config STORAGE_PORT)
   if [ "$storage_port" = 22 ]; then
