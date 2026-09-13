@@ -11,6 +11,9 @@ const suffix = randomUUID().replaceAll("-", "");
 const sourceVolume = `saturn-linux-secrets-source-${suffix}`;
 const project = `saturnsecrets${suffix}`;
 const runtimeVolume = `${project}_runtime_secrets`;
+const dataVolumes = [
+  `${project}_drop_buffer`, `${project}_recovery_spool`, `${project}_recovery_archives`, `${project}_storage_runtime`,
+];
 const names = [
   "database_password", "owner_access_key", "auth_pepper", "drop_pepper", "share_pepper",
   "device_pepper", "backup_pepper", "laboratory_pepper", "gryphon_service_token", "storage_private_key",
@@ -78,11 +81,30 @@ try {
   ], { env: configEnvironment }));
   const init = compose.services["secret-runtime-init"];
   if (init?.user !== "0:0" || !Array.isArray(init.command)) throw new Error("secret-runtime-init is not root-scoped");
+  const api = compose.services.api;
+  const apiTargets = (api?.volumes ?? []).map((volume) => typeof volume === "string" ? volume : volume.target);
+  if (!apiTargets.includes("/run/neptune-control.token") || !apiTargets.includes("/run/neptune-export.token") || apiTargets.some((target) => /^\/run\/secrets\/neptune-/.test(target))) {
+    throw new Error("Neptune token bind mounts must not be nested inside the read-only runtime_secrets volume");
+  }
 
   runDocker([
     "compose", "-p", project, "-f", "compose.production.yaml",
     "run", "--rm", "--no-deps", "secret-runtime-init",
   ], { env: configEnvironment });
+
+  for (const service of ["drop-buffer-init", "recovery-volume-init", "storage-runtime-init"]) {
+    runDocker([
+      "compose", "-p", project, "-f", "compose.production.yaml",
+      "run", "--rm", "--no-deps", service,
+    ], { env: configEnvironment });
+  }
+
+  for (const volume of dataVolumes) {
+    runDocker([
+      "run", "--rm", "-v", `${volume}:/target:ro`, "alpine:3.24", "sh", "-ceu",
+      "test \"$(stat -c '%u:%g:%a' /target)\" = 1000:1000:700",
+    ]);
+  }
 
   runDocker([
     "run", "--rm", "--user", "1000:1000", "-v", `${runtimeVolume}:/run/secrets:ro`,
@@ -98,7 +120,7 @@ try {
      test "$(stat -c '%u:%g:%a' /source/gryphon/saturn.token)" = 0:0:640`,
   ]);
 
-  process.stdout.write(`${JSON.stringify({ rootOnlySource: true, nonRootRuntime: true, files: names.length })}\n`);
+  process.stdout.write(`${JSON.stringify({ rootOnlySource: true, nonRootRuntime: true, files: names.length, dataVolumes: dataVolumes.length })}\n`);
 } finally {
-  spawnSync(docker, ["volume", "rm", "-f", runtimeVolume, sourceVolume], { cwd: root, encoding: "utf8" });
+  spawnSync(docker, ["volume", "rm", "-f", runtimeVolume, ...dataVolumes, sourceVolume], { cwd: root, encoding: "utf8" });
 }

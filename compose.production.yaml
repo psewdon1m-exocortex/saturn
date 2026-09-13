@@ -117,7 +117,7 @@ services:
   drop-buffer-init:
     image: ${VAULT_APP_IMAGE:?set VAULT_APP_IMAGE to an immutable digest}
     user: "0:0"
-    command: ["sh", "-c", "mkdir -p /var/lib/vault/drop-buffer && chown 1000:1000 /var/lib/vault/drop-buffer && chmod 0700 /var/lib/vault/drop-buffer"]
+    command: ["sh", "-c", "mkdir -p /var/lib/vault/drop-buffer && chown 0:0 /var/lib/vault/drop-buffer && chmod 0700 /var/lib/vault/drop-buffer && chown 1000:1000 /var/lib/vault/drop-buffer"]
     volumes:
       - drop_buffer:/var/lib/vault/drop-buffer
     restart: "no"
@@ -131,7 +131,7 @@ services:
   recovery-volume-init:
     image: ${VAULT_APP_IMAGE:?set VAULT_APP_IMAGE to an immutable digest}
     user: "0:0"
-    command: ["sh", "-c", "mkdir -p /var/lib/vault/spool /var/lib/vault/recovery && chown 1000:1000 /var/lib/vault/spool /var/lib/vault/recovery && chmod 0700 /var/lib/vault/spool /var/lib/vault/recovery"]
+    command: ["sh", "-c", "mkdir -p /var/lib/vault/spool /var/lib/vault/recovery && chown 0:0 /var/lib/vault/spool /var/lib/vault/recovery && chmod 0700 /var/lib/vault/spool /var/lib/vault/recovery && chown 1000:1000 /var/lib/vault/spool /var/lib/vault/recovery"]
     volumes:
       - recovery_spool:/var/lib/vault/spool
       - recovery_archives:/var/lib/vault/recovery
@@ -146,7 +146,7 @@ services:
   storage-runtime-init:
     image: ${VAULT_APP_IMAGE:?set VAULT_APP_IMAGE to an immutable digest}
     user: "0:0"
-    command: ["sh", "-c", "mkdir -p /var/lib/vault/storage-runtime && chown 1000:1000 /var/lib/vault/storage-runtime && chmod 0700 /var/lib/vault/storage-runtime"]
+    command: ["sh", "-c", "mkdir -p /var/lib/vault/storage-runtime && chown 0:0 /var/lib/vault/storage-runtime && chmod 0700 /var/lib/vault/storage-runtime && chown 1000:1000 /var/lib/vault/storage-runtime"]
     volumes:
       - storage_runtime:/var/lib/vault/storage-runtime
     restart: "no"
@@ -215,11 +215,11 @@ services:
         target: /run/gryphon
       - type: bind
         source: "${NEPTUNE_CONTROL_TOKEN_HOST_FILE:?Set NEPTUNE_CONTROL_TOKEN_HOST_FILE}"
-        target: /run/secrets/neptune-control.token
+        target: /run/neptune-control.token
         read_only: true
       - type: bind
         source: "${NEPTUNE_EXPORT_TOKEN_HOST_FILE:?Set NEPTUNE_EXPORT_TOKEN_HOST_FILE}"
-        target: /run/secrets/neptune-export.token
+        target: /run/neptune-export.token
         read_only: true
     group_add:
       - "${UPDATER_SOCKET_GID:?Set UPDATER_SOCKET_GID}"

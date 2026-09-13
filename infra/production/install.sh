@@ -186,6 +186,8 @@ prepare_agent_mounts() {
   set_config GRYPHON_CLIENTS_GID "$gryphon_gid"
   set_config NEPTUNE_CONTROL_TOKEN_HOST_FILE /etc/neptune/clients/saturn.control.token
   set_config NEPTUNE_EXPORT_TOKEN_HOST_FILE /etc/neptune/clients/saturn.export.token
+  set_config NEPTUNE_CONTROL_TOKEN_FILE /run/neptune-control.token
+  set_config NEPTUNE_EXPORT_TOKEN_FILE /run/neptune-export.token
   set_config GRYPHON_SERVICE_TOKEN_HOST_FILE "$gryphon_token_file"
   needs_generation UPDATER_CONTROL_TOKEN && set_config UPDATER_CONTROL_TOKEN "$(random_hex 32)"
   set_config UPDATER_COMPOSE_PROJECT_DIR "$INSTALL_ROOT"

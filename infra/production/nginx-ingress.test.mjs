@@ -64,6 +64,8 @@ test("installer prepares independent runtime secrets and a dedicated SFTP key", 
   assert.match(installer, /install -o root -g root -m 0600 "\$source_file" "\$GRYPHON_VALIDATION_SECRET"/);
   assert.match(installer, /for service in updater neptune gryphon/);
   assert.match(installer, /release-trust\/\$service\.pem/);
+  assert.match(installer, /set_config NEPTUNE_CONTROL_TOKEN_FILE \/run\/neptune-control\.token/);
+  assert.match(installer, /set_config NEPTUNE_EXPORT_TOKEN_FILE \/run\/neptune-export\.token/);
   assert.match(bootstrap, /for service in updater neptune gryphon/);
   assert.match(bootstrap, /release-trust\/\$service\.pem/);
   assert.match(installer, /bootstrap-credentials\/saturn\.env/);
@@ -76,6 +78,11 @@ test("installer prepares independent runtime secrets and a dedicated SFTP key", 
   assert.match(compose, /^  runtime_secrets:$/m);
   assert.doesNotMatch(compose, /uid: "1000"|gid: "1000"/);
   assert.match(compose, /OWNER_ACCESS_KEY: ""/);
+  assert.match(environment, /^NEPTUNE_CONTROL_TOKEN_FILE=\/run\/neptune-control\.token$/m);
+  assert.match(environment, /^NEPTUNE_EXPORT_TOKEN_FILE=\/run\/neptune-export\.token$/m);
+  assert.match(compose, /target: \/run\/neptune-control\.token/);
+  assert.match(compose, /target: \/run\/neptune-export\.token/);
+  assert.doesNotMatch(compose, /target: \/run\/secrets\/neptune-(?:control|export)\.token/);
   assert.doesNotMatch(installer, /release-public-key\.pem[^\n]*storage_private_key/);
 });
 
