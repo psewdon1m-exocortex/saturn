@@ -60,6 +60,8 @@ test("installer prepares independent runtime secrets and a dedicated SFTP key", 
   assert.match(installer, /set_config VAULT_RUNTIME_ENV_FILE "\$CONFIG_FILE"/);
   assert.match(installer, /docker run --rm --user 0:0 --network none --read-only --security-opt no-new-privileges --cap-drop ALL/);
   assert.match(installer, /refresh_runtime_secrets/);
+  assert.match(installer, /sync_gryphon_validation_secret/);
+  assert.match(installer, /install -o root -g root -m 0600 "\$source_file" "\$GRYPHON_VALIDATION_SECRET"/);
   assert.match(compose, /^  secret-runtime-init:$/m);
   assert.match(compose, /runtime_secrets:\/run\/secrets:ro/);
   assert.match(compose, /^  runtime_secrets:$/m);

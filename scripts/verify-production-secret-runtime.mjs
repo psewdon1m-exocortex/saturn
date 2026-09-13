@@ -15,6 +15,7 @@ const names = [
   "database_password", "owner_access_key", "auth_pepper", "drop_pepper", "share_pepper",
   "device_pepper", "backup_pepper", "laboratory_pepper", "gryphon_service_token", "storage_private_key",
 ];
+const vaultNames = names.filter((name) => name !== "gryphon_service_token");
 
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, { cwd: root, encoding: "utf8", ...options });
@@ -32,13 +33,18 @@ try {
   runDocker(["volume", "create", sourceVolume]);
   runDocker([
     "run", "--rm", "-v", `${sourceVolume}:/source`, "alpine:3.24", "sh", "-ceu",
-    `mkdir -m 0700 /source/config
+    `mkdir -m 0700 /source/config /source/vault /source/gryphon
      printf '%s\\n' protected > /source/config/.env.production
      chmod 0600 /source/config/.env.production
-     for name in ${names.join(" ")}; do
+     for name in ${vaultNames.join(" ")}; do
        printf '%s\\n' "secret-$name-0123456789012345678901234567890123456789" > "/source/$name"
-       chmod 0600 "/source/$name"
+       mv "/source/$name" "/source/vault/$name"
+       chmod 0600 "/source/vault/$name"
      done`,
+  ]);
+  runDocker([
+    "run", "--rm", "-v", `${sourceVolume}:/source`, "alpine:3.24", "sh", "-ceu",
+    "printf '%s\\n' gryphon-token-0123456789012345678901234567890123456789 > /source/gryphon/saturn.token && chmod 0640 /source/gryphon/saturn.token",
   ]);
 
   const denied = spawnSync(docker, [
@@ -59,8 +65,8 @@ try {
     VAULT_APP_IMAGE: appImage,
     VAULT_WEB_IMAGE: "registry.test/saturn-web@sha256:" + "1".repeat(64),
     VAULT_RUNTIME_ENV_FILE: path.join(root, "infra", "production", ".env.production.example"),
-    VAULT_SECRET_ROOT: `/var/lib/docker/volumes/${sourceVolume}/_data`,
-    GRYPHON_SERVICE_TOKEN_HOST_FILE: `/var/lib/docker/volumes/${sourceVolume}/_data/gryphon_service_token`,
+    VAULT_SECRET_ROOT: `/var/lib/docker/volumes/${sourceVolume}/_data/vault`,
+    GRYPHON_SERVICE_TOKEN_HOST_FILE: `/var/lib/docker/volumes/${sourceVolume}/_data/gryphon/saturn.token`,
     NEPTUNE_CONTROL_TOKEN_HOST_FILE: path.join(root, ".tmp", "unused-neptune-control-token"),
     NEPTUNE_EXPORT_TOKEN_HOST_FILE: path.join(root, ".tmp", "unused-neptune-export-token"),
     UPDATER_SOCKET_GID: "1001",
@@ -86,9 +92,10 @@ try {
 
   runDocker([
     "run", "--rm", "-v", `${sourceVolume}:/source:ro`, "alpine:3.24", "sh", "-ceu",
-    `for name in ${names.join(" ")}; do
-       test "$(stat -c '%u:%g:%a' "/source/$name")" = 0:0:600
-     done`,
+    `for name in ${vaultNames.join(" ")}; do
+       test "$(stat -c '%u:%g:%a' "/source/vault/$name")" = 0:0:600
+     done
+     test "$(stat -c '%u:%g:%a' /source/gryphon/saturn.token)" = 0:0:640`,
   ]);
 
   process.stdout.write(`${JSON.stringify({ rootOnlySource: true, nonRootRuntime: true, files: names.length })}\n`);

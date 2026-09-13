@@ -10,6 +10,7 @@ SECRET_ROOT=/etc/vault/secrets
 LEGACY_STORAGE_KEY=/root/saturn-storage-ed25519
 STORAGE_PUBLIC_KEY=/etc/vault/storage_public_key.pub
 STORAGE_PUBLIC_KEY_RFC4716=/etc/vault/storage_public_key.rfc4716.pub
+GRYPHON_VALIDATION_SECRET="$SECRET_ROOT/gryphon_service_token"
 
 die() { printf '%s\n' "saturn install: $1" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "required command is missing: $1"; }
@@ -121,9 +122,22 @@ sync_owner_access_key() {
   mv -f "$owner_temporary" "$SECRET_ROOT/owner_access_key"
 }
 
+sync_gryphon_validation_secret() {
+  source_file=$(get_config GRYPHON_SERVICE_TOKEN_HOST_FILE)
+  case "$source_file" in
+    ""|CHANGE_ME*|change-*|replace-*) die "set GRYPHON_SERVICE_TOKEN_HOST_FILE in $CONFIG_FILE" ;;
+  esac
+  [ -f "$source_file" ] && [ ! -L "$source_file" ] && [ -s "$source_file" ] || die "invalid Gryphon service token: $source_file"
+  install -o root -g root -m 0600 "$source_file" "$GRYPHON_VALIDATION_SECRET"
+}
+
 prepare_runtime_secrets() {
   prepare_generated_secrets
   sync_owner_access_key
+  # The canonical token is group-readable for the Gryphon client socket. Stage
+  # a root-only copy because production validation intentionally sees only the
+  # isolated Vault secret root mounted at /run/secrets.
+  sync_gryphon_validation_secret
 }
 
 copy_local_kernel_bootstrap() {
