@@ -33,6 +33,9 @@ test("health remains host-local and unknown TLS SNI fails closed", () => {
   }
   assert.match(config, /listen 443 ssl default_server;/);
   assert.match(config, /ssl_reject_handshake on;/);
+  assert.match(config, /listen 443 ssl http2;/);
+  assert.match(config, /listen \[::\]:443 ssl http2;/);
+  assert.doesNotMatch(config, /^\s*http2 on;/m);
 });
 
 test("operator input is limited to the login, origin, Kernel and production storage", () => {
