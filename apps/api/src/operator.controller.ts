@@ -10,6 +10,7 @@ import type { Database } from "@saturn/database";
 import type { RuntimeStorageManager } from "@saturn/storage";
 import { z } from "zod";
 import { OwnerTokenGuard, RequireRecentReauthentication } from "./owner-token.guard.js";
+import { resolveKernelOrigin } from "./kernel-discovery.js";
 import type { StorageHealthPort } from "./health.service.js";
 import { APP_CONFIG, ARCHIVE_REPOSITORY, AUDIT_SERVICE, DATABASE, STORAGE_HEALTH, STORAGE_RUNTIME } from "./tokens.js";
 import { TransferMonitorService, type UploadTaskSample } from "./transfer-monitor.service.js";
@@ -151,41 +152,13 @@ export class OperatorController {
     if (this.#config.kernel.tokenFile === undefined) return undefined;
     try {
       const value = (await fs.readFile(this.#config.kernel.tokenFile, "utf8")).replace(/[\r\n]+$/, "");
-      return value.length >= 32 ? value : undefined;
+      return value.length >= 24 ? value : undefined;
     } catch { return undefined; }
   }
 
   async #validateKernel(url: string, token: string): Promise<string> {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.#config.kernel.timeoutMs);
-    try {
-      const endpoint = `${url.replace(/\/$/, "")}/health/ready`;
-      const response = await fetch(endpoint, {
-        headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
-        cache: "no-store",
-        redirect: "error",
-        signal: controller.signal,
-      });
-      const length = Number(response.headers.get("content-length") ?? "0");
-      if (!response.ok || (Number.isFinite(length) && length > 65_536)) throw new Error("kernel_validation_failed");
-      const chunks: Uint8Array[] = []; let bytes = 0;
-      if (response.body !== null) {
-        for await (const part of response.body as unknown as AsyncIterable<Uint8Array>) {
-          bytes += part.byteLength;
-          if (bytes > 65_536) { await response.body.cancel(); throw new Error("kernel_validation_failed"); }
-          chunks.push(part);
-        }
-      }
-      const body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown;
-      if (typeof body !== "object" || body === null) throw new Error("kernel_validation_failed");
-      const record = body as Record<string, unknown>;
-      if (record.status !== "ok") throw new Error("kernel_validation_failed");
-      for (const key of ["identity", "role", "service"] as const) {
-        const candidate = record[key];
-        if (typeof candidate === "string" && candidate.length > 0 && candidate.length <= 160) return candidate;
-      }
-      return "Kernel";
-    } finally { clearTimeout(timer); }
+    await resolveKernelOrigin(url, token, "saturn", this.#config.kernel.timeoutMs);
+    return "exocortex-kernel";
   }
 
   async #auditKernel(action: string, outcome: "success" | "failure", details: Record<string, unknown>): Promise<void> {

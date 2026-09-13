@@ -81,6 +81,11 @@ test("installer prepares independent runtime secrets and a dedicated SFTP key", 
   assert.match(compose, /^  runtime_secrets:$/m);
   assert.doesNotMatch(compose, /uid: "1000"|gid: "1000"/);
   assert.match(compose, /OWNER_ACCESS_KEY: ""/);
+  assert.match(compose, /KERNEL_SERVICE_TOKEN: ""/);
+  assert.match(environment, /^KERNEL_TOKEN_FILE=\/run\/secrets\/kernel_service_token$/m);
+  assert.match(installer, /validate_kernel_service_token/);
+  assert.match(compose, /migrate-production-runtime\.mjs/);
+  assert.match(compose, /KERNEL_TOKEN_FILE: "\$\{KERNEL_TOKEN_FILE:-\/run\/secrets\/kernel_service_token\}"/);
   assert.match(environment, /^NEPTUNE_CONTROL_TOKEN_FILE=\/run\/neptune-control\.token$/m);
   assert.match(environment, /^NEPTUNE_EXPORT_TOKEN_FILE=\/run\/neptune-export\.token$/m);
   assert.match(compose, /target: \/run\/neptune-control\.token/);

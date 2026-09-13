@@ -7,6 +7,9 @@ x-vault-environment: &vault-environment
     # OWNER_ACCESS_KEY is materialized into the owner_access_key Compose secret.
     # Never expose its plaintext .env value to application containers.
     OWNER_ACCESS_KEY: ""
+    # KERNEL_SERVICE_TOKEN is materialized into a runtime-only file as well.
+    KERNEL_SERVICE_TOKEN: ""
+    KERNEL_TOKEN_FILE: "${KERNEL_TOKEN_FILE:-/run/secrets/kernel_service_token}"
   networks:
     - backend
     - storage-egress
@@ -31,6 +34,8 @@ services:
   secret-runtime-init:
     image: ${VAULT_APP_IMAGE:?set VAULT_APP_IMAGE to an immutable digest}
     user: "0:0"
+    environment:
+      KERNEL_SERVICE_TOKEN: "${KERNEL_SERVICE_TOKEN:?set KERNEL_SERVICE_TOKEN}"
     command:
       - sh
       - -ceu
@@ -44,6 +49,11 @@ services:
           chown 1000:1000 "/target/.$$name.new"
           mv -f "/target/.$$name.new" "/target/$$name"
         done
+        test -n "$$KERNEL_SERVICE_TOKEN"
+        printf '%s\n' "$$KERNEL_SERVICE_TOKEN" > /target/.kernel_service_token.new
+        chmod 0400 /target/.kernel_service_token.new
+        chown 1000:1000 /target/.kernel_service_token.new
+        mv -f /target/.kernel_service_token.new /target/kernel_service_token
     secrets:
       - database_password
       - owner_access_key
@@ -105,9 +115,15 @@ services:
   migrate:
     <<: *vault-environment
     image: ${VAULT_APP_IMAGE:?set VAULT_APP_IMAGE to an immutable digest}
-    command: ["node", "/app/scripts/migrate-runtime.mjs"]
+    user: "0:0"
+    command: ["node", "/app/scripts/migrate-production-runtime.mjs"]
+    environment:
+      OWNER_ACCESS_KEY: ""
+      KERNEL_SERVICE_TOKEN: "${KERNEL_SERVICE_TOKEN:?set KERNEL_SERVICE_TOKEN}"
+      KERNEL_TOKEN_FILE: /run/secrets/kernel_service_token
     volumes:
-      - runtime_secrets:/run/secrets:ro
+      - runtime_secrets:/run/secrets
+    cap_add: ["CHOWN", "SETGID", "SETUID"]
     restart: "no"
     depends_on:
       secret-runtime-init:

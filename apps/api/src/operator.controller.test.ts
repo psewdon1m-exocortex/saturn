@@ -1,4 +1,7 @@
 import "reflect-metadata";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { SELF_DECLARED_DEPS_METADATA } from "@nestjs/common/constants.js";
 import type { AuditService } from "@saturn/audit";
 import type { SaturnConfig } from "@saturn/config";
@@ -73,5 +76,52 @@ describe("OperatorController overview", () => {
     expect(result.storageReachability).toEqual({ state: "unavailable", reason: "storage_unavailable" });
     if (result.storage.capacity.state !== "unavailable") throw new Error("Local DEV capacity was unexpectedly exposed");
     expect(result.storage.capacity.reason).toContain("Local DEV SFTP");
+  });
+
+  it("reports Kernel ready through the authenticated Register contract", async () => {
+    const directory = mkdtempSync(path.join(os.tmpdir(), "saturn-kernel-status-"));
+    const tokenFile = path.join(directory, "kernel.token");
+    writeFileSync(tokenFile, "kernel-service-token-at-least-32-characters\n", { mode: 0o600 });
+    const sql = vi.fn(async (strings: TemplateStringsArray) => {
+      const statement = strings.join(" ");
+      if (statement.includes("SELECT kernel_url")) {
+        return [{ kernel_url: "https://kernel.test", public_identity: null, revision: "1" }];
+      }
+      return [];
+    });
+    const database = {
+      transaction: async (action: (client: typeof sql) => Promise<unknown>) => action(sql),
+      withSql: async (action: (client: typeof sql) => Promise<unknown>) => action(sql),
+    } as unknown as Database;
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
+      expect(new Headers(init?.headers).get("authorization")).toBe("Bearer kernel-service-token-at-least-32-characters");
+      return Response.json({
+        schema: "exocortex.register.resolution.v1",
+        values: {
+          "services.saturn.sni": { value: "saturn.example.test" },
+          "services.saturn.port": { value: "443" },
+        },
+      });
+    });
+    try {
+      const controller = new OperatorController(
+        database,
+        { environment: "production", kernel: { urlSeed: "https://kernel.test", tokenFile, timeoutMs: 1_000 } } as SaturnConfig,
+        { write: vi.fn() } as unknown as AuditService,
+        new TransferMonitorService(),
+        {} as RuntimeStorageManager,
+        { check: vi.fn() },
+      );
+      await expect(controller.kernel()).resolves.toMatchObject({
+        url: "https://kernel.test",
+        identity: "exocortex-kernel",
+        revision: 1,
+        configured: true,
+        reachability: "ready",
+      });
+    } finally {
+      fetchMock.mockRestore();
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 });

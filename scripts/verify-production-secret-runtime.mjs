@@ -16,9 +16,9 @@ const dataVolumes = [
 ];
 const names = [
   "database_password", "owner_access_key", "auth_pepper", "drop_pepper", "share_pepper",
-  "device_pepper", "backup_pepper", "laboratory_pepper", "gryphon_service_token", "storage_private_key",
+  "device_pepper", "backup_pepper", "laboratory_pepper", "gryphon_service_token", "kernel_service_token", "storage_private_key",
 ];
-const vaultNames = names.filter((name) => name !== "gryphon_service_token");
+const vaultNames = names.filter((name) => !["gryphon_service_token", "kernel_service_token"].includes(name));
 
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, { cwd: root, encoding: "utf8", ...options });
@@ -69,6 +69,7 @@ try {
     VAULT_WEB_IMAGE: "registry.test/saturn-web@sha256:" + "1".repeat(64),
     VAULT_RUNTIME_ENV_FILE: path.join(root, "infra", "production", ".env.production.example"),
     VAULT_SECRET_ROOT: `/var/lib/docker/volumes/${sourceVolume}/_data/vault`,
+    KERNEL_SERVICE_TOKEN: "kernel-service-token-0123456789012345678901234567890123456789",
     GRYPHON_SERVICE_TOKEN_HOST_FILE: `/var/lib/docker/volumes/${sourceVolume}/_data/gryphon/saturn.token`,
     NEPTUNE_CONTROL_TOKEN_HOST_FILE: path.join(root, ".tmp", "unused-neptune-control-token"),
     NEPTUNE_EXPORT_TOKEN_HOST_FILE: path.join(root, ".tmp", "unused-neptune-export-token"),
@@ -82,6 +83,9 @@ try {
   const init = compose.services["secret-runtime-init"];
   if (init?.user !== "0:0" || !Array.isArray(init.command)) throw new Error("secret-runtime-init is not root-scoped");
   const api = compose.services.api;
+  if (api?.environment?.KERNEL_SERVICE_TOKEN !== "" || api?.environment?.KERNEL_TOKEN_FILE !== "/run/secrets/kernel_service_token") {
+    throw new Error("long-running services must receive only the Kernel runtime-secret path");
+  }
   const apiTargets = (api?.volumes ?? []).map((volume) => typeof volume === "string" ? volume : volume.target);
   if (!apiTargets.includes("/run/neptune-control.token") || !apiTargets.includes("/run/neptune-export.token") || apiTargets.some((target) => /^\/run\/secrets\/neptune-/.test(target))) {
     throw new Error("Neptune token bind mounts must not be nested inside the read-only runtime_secrets volume");

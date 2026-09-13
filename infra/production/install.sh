@@ -65,6 +65,7 @@ migrate_operator_config() {
   # 0.1.4 used a Compose-relative runtime env file. A refresh must make the
   # preserved machine config explicit before the new Compose file is evaluated.
   set_config VAULT_RUNTIME_ENV_FILE "$CONFIG_FILE"
+  set_config KERNEL_TOKEN_FILE /run/secrets/kernel_service_token
 }
 
 prepare_generated_secrets() {
@@ -126,6 +127,15 @@ sync_gryphon_validation_secret() {
   install -o root -g root -m 0600 "$source_file" "$GRYPHON_VALIDATION_SECRET"
 }
 
+validate_kernel_service_token() {
+  kernel_service_token=$(get_config KERNEL_SERVICE_TOKEN)
+  case "$kernel_service_token" in
+    ""|CHANGE_ME*|change-*|replace-*) die "set KERNEL_SERVICE_TOKEN in $CONFIG_FILE" ;;
+  esac
+  [ "${#kernel_service_token}" -ge 24 ] || die "KERNEL_SERVICE_TOKEN must contain at least 24 characters"
+  unset kernel_service_token
+}
+
 prepare_runtime_secrets() {
   prepare_generated_secrets
   sync_owner_access_key
@@ -133,6 +143,7 @@ prepare_runtime_secrets() {
   # a root-only copy because production validation intentionally sees only the
   # isolated Vault secret root mounted at /run/secrets.
   sync_gryphon_validation_secret
+  validate_kernel_service_token
 }
 
 import_kernel_bootstrap_credentials() {
@@ -242,7 +253,7 @@ validate() {
   set -a; . "$CONFIG_FILE"; set +a
   docker compose --env-file "$CONFIG_FILE" -f "$COMPOSE_FILE" config --quiet
   docker pull "$VAULT_APP_IMAGE" >/dev/null
-  docker run --rm --user 0:0 --network none --read-only --security-opt no-new-privileges --cap-drop ALL --env-file "$CONFIG_FILE" -e OWNER_ACCESS_KEY= -e VAULT_SECRET_ROOT=/run/secrets -v "$CONFIG_FILE:/config/.env.production:ro" -v "$VAULT_SECRET_ROOT:/run/secrets:ro" "$VAULT_APP_IMAGE" node /app/scripts/validate-production.mjs /config/.env.production >/dev/null
+  docker run --rm --user 0:0 --network none --read-only --security-opt no-new-privileges --cap-drop ALL --env-file "$CONFIG_FILE" -e OWNER_ACCESS_KEY= -e KERNEL_SERVICE_TOKEN= -e VAULT_SECRET_ROOT=/run/secrets -v "$CONFIG_FILE:/config/.env.production:ro" -v "$VAULT_SECRET_ROOT:/run/secrets:ro" "$VAULT_APP_IMAGE" node /app/scripts/validate-production.mjs /config/.env.production >/dev/null
 }
 
 refresh_runtime_secrets() {
