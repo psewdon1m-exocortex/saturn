@@ -5,7 +5,7 @@ Owner: system operator
 Implementation root: the [Saturn repository](../..).
 
 Normative sources: the [storage-gateway specification](../technical_solution_storage_gateway.md)
-and workspace-wide [Part 00](../../../.docs/PART_00_SYSTEM_UNIFICATION_SPECIFICATION.md)
+and workspace-wide [Part 00](https://github.com/psewdon1m-exocortex/general/blob/main/PART_00_SYSTEM_UNIFICATION_SPECIFICATION.md)
 
 The current physical storage contract and its migration/rollback gates are
 defined in `STORAGE_ROOT_LAYOUT_V2.md`. It supersedes legacy `gateway/drive`

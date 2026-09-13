@@ -9,9 +9,9 @@ transfer state correspond to authoritative backend state.
 
 ## Source Of Truth
 
-- [Part 01](../../../.docs/PART_01_INTERFACE_AND_INTERACTION_UNIFICATION.md)
+- [Part 01](https://github.com/psewdon1m-exocortex/general/blob/main/PART_01_INTERFACE_AND_INTERACTION_UNIFICATION.md)
 - the applicable security, observability, backup, update and Telegram rules
-  indexed by [Part 00](../../../.docs/PART_00_SYSTEM_UNIFICATION_SPECIFICATION.md)
+  indexed by [Part 00](https://github.com/psewdon1m-exocortex/general/blob/main/PART_00_SYSTEM_UNIFICATION_SPECIFICATION.md)
 - the [Saturn templates](../../.src/)
 - the operator requirements recorded in the task that introduced this stage
 

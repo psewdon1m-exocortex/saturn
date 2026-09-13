@@ -3,7 +3,7 @@
 ## Authority and scope
 
 This stage implements the dashboard contract from
-[Part 01](../../../.docs/PART_01_INTERFACE_AND_INTERACTION_UNIFICATION.md) and the Saturn-specific
+[Part 01](https://github.com/psewdon1m-exocortex/general/blob/main/PART_01_INTERFACE_AND_INTERACTION_UNIFICATION.md) and the Saturn-specific
 reference `saturn/.src/saturn dashboard.png`. The root specification and its
 assets remain read-only.
 

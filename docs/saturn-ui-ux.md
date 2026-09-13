@@ -1,6 +1,6 @@
 # Saturn — design specification
 
-> [Part 01](../../.docs/PART_01_INTERFACE_AND_INTERACTION_UNIFICATION.md) is
+> [Part 01](https://github.com/psewdon1m-exocortex/general/blob/main/PART_01_INTERFACE_AND_INTERACTION_UNIFICATION.md) is
 > normative. Measurements below describe Saturn-specific templates; written
 > Part 01 rules take precedence over raster defects, rounding and stale labels.
 

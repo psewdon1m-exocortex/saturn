@@ -1,6 +1,6 @@
 # Техническое решение Saturn: персональный файловый шлюз поверх Hetzner Storage Box
 
-This document specializes [Part 00 — system unification specification](../../.docs/PART_00_SYSTEM_UNIFICATION_SPECIFICATION.md); that central contract remains authoritative.
+This document specializes [Part 00 — system unification specification](https://github.com/psewdon1m-exocortex/general/blob/main/PART_00_SYSTEM_UNIFICATION_SPECIFICATION.md); that central contract remains authoritative.
 
 > Актуализация: Telegram runtime вынесен в Gryphon.
 > Saturn больше не хранит bot token, не принимает Telegram webhook и не

@@ -5,7 +5,7 @@
 
 ## Authority
 
-This implementation adopts [Part 01](../../../.docs/PART_01_INTERFACE_AND_INTERACTION_UNIFICATION.md)
+This implementation adopts [Part 01](https://github.com/psewdon1m-exocortex/general/blob/main/PART_01_INTERFACE_AND_INTERACTION_UNIFICATION.md)
 and every PNG template linked from that document. The source specification in
 the repository root is read-only and is not copied or modified here.
 

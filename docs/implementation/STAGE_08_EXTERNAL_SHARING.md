@@ -1,6 +1,6 @@
 # Stage 8 — External sharing
 
-This document specializes [Part 07 — security and exposure control](../../../.docs/PART_07_SECURITY_AND_EXPOSURE_CONTROL.md); that central contract remains authoritative.
+This document specializes [Part 07 — security and exposure control](https://github.com/psewdon1m-exocortex/general/blob/main/PART_07_SECURITY_AND_EXPOSURE_CONTROL.md); that central contract remains authoritative.
 
 Status: `COMPLETE`
 

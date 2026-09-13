@@ -1,6 +1,6 @@
 # Saturn production operations
 
-This document specializes [Part 04 — bootstrap and deployment](../../../.docs/PART_04_BOOTSTRAP_AND_DEPLOYMENT.md); that central contract remains authoritative.
+This document specializes [Part 04 — bootstrap and deployment](https://github.com/psewdon1m-exocortex/general/blob/main/PART_04_BOOTSTRAP_AND_DEPLOYMENT.md); that central contract remains authoritative.
 
 ## Promotion boundary
 

@@ -4,10 +4,10 @@ Status: `COMPLETE`.
 
 Normative inputs:
 
-- [Part 00](../../../.docs/PART_00_SYSTEM_UNIFICATION_SPECIFICATION.md);
-- [Part 01](../../../.docs/PART_01_INTERFACE_AND_INTERACTION_UNIFICATION.md);
-- [left-menu reference](../../../.docs/src/example%20Left%20Menu.png);
-- [main-page layout reference](../../../.docs/src/Example%20of%20left%20menu%20and%20main%20page%20side%20by%20side,%20base%20layer%20of%20main%20page,%20name%20of%20main%20page.png);
+- [Part 00](https://github.com/psewdon1m-exocortex/general/blob/main/PART_00_SYSTEM_UNIFICATION_SPECIFICATION.md);
+- [Part 01](https://github.com/psewdon1m-exocortex/general/blob/main/PART_01_INTERFACE_AND_INTERACTION_UNIFICATION.md);
+- [left-menu reference](https://github.com/psewdon1m-exocortex/general/blob/main/src/example%20Left%20Menu.png);
+- [main-page layout reference](https://github.com/psewdon1m-exocortex/general/blob/main/src/Example%20of%20left%20menu%20and%20main%20page%20side%20by%20side,%20base%20layer%20of%20main%20page,%20name%20of%20main%20page.png);
 - [Saturn left-menu reference](../../.src/saturn%20left%20menu.png) — exact Saturn
   composition and geometry.
 

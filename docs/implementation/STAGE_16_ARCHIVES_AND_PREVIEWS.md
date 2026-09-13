@@ -1,6 +1,6 @@
 # Stage 16 — Archives and Quick Preview
 
-This document specializes [Part 01 — interface and interaction unification](../../../.docs/PART_01_INTERFACE_AND_INTERACTION_UNIFICATION.md); that central contract remains authoritative.
+This document specializes [Part 01 — interface and interaction unification](https://github.com/psewdon1m-exocortex/general/blob/main/PART_01_INTERFACE_AND_INTERACTION_UNIFICATION.md); that central contract remains authoritative.
 
 Status: `COMPLETE_LOCAL`
 

@@ -1,6 +1,6 @@
 # Stage 7 — Gryphon-mediated Telegram Drop access
 
-This document specializes [Part 10 — service agents UI and operator workflows](../../../.docs/PART_10_SERVICE_AGENTS_UI_AND_OPERATOR_WORKFLOWS.md); that central contract remains authoritative.
+This document specializes [Part 10 — service agents UI and operator workflows](https://github.com/psewdon1m-exocortex/general/blob/main/PART_10_SERVICE_AGENTS_UI_AND_OPERATOR_WORKFLOWS.md); that central contract remains authoritative.
 
 Status: `SUPERSEDED AND MIGRATED`
 

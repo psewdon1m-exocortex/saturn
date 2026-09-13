@@ -1,6 +1,6 @@
 # Stage 2 — Modular-monolith foundation
 
-This document specializes [Part 06 — unified acceptance checklist](../../../.docs/PART_06_UNIFIED_ACCEPTANCE_CHECKLIST.md); that central contract remains authoritative.
+This document specializes [Part 06 — unified acceptance checklist](https://github.com/psewdon1m-exocortex/general/blob/main/PART_06_UNIFIED_ACCEPTANCE_CHECKLIST.md); that central contract remains authoritative.
 
 Status: `COMPLETE`  
 Aggregate command: `pnpm verify:stage:2`  

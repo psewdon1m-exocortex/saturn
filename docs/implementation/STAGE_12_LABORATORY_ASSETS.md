@@ -1,6 +1,6 @@
 # Stage 12 — Laboratory assets
 
-This document specializes [Part 00 — system unification specification](../../../.docs/PART_00_SYSTEM_UNIFICATION_SPECIFICATION.md); that central contract remains authoritative.
+This document specializes [Part 00 — system unification specification](https://github.com/psewdon1m-exocortex/general/blob/main/PART_00_SYSTEM_UNIFICATION_SPECIFICATION.md); that central contract remains authoritative.
 
 Status: `COMPLETE`
 
