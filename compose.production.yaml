@@ -249,6 +249,7 @@ services:
     networks:
       ingress:
         ipv4_address: "${SATURN_WEB_CONTAINER_IP:-172.31.250.2}"
+      host-publish:
     restart: unless-stopped
     read_only: true
     healthcheck:
@@ -284,6 +285,8 @@ networks:
   backend:
     internal: true
   storage-egress:
+    driver: bridge
+  host-publish:
     driver: bridge
   exocortex-services:
     external: true

@@ -89,7 +89,7 @@ test("installer prepares independent runtime secrets and a dedicated SFTP key", 
   assert.doesNotMatch(installer, /release-public-key\.pem[^\n]*storage_private_key/);
 });
 
-test("storage clients have public egress without exposing internal-only services", () => {
+test("storage clients have public egress and web has a dedicated host-publish network", () => {
   const sharedApplicationConfig = compose.match(/^x-vault-environment:[\s\S]*?(?=^services:)/m)?.[0] ?? "";
   const apiConfig = compose.match(/^  api:[\s\S]*?(?=^  web:)/m)?.[0] ?? "";
   const postgresConfig = compose.match(/^  postgres:[\s\S]*?(?=^  migrate:)/m)?.[0] ?? "";
@@ -100,6 +100,8 @@ test("storage clients have public egress without exposing internal-only services
   assert.match(apiConfig, /^      storage-egress:$/m);
   assert.match(compose, /^  backend:\n    internal: true$/m);
   assert.match(compose, /^  storage-egress:\n    driver: bridge$/m);
+  assert.match(webConfig, /^      host-publish:$/m);
+  assert.match(compose, /^  host-publish:\n    driver: bridge$/m);
   assert.doesNotMatch(postgresConfig, /storage-egress/);
   assert.doesNotMatch(webConfig, /storage-egress/);
 });
