@@ -26,6 +26,7 @@ describe("OperatorController overview", () => {
         current: vi.fn().mockReturnValue({ config: { host: "storage.example" } }),
         statFs: vi.fn().mockResolvedValue({ totalBytes: 16_384, availableBytes: 8_192 }),
       } as unknown as RuntimeStorageManager,
+      { check: vi.fn().mockResolvedValue({ state: "pass", latencyMs: 4 }) },
     );
 
     const result = await controller.overview();
@@ -34,6 +35,7 @@ describe("OperatorController overview", () => {
     expect(result.uptime.state).toBe("available");
     expect(result.storage).toMatchObject({ state: "available", indexedBytes: 4096, fileCount: 2, directoryCount: 6 });
     expect(result.storage.capacity).toMatchObject({ state: "available", totalBytes: 16_384, availableBytes: 8_192, usedBytes: 8_192 });
+    expect(result.storageReachability).toMatchObject({ state: "available", latencyMs: 4 });
     expect(result.transfers).toMatchObject({ activeCount: 0, queuedCount: 0, tasks: [] });
     if (result.disk.state === "available") {
       expect(result.disk.totalBytes).toBeGreaterThan(0);
@@ -56,6 +58,7 @@ describe("OperatorController overview", () => {
         current: vi.fn().mockReturnValue({ config: { host: "127.0.0.1" } }),
         statFs,
       } as unknown as RuntimeStorageManager,
+      { check: vi.fn().mockResolvedValue({ state: "fail", detail: "storage_unavailable" }) },
     );
 
     const result = await controller.overview();
@@ -67,6 +70,7 @@ describe("OperatorController overview", () => {
       directoryCount: 6,
       capacity: { state: "unavailable" },
     });
+    expect(result.storageReachability).toEqual({ state: "unavailable", reason: "storage_unavailable" });
     if (result.storage.capacity.state !== "unavailable") throw new Error("Local DEV capacity was unexpectedly exposed");
     expect(result.storage.capacity.reason).toContain("Local DEV SFTP");
   });

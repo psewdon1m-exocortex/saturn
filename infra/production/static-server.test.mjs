@@ -10,6 +10,7 @@ test("serves only the Saturn SPA allow-list and immutable assets", async () => {
   await fs.mkdir(path.join(root, "assets"));
   await fs.writeFile(path.join(root, "index.html"), "saturn-index");
   await fs.writeFile(path.join(root, "robots.txt"), "User-agent: *\nDisallow: /\n");
+  await fs.writeFile(path.join(root, "saturn-favicon.png"), "saturn-icon");
   await fs.writeFile(path.join(root, "assets", "app-abc.js"), "console.log('saturn')");
   await fs.writeFile(path.join(root, "assets", "app.js.map"), "secret-source-map");
   const server = createStaticServer({ root });
@@ -30,6 +31,10 @@ test("serves only the Saturn SPA allow-list and immutable assets", async () => {
     assert.equal((await fetch(`${origin}/assets/app.js.map`)).status, 404);
     assert.equal((await fetch(`${origin}/.env`)).status, 404);
     assert.equal((await fetch(`${origin}/unknown`)).status, 404);
+    const favicon = await fetch(`${origin}/saturn-favicon.png`);
+    assert.equal(favicon.status, 200);
+    assert.equal(favicon.headers.get("content-type"), "image/png");
+    assert.equal(await favicon.text(), "saturn-icon");
     assert.equal((await fetch(`${origin}/health/live`)).status, 200);
   } finally {
     await new Promise((resolve) => server.close(resolve));

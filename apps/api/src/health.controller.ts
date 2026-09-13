@@ -18,3 +18,19 @@ export class HealthController {
     return result;
   }
 }
+
+@Controller("public")
+export class PublicReachabilityController {
+  constructor(@Inject(HealthService) private readonly health: HealthService) {}
+
+  @Get("reachability")
+  async reachability(@Res({ passthrough: true }) reply: FastifyReply) {
+    const result = await this.health.readiness();
+    const ready = result.status === "ok";
+    reply.status(ready ? 200 : 503);
+    return {
+      schema: "saturn.public-reachability.v1",
+      status: ready ? "ready" : "unavailable",
+    };
+  }
+}

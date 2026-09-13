@@ -34,19 +34,19 @@ release can publish artifacts.
 ## Release identity
 
 Production releases are created only by tags matching
-`saturn-vMAJOR.MINOR.PATCH`. The current fix identity is `saturn-v0.1.8`; its
+`saturn-vMAJOR.MINOR.PATCH`. The current fix identity is `saturn-v0.1.12`; its
 versioned OCI repositories are `saturn-app` and `saturn-web`, and its
-installation bundle is `saturn-0.1.8.zip`. Legacy unscoped tags such as
+installation bundle is `saturn-0.1.12.zip`. Legacy unscoped tags such as
 `v0.0.1` run verification only and cannot publish a Saturn release. Publish
 the pinned `updater-v0.4.3` dependency before the Saturn tag. The existing
-`saturn-v0.1.0` through `saturn-v0.1.7` releases remain immutable.
+`saturn-v0.1.0` through `saturn-v0.1.11` releases remain immutable.
 
 ## Production installation
 
 Each service keeps its own bootstrap and environment. For Saturn:
 
 ```sh
-curl -fsSL https://github.com/psewdon1m-exocortex/saturn/releases/download/saturn-v0.1.8/bootstrap.sh | sudo sh
+curl -fsSL https://github.com/psewdon1m-exocortex/saturn/releases/download/saturn-v0.1.12/bootstrap.sh | sudo sh
 sudoedit /etc/vault/.env.production
 sudo vaultctl validate
 sudo vaultctl install
@@ -54,12 +54,12 @@ sudo vaultctl bootstrap-storage
 sudo vaultctl smoke
 ```
 
-If `0.1.4`, `0.1.5`, `0.1.6` or `0.1.7` was prepared but Saturn has not been started yet,
-refresh the prepared bundle without deleting the existing configuration. This
-also repairs the earlier Linux file-secret validation failures:
+If an older Saturn release was prepared, refresh the bundle without deleting
+the existing configuration. This also repairs the earlier Linux file-secret
+validation failures:
 
 ```sh
-curl -fsSL https://github.com/psewdon1m-exocortex/saturn/releases/download/saturn-v0.1.8/bootstrap.sh | sudo sh -s -- --refresh
+curl -fsSL https://github.com/psewdon1m-exocortex/saturn/releases/download/saturn-v0.1.12/bootstrap.sh | sudo sh -s -- --refresh
 ```
 
 Edit only these values in `/etc/vault/.env.production`:

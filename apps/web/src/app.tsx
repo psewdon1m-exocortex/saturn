@@ -1,7 +1,6 @@
 import { LocalAgentActions } from "./local-agent-actions.js";
 import { HelperRecoveryPanel } from "./helper-recovery-panel.js";
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type CSSProperties, type DragEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode, type SyntheticEvent } from "react";
-import type { HealthResponse } from "@saturn/contracts";
 import { pendingAgentJob, waitForAgentJob } from "./agent-job.js";
 import DOMPurify from "dompurify";
 import { marked } from "marked";
@@ -46,7 +45,7 @@ import {
 const saturnPlanet = "/saturn-favicon.png";
 
 type GatewayState = "checking" | "ready" | "degraded";
-type GatewayHealth = { readonly gateway: GatewayState; readonly storage: GatewayState };
+type GatewayHealth = { readonly gateway: GatewayState };
 type PrimaryViewName = "dashboard" | "files" | "inbox" | "shared" | "synchronization" | "settings" | "trash";
 type ViewName = PrimaryViewName | "documentation";
 type DashboardCardName = OwnerPreferences["dashboardOrder"][number];
@@ -493,27 +492,19 @@ function ResourceContextMenu({ state, canPaste, canCompress, canExtract, protect
 }
 
 function useGatewayHealth(): GatewayHealth {
-  const [state, setState] = useState<GatewayHealth>({ gateway: "checking", storage: "checking" });
+  const [state, setState] = useState<GatewayHealth>({ gateway: "checking" });
   useEffect(() => {
     let active = true;
     const check = async () => {
       try {
-        const response = await fetch("/health/ready", { credentials: "same-origin", cache: "no-store" });
-        const body = await response.json() as HealthResponse;
+        const response = await fetch("/api/v1/public/reachability", { credentials: "same-origin", cache: "no-store" });
+        const body = await response.json() as { readonly status?: string };
         if (active) {
-          const gateway = response.ok && body.status === "ok" ? "ready" : "degraded";
-          const storageCheck = (body as Partial<HealthResponse>).checks?.storage;
-          const storage = storageCheck === undefined
-            ? gateway
-            : storageCheck.state === "pass"
-              ? "ready"
-              : storageCheck.state === "fail"
-                ? "degraded"
-                : "degraded";
-          setState({ gateway, storage });
+          const gateway = response.ok && body.status === "ready" ? "ready" : "degraded";
+          setState({ gateway });
         }
       } catch {
-        if (active) setState({ gateway: "degraded", storage: "degraded" });
+        if (active) setState({ gateway: "degraded" });
       }
     };
     void check();
@@ -2037,8 +2028,7 @@ function DropCodeButton({ addNotice }: { readonly addNotice: (kind: Notice["kind
   </button>;
 }
 
-function DashboardView({ storageHealth, preferences, setPreferences, addNotice }: {
-  readonly storageHealth: GatewayState;
+function DashboardView({ preferences, setPreferences, addNotice }: {
   readonly preferences: Omit<OwnerPreferences, "updatedAt">;
   readonly setPreferences: (value: Omit<OwnerPreferences, "updatedAt">) => void;
   readonly addNotice: (kind: Notice["kind"], message: string) => void;
@@ -2121,6 +2111,11 @@ function DashboardView({ storageHealth, preferences, setPreferences, addNotice }
     }
   };
   const placements = useMemo(() => dashboardPlacements(preferences.dashboardOrder), [preferences.dashboardOrder]);
+  const storageHealth: GatewayState = overview === undefined
+    ? "checking"
+    : overview.storageReachability.state === "available"
+      ? "ready"
+      : "degraded";
   const content: Record<DashboardCardName, ReactNode> = {
     cpu: <DashboardMetricBody title="CPU Usage" value={overview?.cpu.state === "available" ? `${overview.cpu.percent.toFixed(1)}%  [ ${String(overview.cpu.logicalCores)} logical cores ]` : "Unavailable"} percent={overview === undefined ? undefined : metricPercent(overview.cpu)} detail="Current API process utilization" />,
     ram: <DashboardMetricBody title="RAM Usage" value={overview?.ram.state === "available" ? `${overview.ram.percent.toFixed(1)}%  [ ${formatBytes(overview.ram.usedBytes)} / ${formatBytes(overview.ram.totalBytes)} ]` : "Unavailable"} percent={overview === undefined ? undefined : metricPercent(overview.ram)} detail={overview?.ram.state === "available" ? `API process ${formatBytes(overview.ram.processBytes)}` : "No reliable sample"} />,
@@ -2996,7 +2991,7 @@ function AuthenticatedApp({ health, onAnonymous }: { readonly health: GatewayHea
       </aside>
       <main className="content" id="main-content">
         {route.view !== "documentation" ? null : <div className="global-actions"><button className="button button--primary" type="button" disabled={quickPending} onClick={() => quickUpload.current?.click()}>{quickPending ? "Uploading…" : "Quick upload"}</button><input ref={quickUpload} aria-label="Choose files for quick upload" className="visually-hidden-input" type="file" multiple onChange={(event) => void runQuickUpload([...event.target.files ?? []])} /></div>}
-        {route.view === "dashboard" ? <DashboardView storageHealth={health.storage} preferences={preferences} setPreferences={setPreferences} addNotice={addNotice} /> : null}
+        {route.view === "dashboard" ? <DashboardView preferences={preferences} setPreferences={setPreferences} addNotice={addNotice} /> : null}
         {route.view === "files" ? <FilesView initialFolderId={ROOT_RESOURCE_ID} title="Storage" routeSegments={route.folderSegments} onPathChange={navigateFilesPath} shareCapabilities={shareCapabilities} onShareCapabilityCreated={rememberShareCapability} onShareCapabilityRevoked={forgetShareCapability} addNotice={addNotice} onUnauthorized={onAnonymous} /> : null}
         {route.view === "inbox" ? <InHouseDropView health={health.gateway} routeSegments={route.folderSegments} onPathChange={navigateInboxPath} shareCapabilities={shareCapabilities} onShareCapabilityCreated={rememberShareCapability} onShareCapabilityRevoked={forgetShareCapability} addNotice={addNotice} onUnauthorized={onAnonymous} /> : null}
         {route.view === "shared" ? <SharedView shareCapabilities={shareCapabilities} onShareCapabilityRevoked={forgetShareCapability} addNotice={addNotice} onAnonymous={onAnonymous} /> : null}

@@ -15,7 +15,7 @@ import { PostgresPurgeRepository, PostgresReconciliationRepository, PurgeService
 import { AdapterStorageHealthProbe } from "@saturn/storage-health";
 import { PostgresShareRepository, ShareService, type ShareRepository } from "@saturn/shares";
 import { DeviceService, PostgresDeviceRepository, type DeviceRepository } from "@saturn/sync";
-import { HealthController } from "./health.controller.js";
+import { HealthController, PublicReachabilityController } from "./health.controller.js";
 import { HealthService } from "./health.service.js";
 import { RuntimeLifecycleService } from "./runtime-lifecycle.service.js";
 import { FileController } from "./file.controller.js";
@@ -81,7 +81,7 @@ import { NeptuneFleetService } from "./neptune-fleet.service.js";
 const config = loadEnvironment();
 
 @Module({
-  controllers: [HelperRecoveryController, UpdaterController, HealthController, AuthController, OperatorController, TransferTaskController, ArchiveController, StorageConnectionController, RecoveryController, NeptuneExportController, NeptuneOwnerController, NeptuneAgentController, NeptuneFleetOwnerController, GryphonOwnerController, FileController, ActivityController, ProtectionController, DropController, GryphonController, ShareOwnerController, ResourceClassificationController, PublicShareController, DeviceController, SyncClientController, BackupOwnerController, BackupRestoreController, BackupEnrollmentController, BackupCapabilitiesController, BackupProducerController, LaboratoryClientController, LaboratoryAssetController, LaboratoryImportController, LaboratoryDeliveryController],
+  controllers: [HelperRecoveryController, UpdaterController, HealthController, PublicReachabilityController, AuthController, OperatorController, TransferTaskController, ArchiveController, StorageConnectionController, RecoveryController, NeptuneExportController, NeptuneOwnerController, NeptuneAgentController, NeptuneFleetOwnerController, GryphonOwnerController, FileController, ActivityController, ProtectionController, DropController, GryphonController, ShareOwnerController, ResourceClassificationController, PublicShareController, DeviceController, SyncClientController, BackupOwnerController, BackupRestoreController, BackupEnrollmentController, BackupCapabilitiesController, BackupProducerController, LaboratoryClientController, LaboratoryAssetController, LaboratoryImportController, LaboratoryDeliveryController],
   providers: [
     { provide: APP_CONFIG, useValue: config },
     { provide: DATABASE, useFactory: () => new Database(config.databaseUrl, { max: 10, maintenanceBarrier: true }) },

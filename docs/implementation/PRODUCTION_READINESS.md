@@ -57,7 +57,7 @@ DEV credentials are not substitutes for any item in this table.
 2. Fill only the domain/origin, owner Access Key, Kernel coordinates and
    production `STORAGE_*` inputs in `.env.production`; run `vaultctl validate`.
 3. After publishing the pinned `updater-v0.4.3`, push the protected
-   `saturn-v0.1.8` tag. The release workflow builds candidate images once,
+   `saturn-v0.1.12` tag. The release workflow builds candidate images once,
    tests those digests, signs the bundle and publishes only on pass. Unscoped
    `v*` tags run verification only and are not production-release identities.
 4. Run the exact `saturn-vX.Y.Z` release's HTTPS `bootstrap.sh` on the clean
@@ -67,7 +67,8 @@ DEV credentials are not substitutes for any item in this table.
    preparation is allowed.
 5. Install the bundled Nginx example into the server configuration, set the
    real domain/certificates, then require a clean `nginx -t` before reload.
-   Confirm that owner login is public by IP, health remains host-local, and
+   Confirm that owner login and redacted aggregate reachability are public,
+   detailed health remains host-local, and
    preserve the fail-closed default servers and WebDAV-only body-limit exception.
 6. Run `vaultctl validate`, `vaultctl install`, `vaultctl bootstrap-storage` and
    `vaultctl smoke`. Confirm the generated smoke object was deleted.

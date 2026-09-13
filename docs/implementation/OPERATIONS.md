@@ -67,7 +67,9 @@ pinned in `.release/updater.version`; CI refuses to build with another version.
    and reload Nginx. Keep upstreams aligned with `SATURN_API_BIND_PORT` and
    `SATURN_WEB_BIND_PORT`. The owner login and authenticated UI/API are
    reachable from every client IP; do not add `OPERATOR_CIDR`, a VPN prerequisite
-   or a source-IP allow-list. Health remains loopback-only. Preserve the
+   or a source-IP allow-list. Detailed health remains loopback-only; the
+   redacted `/api/v1/public/reachability` route exposes only the aggregate
+   readiness result. Preserve the
    fail-closed HTTP/HTTPS `default_server` blocks. The global
    `client_max_body_size 16m` remains in force except in the exact `/dav` and
    prefix `/dav/` locations, where `0` permits a streaming whole-file PUT and
@@ -78,15 +80,15 @@ pinned in `.release/updater.version`; CI refuses to build with another version.
    real data. Independent second-copy delivery and restore evidence remain a
    separate disaster-recovery procedure; they are not Saturn runtime variables.
 
-For a host where `0.1.4`, `0.1.5`, `0.1.6` or `0.1.7` was only prepared and not started,
-run the `0.1.8` bootstrap with `--refresh`. It preserves
+For a host with an older prepared release, run the `0.1.12` bootstrap with
+`--refresh`. It preserves
 `/etc/vault/.env.production`, removes the obsolete `VAULT_DEV_STORAGE_*` and
 `VAULT_SECOND_COPY_ID` entries, repairs the absolute runtime env path, writes
 the new release lock, and preserves the old bundle under
 `/opt/vault.previous-<timestamp>`:
 
 ```sh
-curl -fsSL https://github.com/psewdon1m-exocortex/saturn/releases/download/saturn-v0.1.8/bootstrap.sh | sudo sh -s -- --refresh
+curl -fsSL https://github.com/psewdon1m-exocortex/saturn/releases/download/saturn-v0.1.12/bootstrap.sh | sudo sh -s -- --refresh
 ```
 
 `READINESS_TIMEOUT_MS` defaults to 3000 ms and bounds database, storage and

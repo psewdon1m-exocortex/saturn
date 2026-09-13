@@ -10,7 +10,8 @@ import type { Database } from "@saturn/database";
 import type { RuntimeStorageManager } from "@saturn/storage";
 import { z } from "zod";
 import { OwnerTokenGuard, RequireRecentReauthentication } from "./owner-token.guard.js";
-import { APP_CONFIG, ARCHIVE_REPOSITORY, AUDIT_SERVICE, DATABASE, STORAGE_RUNTIME } from "./tokens.js";
+import type { StorageHealthPort } from "./health.service.js";
+import { APP_CONFIG, ARCHIVE_REPOSITORY, AUDIT_SERVICE, DATABASE, STORAGE_HEALTH, STORAGE_RUNTIME } from "./tokens.js";
 import { TransferMonitorService, type UploadTaskSample } from "./transfer-monitor.service.js";
 
 interface CpuSample {
@@ -69,7 +70,7 @@ async function localDiskUsage(): Promise<DiskUsageMetric> {
   try {
     const statistics = await fs.statfs(process.cwd());
     const totalBytes = statistics.blocks * statistics.bsize;
-    const freeBytes = statistics.bfree * statistics.bsize;
+    const freeBytes = statistics.bavail * statistics.bsize;
     if (!Number.isFinite(totalBytes) || !Number.isFinite(freeBytes) || totalBytes <= 0) throw new Error("invalid_disk_sample");
     const usedBytes = Math.min(totalBytes, Math.max(0, totalBytes - freeBytes));
     return { state: "available", usedBytes, totalBytes, percent: usedBytes / totalBytes * 100 };
@@ -96,6 +97,7 @@ export class OperatorController {
   readonly #audit: AuditService;
   readonly #transfers: TransferMonitorService;
   readonly #storage: RuntimeStorageManager;
+  readonly #storageHealth: StorageHealthPort;
   readonly #archives: ArchiveJobRepository | undefined;
   #kernelRotations: number[] = [];
 
@@ -105,6 +107,7 @@ export class OperatorController {
     @Inject(AUDIT_SERVICE) audit: AuditService,
     @Inject(TransferMonitorService) transfers: TransferMonitorService,
     @Inject(STORAGE_RUNTIME) storage: RuntimeStorageManager,
+    @Inject(STORAGE_HEALTH) storageHealth: StorageHealthPort,
     @Optional() @Inject(ARCHIVE_REPOSITORY) archives?: ArchiveJobRepository,
   ) {
     this.#database = database;
@@ -112,6 +115,7 @@ export class OperatorController {
     this.#audit = audit;
     this.#transfers = transfers;
     this.#storage = storage;
+    this.#storageHealth = storageHealth;
     this.#archives = archives;
   }
 
@@ -192,7 +196,7 @@ export class OperatorController {
   async overview() {
     const sampledAt = Date.now();
     const localDevelopmentStorage = isLocalDevelopmentStorage(this.#config, this.#storage);
-    const [uploadRows, backupRows, storageRows, disk, storageCapacity, archiveJobs] = await Promise.all([
+    const [uploadRows, backupRows, storageRows, disk, storageCapacity, storageHealth, archiveJobs] = await Promise.all([
       this.#database.withSql((sql) => sql<UploadTaskRow[]>`
         SELECT id::text, filename, expected_size::text, received_size::text, status, created_at, updated_at
         FROM upload_sessions
@@ -232,6 +236,7 @@ export class OperatorController {
       `),
       localDiskUsage(),
       localDevelopmentStorage ? Promise.resolve(undefined) : this.#storage.statFs().catch(() => undefined),
+      this.#storageHealth.check().catch(() => ({ state: "fail", detail: "storage_unavailable" } as const)),
       this.#archives?.list(undefined, 32) ?? Promise.resolve([]),
     ]);
     const now = process.hrtime.bigint();
@@ -301,6 +306,9 @@ export class OperatorController {
             : "Storage capacity telemetry is unavailable for the active profile." }
           : { state: "available", totalBytes: storageCapacity.totalBytes, availableBytes: storageCapacity.availableBytes, usedBytes: Math.max(0, storageCapacity.totalBytes - storageCapacity.availableBytes) },
       },
+      storageReachability: storageHealth.state === "pass"
+        ? { state: "available", latencyMs: storageHealth.latencyMs }
+        : { state: "unavailable", reason: storageHealth.detail ?? "storage_unavailable" },
       transfers: mergedTransfers,
     };
   }

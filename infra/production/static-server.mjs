@@ -90,6 +90,10 @@ export function createStaticServer({ root = "/srv" } = {}) {
       await sendFile(request, response, path.join(resolvedRoot, "robots.txt"), "public, max-age=3600");
       return;
     }
+    if (pathname === "/saturn-favicon.png") {
+      await sendFile(request, response, path.join(resolvedRoot, "saturn-favicon.png"), "public, max-age=3600");
+      return;
+    }
     const asset = safeAssetPath(resolvedRoot, pathname);
     if (asset !== undefined) {
       await sendFile(request, response, asset, "public, max-age=31536000, immutable");

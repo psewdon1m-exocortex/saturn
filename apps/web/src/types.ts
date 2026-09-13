@@ -147,6 +147,7 @@ export interface OperatorOverview {
     readonly directoryCount: number;
     readonly capacity: { readonly state: "available"; readonly totalBytes: number; readonly availableBytes: number; readonly usedBytes: number } | { readonly state: "unavailable"; readonly reason: string };
   } | { readonly state: "unavailable"; readonly reason?: string };
+  readonly storageReachability: { readonly state: "available"; readonly latencyMs?: number } | { readonly state: "unavailable"; readonly reason: string };
   readonly transfers: {
     readonly uploadBytesPerSecond?: number;
     readonly downloadBytesPerSecond?: number;

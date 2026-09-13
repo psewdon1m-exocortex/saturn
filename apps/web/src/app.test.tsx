@@ -61,6 +61,7 @@ function overview() {
     disk: { state: "unavailable", reason: "unavailable" },
     uptime: { state: "available", seconds: 10 },
     storage: { state: "available", indexedBytes: 25, fileCount: 1, directoryCount: 6, capacity: { state: "available", totalBytes: 100, availableBytes: 60, usedBytes: 40 } },
+    storageReachability: { state: "available", latencyMs: 2 },
     transfers: { uploadBytesPerSecond: 128, downloadBytesPerSecond: 64, activeCount: 1, queuedCount: 1, tasks: [{ id: "task-1", direction: "upload", filename: "archive.bin", state: "uploading", transferredBytes: 50, totalBytes: 100, percent: 50, bytesPerSecond: 128, canPause: true, canResume: false, canCancel: true, updatedAt: new Date().toISOString() }] },
   };
 }
@@ -70,7 +71,7 @@ describe("owner Saturn UI", () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       void init;
       const url = requestUrl(input);
-      if (url === "/health/ready") return json({ status: "ok" });
+      if (url === "/api/v1/public/reachability") return json({ status: "ready" });
       if (url.endsWith("/auth/session")) return json({ code: "unauthorized" }, 401);
       if (url.endsWith("/auth/login")) return json({ state: "authenticated" });
       if (url.endsWith("/auth/preferences")) return json(preferences());
@@ -105,7 +106,7 @@ describe("owner Saturn UI", () => {
   it("keeps the normative login composition stable and refocuses a rejected Access Key", async () => {
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       const url = requestUrl(input);
-      if (url === "/health/ready") return json({ status: "ok" });
+      if (url === "/api/v1/public/reachability") return json({ status: "ready" });
       if (url.endsWith("/auth/session")) return json({ code: "unauthorized" }, 401);
       if (url.endsWith("/auth/login")) return json({ code: "unauthorized" }, 401);
       return json({});
@@ -132,10 +133,7 @@ describe("owner Saturn UI", () => {
   it("reports the storage readiness check independently from degraded gateway readiness", async () => {
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       const url = requestUrl(input);
-      if (url === "/health/ready") return json({
-        status: "degraded",
-        checks: { database: { state: "pass" }, storage: { state: "pass" }, worker: { state: "fail" } },
-      });
+      if (url === "/api/v1/public/reachability") return json({ status: "unavailable" }, 503);
       if (url.endsWith("/auth/session")) return json({ state: "authenticated" });
       if (url.endsWith("/auth/preferences")) return json(preferences());
       if (url.endsWith("/operator/overview")) return json(overview());
@@ -144,7 +142,7 @@ describe("owner Saturn UI", () => {
 
     render(<App />);
     const title = await screen.findByRole("heading", { name: "Storage Reachability" });
-    expect(title.parentElement?.textContent).toContain("Available");
+    await waitFor(() => expect(title.parentElement?.textContent).toContain("Available"));
     expect(title.parentElement?.textContent).toContain("SFTP storage readiness check");
     expect(title.parentElement?.classList.contains("metric--success")).toBe(true);
   });
@@ -152,19 +150,16 @@ describe("owner Saturn UI", () => {
   it("marks unavailable storage reachability in red", async () => {
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       const url = requestUrl(input);
-      if (url === "/health/ready") return json({
-        status: "degraded",
-        checks: { database: { state: "pass" }, storage: { state: "fail" }, worker: { state: "pass" } },
-      }, 503);
+      if (url === "/api/v1/public/reachability") return json({ status: "ready" });
       if (url.endsWith("/auth/session")) return json({ state: "authenticated" });
       if (url.endsWith("/auth/preferences")) return json(preferences());
-      if (url.endsWith("/operator/overview")) return json(overview());
+      if (url.endsWith("/operator/overview")) return json({ ...overview(), storageReachability: { state: "unavailable", reason: "storage_unavailable" } });
       return json({});
     }));
 
     render(<App />);
     const title = await screen.findByRole("heading", { name: "Storage Reachability" });
-    expect(title.parentElement?.textContent).toContain("Unavailable");
+    await waitFor(() => expect(title.parentElement?.textContent).toContain("Unavailable"));
     expect(title.parentElement?.classList.contains("metric--danger")).toBe(true);
   });
 
@@ -174,7 +169,7 @@ describe("owner Saturn UI", () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       void init;
       const url = requestUrl(input);
-      if (url === "/health/ready") return json({ status: "ok" });
+      if (url === "/api/v1/public/reachability") return json({ status: "ready" });
       if (url.endsWith("/auth/session")) return json({ state: "authenticated" });
       if (url.endsWith("/auth/preferences")) return json(preferences());
       if (url.endsWith("/operator/overview")) return json(overview());
@@ -197,7 +192,7 @@ describe("owner Saturn UI", () => {
     const actions: string[] = [];
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = requestUrl(input);
-      if (url === "/health/ready") return json({ status: "ok" });
+      if (url === "/api/v1/public/reachability") return json({ status: "ready" });
       if (url.endsWith("/auth/session")) return json({ state: "authenticated" });
       if (url.endsWith("/auth/preferences")) return json(preferences());
       if (url.endsWith("/operator/overview")) {
@@ -232,7 +227,7 @@ describe("owner Saturn UI", () => {
     let completed = false;
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = requestUrl(input);
-      if (url === "/health/ready") return json({ status: "ok" });
+      if (url === "/api/v1/public/reachability") return json({ status: "ready" });
       if (url.endsWith("/auth/session")) return json({ state: "authenticated" });
       if (url.endsWith("/auth/preferences")) return json(preferences());
       if (url.endsWith("/operator/overview")) {
@@ -275,7 +270,7 @@ describe("owner Saturn UI", () => {
     window.history.replaceState({}, "", "/files");
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       const url = requestUrl(input);
-      if (url === "/health/ready") return json({ status: "ok" });
+      if (url === "/api/v1/public/reachability") return json({ status: "ready" });
       if (url.endsWith("/auth/session")) return json({ state: "authenticated" });
       if (url.endsWith("/auth/preferences")) return json(preferences());
       if (url.includes("/folders/resolve?")) return json([{ id: "00000000-0000-7000-8000-000000000001", type: "folder", name: "root", storagePath: "", sizeBytes: 0, status: "active", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }]);
@@ -309,7 +304,7 @@ describe("owner Saturn UI", () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       void init;
       const url = requestUrl(input);
-      if (url === "/health/ready") return json({ status: "ok", checks: { storage: { state: "pass" } } });
+      if (url === "/api/v1/public/reachability") return json({ status: "ready" });
       if (url.endsWith("/auth/session")) return json({ state: "authenticated" });
       if (url.endsWith("/auth/preferences")) return json(preferences());
       if (url.includes("/folders/resolve?")) return json([dropPoint]);
@@ -364,7 +359,7 @@ describe("owner Saturn UI", () => {
     let restored = false;
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = requestUrl(input);
-      if (url === "/health/ready") return json({ status: "ok" });
+      if (url === "/api/v1/public/reachability") return json({ status: "ready" });
       if (url.endsWith("/auth/session")) return json({ state: "authenticated" });
       if (url.endsWith("/auth/preferences")) return json(preferences({ trashRetentionDays: 45 }));
       if (url.includes("/trash?")) return json(restored ? [] : [trashed]);
@@ -425,7 +420,7 @@ describe("owner Saturn UI", () => {
     let purged = false;
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = requestUrl(input);
-      if (url === "/health/ready") return json({ status: "ok" });
+      if (url === "/api/v1/public/reachability") return json({ status: "ready" });
       if (url.endsWith("/auth/session")) return json({ state: "authenticated" });
       if (url.endsWith("/auth/preferences")) return json(preferences());
       if (url.includes("/trash?")) return json(purged ? [] : [trashed]);
@@ -466,7 +461,7 @@ describe("owner Saturn UI", () => {
     } as const;
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = requestUrl(input);
-      if (url === "/health/ready") return json({ status: "ok" });
+      if (url === "/api/v1/public/reachability") return json({ status: "ready" });
       if (url.endsWith("/auth/session")) return json({ state: "authenticated" });
       if (url.endsWith("/auth/preferences") && init?.method === "PUT") return json({ ...jsonRequestBody(init), updatedAt: now });
       if (url.endsWith("/auth/preferences")) return json({ ...initial, updatedAt: now });
@@ -496,7 +491,7 @@ describe("owner Saturn UI", () => {
     const now = new Date().toISOString();
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = requestUrl(input);
-      if (url === "/health/ready") return json({ status: "ok" });
+      if (url === "/api/v1/public/reachability") return json({ status: "ready" });
       if (url.endsWith("/auth/session")) return json({ state: "authenticated" });
       if (url.endsWith("/auth/preferences") && init?.method === "PUT") return json({ ...jsonRequestBody(init), updatedAt: now });
       if (url.endsWith("/auth/preferences")) return json(preferences({ accentColor: "#123456", updatedAt: now }));
@@ -522,7 +517,7 @@ describe("owner Saturn UI", () => {
     const now = new Date().toISOString();
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       const url = requestUrl(input);
-      if (url === "/health/ready") return json({ status: "ok" });
+      if (url === "/api/v1/public/reachability") return json({ status: "ready" });
       if (url.endsWith("/auth/session")) return json({ state: "authenticated" });
       if (url.endsWith("/auth/preferences")) return json(preferences({ updatedAt: now }));
       if (url.includes("/folders/resolve?")) return json([{ id: "00000000-0000-7000-8000-000000000001", type: "folder", name: "root", storagePath: "", sizeBytes: 0, status: "active", createdAt: now, updatedAt: now }]);
@@ -570,7 +565,7 @@ describe("owner Saturn UI", () => {
     }));
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       const url = requestUrl(input);
-      if (url === "/health/ready") return json({ status: "ok" });
+      if (url === "/api/v1/public/reachability") return json({ status: "ready" });
       if (url.endsWith("/auth/session")) return json({ state: "authenticated" });
       if (url.endsWith("/auth/preferences")) return json(preferences({ updatedAt: now }));
       if (url.includes("/folders/resolve?")) return json([{ id: rootId, type: "folder", name: "root", storagePath: "", sizeBytes: 0, status: "active", createdAt: now, updatedAt: now }]);
@@ -600,7 +595,7 @@ describe("owner Saturn UI", () => {
     const requests: Array<{ readonly url: string; readonly body: unknown }> = [];
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = requestUrl(input);
-      if (url === "/health/ready") return json({ status: "ok" });
+      if (url === "/api/v1/public/reachability") return json({ status: "ready" });
       if (url.endsWith("/auth/session")) return json({ state: "authenticated" });
       if (url.endsWith("/auth/preferences")) return json(preferences({ updatedAt: now }));
       if (url.includes("/folders/resolve?")) return json([
@@ -660,7 +655,7 @@ describe("owner Saturn UI", () => {
     vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue({} as never);
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       const url = requestUrl(input);
-      if (url === "/health/ready") return json({ status: "ok" });
+      if (url === "/api/v1/public/reachability") return json({ status: "ready" });
       if (url.endsWith("/auth/session")) return json({ state: "authenticated" });
       if (url.endsWith("/auth/preferences")) return json(preferences({ updatedAt: now }));
       if (url.includes("/folders/resolve?")) return json([
@@ -704,7 +699,7 @@ describe("owner Saturn UI", () => {
     let revokeAttempts = 0;
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = requestUrl(input);
-      if (url === "/health/ready") return json({ status: "ok" });
+      if (url === "/api/v1/public/reachability") return json({ status: "ready" });
       if (url.endsWith("/auth/session")) return json({ state: "authenticated" });
       if (url.endsWith("/auth/preferences")) return json(preferences({ updatedAt: newer }));
       if (url.endsWith(`/shares/${shares[1].id}`) && init?.method === "DELETE") {
@@ -756,7 +751,7 @@ describe("owner Saturn UI", () => {
     const createdShare = { id: "01900000-0000-7000-8000-000000000102", resourceId: file.id, resourceType: "file", resourceName: file.name, resourceSize: file.sizeBytes, resourceMimeType: file.mimeType, mode: "download", state: "active", locked: false, downloadCount: 0, createdAt: now, updatedAt: now } as const;
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = requestUrl(input);
-      if (url === "/health/ready") return json({ status: "ok" });
+      if (url === "/api/v1/public/reachability") return json({ status: "ready" });
       if (url.endsWith("/auth/session")) return json({ state: "authenticated" });
       if (url.endsWith("/auth/preferences")) return json(preferences({ updatedAt: now }));
       if (url.endsWith("/shares") && init?.method === "POST") {
@@ -794,7 +789,7 @@ describe("owner Saturn UI", () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       void init;
       const url = requestUrl(input);
-      if (url === "/health/ready") return json({ status: "ok" });
+      if (url === "/api/v1/public/reachability") return json({ status: "ready" });
       if (url.endsWith("/auth/session")) return json({ state: "authenticated" });
       if (url.endsWith("/auth/preferences")) return json(preferences({ updatedAt: now }));
       if (url.includes("/folders/resolve?")) {
@@ -825,7 +820,7 @@ describe("owner Saturn UI", () => {
     const now = new Date().toISOString();
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = requestUrl(input);
-      if (url === "/health/ready") return json({ status: "ok" });
+      if (url === "/api/v1/public/reachability") return json({ status: "ready" });
       if (url.endsWith("/auth/session")) return json({ state: "authenticated" });
       if (url.endsWith("/auth/preferences")) return json(preferences({ updatedAt: now }));
       if (url.endsWith("/auth/reauthenticate")) return json({ state: "authenticated" });
@@ -856,7 +851,7 @@ describe("owner Saturn UI", () => {
     let gryphonConnected = false;
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = requestUrl(input);
-      if (url === "/health/ready") return json({ status: "ok" });
+      if (url === "/api/v1/public/reachability") return json({ status: "ready" });
       if (url.endsWith("/auth/session")) return json({ state: "authenticated" });
       if (url.endsWith("/auth/preferences") && init?.method === "PUT") return json({ ...jsonRequestBody(init), updatedAt: now });
       if (url.endsWith("/auth/preferences")) return json(preferences({ updatedAt: now }));
@@ -955,7 +950,7 @@ describe("owner Saturn UI", () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       void init;
       const url = requestUrl(input);
-      if (url === "/health/ready") return json({ status: "ok" });
+      if (url === "/api/v1/public/reachability") return json({ status: "ready" });
       if (url.endsWith("/auth/session")) return json({ state: "authenticated" });
       if (url.endsWith("/auth/preferences")) return json(preferences({ updatedAt: now }));
       if (url.endsWith("/auth/reauthenticate")) return json({ state: "authenticated" });
@@ -1005,7 +1000,7 @@ describe("owner Saturn UI", () => {
     vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = requestUrl(input);
-      if (url === "/health/ready") return json({ status: "ok" });
+      if (url === "/api/v1/public/reachability") return json({ status: "ready" });
       if (url.endsWith("/auth/session")) return json({ state: "authenticated" });
       if (url.endsWith("/auth/preferences")) return json(preferences({ updatedAt: now }));
       if (url.endsWith("/operator/recovery/snapshots")) return new Response("zip", { headers: { "content-type": "application/zip", "content-disposition": "attachment; filename=\"saturn-snapshot.zip\"", "x-saturn-created-at": now } });
@@ -1050,7 +1045,7 @@ describe("public Drop UI", () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       void init;
       const url = requestUrl(input);
-      if (url === "/health/ready") return json({ status: "ok" });
+      if (url === "/api/v1/public/reachability") return json({ status: "ready" });
       if (url.endsWith("/drop/session")) return json({ code: "unauthorized" }, 401);
       if (url.endsWith("/drop/redeem")) return json({ state: "upload_only", channelId: "channel-shared", expiresAt: new Date(Date.now() + 60_000).toISOString(), maxFiles: 20, maxBytes: 1024 });
       return json({});
@@ -1082,7 +1077,7 @@ describe("public Drop UI", () => {
     const expiresAt = new Date(Date.now() + 30 * 60_000).toISOString();
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       const url = requestUrl(input);
-      if (url === "/health/ready") return json({ status: "ok" });
+      if (url === "/api/v1/public/reachability") return json({ status: "ready" });
       if (url.endsWith("/drop/session")) return json({ state: "upload_only", channelId: "channel-live", expiresAt, maxFiles: 20, maxBytes: 100 * 1024 ** 3, buffer: { state: "available", reservedBytes: 100, maxBytes: 110 * 1024 ** 3, freeBytes: 200 * 1024 ** 3, ratio: 0.1 } });
       if (url.endsWith("/drop/uploads")) return json([
         { id: "stored-upload", filename: "stored.bin", state: "stored", expectedSize: 100, receivedSize: 100, expiresAt, completed: true },
@@ -1112,7 +1107,7 @@ describe("public Drop UI", () => {
     const expiresAt = new Date(Date.now() + 30 * 60_000).toISOString();
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = requestUrl(input);
-      if (url === "/health/ready") return json({ status: "ok" });
+      if (url === "/api/v1/public/reachability") return json({ status: "ready" });
       if (url.endsWith("/drop/session")) return json({ state: "upload_only", channelId: "channel-directory", expiresAt, maxFiles: 20, maxBytes: 1024 });
       if (url.endsWith("/drop/uploads") && init?.method !== "POST") return json([]);
       return json({});
@@ -1152,7 +1147,7 @@ describe("public Drop UI", () => {
     vi.stubGlobal("EventSource", FakeEventSource);
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       const url = requestUrl(input);
-      if (url === "/health/ready") return json({ status: "ok" });
+      if (url === "/api/v1/public/reachability") return json({ status: "ready" });
       if (url.endsWith("/drop/session")) return json({ state: "upload_only", channelId: "channel-realtime", expiresAt, maxFiles: 20, maxBytes: 1024 });
       if (url.endsWith("/drop/uploads")) return json([]);
       return json({});
@@ -1173,7 +1168,7 @@ describe("public Drop UI", () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       void init;
       const url = requestUrl(input);
-      if (url === "/health/ready") return json({ status: "ok" });
+      if (url === "/api/v1/public/reachability") return json({ status: "ready" });
       if (url.endsWith("/drop/session")) return json({ state: "upload_only", channelId: "channel-from-another-tab", expiresAt: new Date(Date.now() + 60_000).toISOString(), maxFiles: 20, maxBytes: 1024 });
       if (url.endsWith("/drop/uploads")) return json([]);
       return json({});
@@ -1195,7 +1190,7 @@ describe("public Share UI", () => {
     window.history.replaceState({}, "", `/s/${token}`);
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       const url = requestUrl(input);
-      if (url === "/health/ready") return json({ status: "ok", checks: { storage: { state: "pass" } } });
+      if (url === "/api/v1/public/reachability") return json({ status: "ready" });
       if (url.includes("/public/shares/")) return json({ id: "share", resourceId: "file", resourceType: "file", resourceName: "report.pdf", resourceSize: 1024, resourceMimeType: "application/pdf", mode: "view", state: "active", locked: false, downloadCount: 0, createdAt: "2026-09-01T00:00:00.000Z", updatedAt: "2026-09-01T00:00:00.000Z" });
       return json({});
     }));
@@ -1215,7 +1210,7 @@ describe("public Share UI", () => {
     window.history.replaceState({}, "", `/s/${token}`);
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = requestUrl(input);
-      if (url === "/health/ready") return json({ status: "ok" });
+      if (url === "/api/v1/public/reachability") return json({ status: "ready" });
       if (url.endsWith("/unlock") && init?.method === "POST") return json({ id: "share", resourceId: "file", resourceType: "file", resourceName: "secure.zip", resourceSize: 2048, mode: "download", state: "active", locked: false, downloadCount: 0, createdAt: "2026-09-01T00:00:00.000Z", updatedAt: "2026-09-01T00:00:00.000Z" });
       if (url.includes("/public/shares/")) return json({ id: "share", resourceId: "file", resourceType: "file", resourceName: "secure.zip", resourceSize: 2048, mode: "download", state: "active", locked: true, downloadCount: 0, createdAt: "2026-09-01T00:00:00.000Z", updatedAt: "2026-09-01T00:00:00.000Z" });
       return json({});
@@ -1246,7 +1241,7 @@ describe("public Share UI", () => {
     });
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = requestUrl(input);
-      if (url === "/health/ready") return json({ status: "ok" });
+      if (url === "/api/v1/public/reachability") return json({ status: "ready" });
       if (url.endsWith("/package") && init?.method === "POST") return json({ state: "ready", sizeBytes: 2304 });
       if (url.includes("/children")) return json([
         { id: "folder-1", type: "folder", name: "folder_1", sizeBytes: 2048, updatedAt: "2026-09-01T00:00:00.000Z" },
@@ -1273,7 +1268,7 @@ describe("public Share UI", () => {
     window.history.replaceState({}, "", `/s/${token}`);
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       const url = requestUrl(input);
-      if (url === "/health/ready") return json({ status: "ok" });
+      if (url === "/api/v1/public/reachability") return json({ status: "ready" });
       if (url.includes("/children")) return json([
         { id: "file-2", type: "file", name: "readme.txt", sizeBytes: 512, updatedAt: "2026-09-01T00:00:00.000Z" },
       ]);
