@@ -1,5 +1,7 @@
 # DEV Storage Box qualification tool
 
+This document specializes [Part 06 — unified acceptance checklist](../../../.docs/PART_06_UNIFIED_ACCEPTANCE_CHECKLIST.md); that central contract remains authoritative.
+
 This package qualifies the Storage Box transport before any Saturn runtime code
 depends on it. It is intentionally isolated from the future Gateway packages.
 

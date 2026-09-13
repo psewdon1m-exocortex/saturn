@@ -5,7 +5,7 @@
 
 ## Authority
 
-This implementation adopts `PART_I_INTERFACE_AND_INTERACTION_UNIFICATION.md`
+This implementation adopts [Part 01](../../../.docs/PART_01_INTERFACE_AND_INTERACTION_UNIFICATION.md)
 and every PNG template linked from that document. The source specification in
 the repository root is read-only and is not copied or modified here.
 
@@ -15,13 +15,13 @@ exists.
 
 ## Material-divergence decision — login view, 2026-09-02
 
-The updated Part I section 4.1 and `example Log in page.png` place the service
+The updated Part 01 login-page contract and `example Log in page.png` place the service
 brand above an exact `560x268px` authentication panel. The existing Saturn view
 instead placed its icon, wordmark, reachability and explanatory copy inside a
 generic padded panel, so the visible composition, hierarchy and control geometry
 were materially different.
 
-The operator explicitly requested adoption of the updated Part I login contract.
+The operator explicitly requested adoption of the updated Part 01 login contract.
 Saturn therefore uses its real planet asset in the `100x100px` brand box, keeps
 the wordmark and icon outside the panel, and leaves only reachability, one empty
 masked Access Key control and one submit action inside the panel. The change is
@@ -32,7 +32,7 @@ responsive, keyboard, rejected-key, reduced-motion and console checks.
 
 ## Material-divergence decisions — existing sidebar
 
-The operator subsequently selected the revised Part I boundary contract. The
+The operator subsequently selected the revised Part 01 boundary contract. The
 desktop and revealed mobile sidebar therefore remain a `250px` border-box and
 render one continuous `1px` level-one white line at the right edge. Content
 still starts at `x=250`, so the boundary does not create a second seam or shift
@@ -40,14 +40,14 @@ the main track.
 
 Adaptive sequential ordinals remain an independent open divergence: the current
 Saturn menu keeps the previously selected reserved `03`. Preserving those stable
-identities, adopting the revised Part I numbering, or staging a compatibility
+identities, adopting the revised Part 01 numbering, or staging a compatibility
 migration remain viable and require a separate operator decision.
 
 ## Saturn Settings extension — 2026-09-03
 
-Part I requires Appearance, Security, Backup, Updates and Logs and permits
+Part 01 requires Appearance, Security, Backup, Updates and Logs and permits
 additional service-specific sections. The operator explicitly selected
-Telegram bot connection as Saturn's sixth full-width section. It is inserted
+Bot connection through Gryphon as Saturn's sixth full-width section. It is inserted
 after Security, is independently reorderable, and is persisted as part of the
 validated Settings order. Migration `0023_telegram_settings_section` inserts it
 after Security without resetting the relative order of an existing five-card
@@ -83,17 +83,17 @@ fallbacks only.
   customization, Space Grotesk display typography and Consolas UI typography.
 - Exactly two visible outline levels: white outer boundaries and `#CCC` nested
   boundaries.
-- Chronos interaction geometry: `#111` hover surface, accent boundary,
+- Shared interaction geometry: `#111` hover surface, accent boundary,
   proportional growth, uniform `.985` press and a non-transforming reduced
   motion mode.
-- A 250 px reorderable desktop sidebar, a keyboard equivalent, template-stable
-  two-digit ordinals (`03` remains reserved) and a modal mobile drawer at
+- A 250 px reorderable desktop sidebar, a keyboard equivalent, adaptive
+  two-digit ordinals recomputed sequentially after every reorder and a modal mobile drawer at
   720 px and below.
 - Universal reorderable cards with ordinal, four-dot handle, optional title
   divider and persisted order.
 - Dashboard cards in CPU, RAM, Disk and Uptime logical order. Unknown or stale
   telemetry is named as unavailable and is never rendered as zero.
-- Settings cards in Appearance, Security, Telegram bot, Backup, Updates and
+- Settings cards in Appearance, Security, Bot connection, Backup, Updates and
   Logs logical order, with no page-level save action.
 - Access Key only authentication. Credential fields always open empty and no
   credential is persisted in browser storage.
@@ -210,11 +210,11 @@ rather than simulated.
 ## Settings refit verification — 2026-09-03
 
 - The Settings route renders six independently reorderable full-width cards:
-  Appearance, Security, Telegram bot connection, Backup, Updates and Logs.
+  Appearance, Security, Bot connection, Backup, Updates and Logs.
 - At the local desktop viewport, the page title starts at `(280, 15)` and the
   Appearance card at `(280, 153)` with a `401px` height. Its color controls
   start at `x=322/382/728/871` and measure `40/326/123/123px`, matching the
-  Part I ledger.
+  Part 01 ledger.
 - The Access Key overlay opens with all three credential fields empty. Kernel
   token material and Telegram provider credentials are never rendered.
 - The log viewport is bounded at `460px`; its header is `36px`, data rows use

@@ -4,11 +4,11 @@ Status: `COMPLETE`.
 
 Normative inputs:
 
-- `C:\.projects\exocortex\.docs\UNIFICATION_SPECIFICATION.md`;
-- `C:\.projects\exocortex\.docs\PART_I_INTERFACE_AND_INTERACTION_UNIFICATION.md`;
-- `C:\.projects\exocortex\.docs\src\example Left Menu.png`;
-- `C:\.projects\exocortex\.docs\src\Example of left menu and main page side by side, base layer of main page, name of main page.png`;
-- `C:\.projects\exocortex\saturn\.src\saturn left menu.png` — exact Saturn
+- [Part 00](../../../.docs/PART_00_SYSTEM_UNIFICATION_SPECIFICATION.md);
+- [Part 01](../../../.docs/PART_01_INTERFACE_AND_INTERACTION_UNIFICATION.md);
+- [left-menu reference](../../../.docs/src/example%20Left%20Menu.png);
+- [main-page layout reference](../../../.docs/src/Example%20of%20left%20menu%20and%20main%20page%20side%20by%20side,%20base%20layer%20of%20main%20page,%20name%20of%20main%20page.png);
+- [Saturn left-menu reference](../../.src/saturn%20left%20menu.png) — exact Saturn
   composition and geometry.
 
 The Saturn-specific template is authoritative for the rail geometry and brand.

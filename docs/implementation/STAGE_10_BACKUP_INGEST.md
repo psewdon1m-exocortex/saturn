@@ -1,5 +1,7 @@
 # Stage 10 — Backup ingest for internal services
 
+This document specializes [Part 03 — backup and recovery](../../../.docs/PART_03_BACKUP_AND_RECOVERY.md); that central contract remains authoritative.
+
 Status: `COMPLETE`
 
 ## Purpose

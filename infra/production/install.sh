@@ -287,8 +287,8 @@ install_release() {
 }
 
 status() { docker compose --env-file "$CONFIG_FILE" -f "$COMPOSE_FILE" ps; }
-bootstrap_storage() { refresh_runtime_secrets; docker compose --env-file "$CONFIG_FILE" -f "$COMPOSE_FILE" run --rm migrate node /app/scripts/storage-bootstrap.mjs; }
-smoke() { refresh_runtime_secrets; docker compose --env-file "$CONFIG_FILE" -f "$COMPOSE_FILE" run --rm migrate node /app/scripts/storage-smoke.mjs; }
+bootstrap_storage() { refresh_runtime_secrets; docker compose --env-file "$CONFIG_FILE" -f "$COMPOSE_FILE" run --rm --no-deps --user 1000:1000 -e KERNEL_SERVICE_TOKEN= migrate node /app/scripts/storage-bootstrap.mjs; }
+smoke() { refresh_runtime_secrets; docker compose --env-file "$CONFIG_FILE" -f "$COMPOSE_FILE" run --rm --no-deps --user 1000:1000 -e KERNEL_SERVICE_TOKEN= migrate node /app/scripts/storage-smoke.mjs; }
 storage_public_key() {
   storage_port=$(get_config STORAGE_PORT)
   if [ "$storage_port" = 22 ]; then

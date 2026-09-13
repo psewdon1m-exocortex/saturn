@@ -21,8 +21,8 @@ try {
   await handle.close();
 }
 try {
-  await fs.chown(temporary, 1000, 1000);
   await fs.chmod(temporary, 0o400);
+  await fs.chown(temporary, 1000, 1000);
   await fs.rename(temporary, target);
 } catch (error) {
   await fs.rm(temporary, { force: true });

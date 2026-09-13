@@ -1,5 +1,7 @@
 # Saturn storage root layout v2
 
+This document specializes [Part 03 — backup and recovery](../../../.docs/PART_03_BACKUP_AND_RECOVERY.md); that central contract remains authoritative.
+
 Status: implemented; root-management policy revised in generation 13  
 Decision date: 2026-09-01  
 Scope: physical Storage Box paths, resource metadata, WebDAV aliases and operator bootstrap

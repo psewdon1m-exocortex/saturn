@@ -1,5 +1,7 @@
 # Test strategy
 
+This document specializes [Part 06 — unified acceptance checklist](../../../.docs/PART_06_UNIFIED_ACCEPTANCE_CHECKLIST.md); that central contract remains authoritative.
+
 ## Test layers
 
 1. **Unit:** path normalization, state machines, token hashing, scopes, Range,

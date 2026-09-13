@@ -1,5 +1,7 @@
 # Exposure and connection matrix
 
+This document specializes [Part 07 — security and exposure control](../../../.docs/PART_07_SECURITY_AND_EXPOSURE_CONTROL.md); that central contract remains authoritative.
+
 Every listener and route must be implemented from this registry. `noindex` and
 obscurity are publication metadata, never authorization.
 

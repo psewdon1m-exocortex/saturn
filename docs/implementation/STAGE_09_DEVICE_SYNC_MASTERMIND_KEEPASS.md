@@ -1,5 +1,7 @@
 # Stage 9 — Device sync, Mastermind and KeePass
 
+This document specializes [Part 09 — service agents deployment and lifecycle](../../../.docs/PART_09_SERVICE_AGENTS_DEPLOYMENT_AND_LIFECYCLE.md); that central contract remains authoritative.
+
 Status: `COMPLETE`
 
 ## Purpose

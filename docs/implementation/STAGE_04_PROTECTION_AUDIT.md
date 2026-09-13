@@ -1,5 +1,7 @@
 # Stage 4 — Versions, trash, reconciliation and audit
 
+This document specializes [Part 07 — security and exposure control](../../../.docs/PART_07_SECURITY_AND_EXPOSURE_CONTROL.md); that central contract remains authoritative.
+
 Status: `COMPLETE`  
 Aggregate command: `pnpm verify:stage:4`  
 Machine-readable evidence: `artifacts/verification/stage-04-protection-audit.json`  

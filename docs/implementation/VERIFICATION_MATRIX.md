@@ -1,5 +1,7 @@
 # Verification matrix
 
+This document specializes [Part 06 — unified acceptance checklist](../../../.docs/PART_06_UNIFIED_ACCEPTANCE_CHECKLIST.md); that central contract remains authoritative.
+
 ## Stage status and evidence
 
 | Stage | State | Required evidence | Current evidence |

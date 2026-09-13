@@ -1,11 +1,13 @@
 # Техническое решение Saturn: персональный файловый шлюз поверх Hetzner Storage Box
 
-> Актуализация: прямой Telegram runtime, описанный ниже, вынесен в Gryphon.
+This document specializes [Part 00 — system unification specification](../../.docs/PART_00_SYSTEM_UNIFICATION_SPECIFICATION.md); that central contract remains authoritative.
+
+> Актуализация: Telegram runtime вынесен в Gryphon.
 > Saturn больше не хранит bot token, не принимает Telegram webhook и не
 > управляет Telegram-провайдером; UI только вызывает service-scoped операции
 > привязки и обновления самого Gryphon через локальные агенты. Saturn предоставляет Gryphon внутренний
-> аутентифицированный адаптер команд. Разделы с прямой интеграцией сохранены
-> как исходный исторический дизайн.
+> аутентифицированный адаптер команд. Требования ниже сформулированы через эту
+> границу; прямой встроенный bot runtime не является допустимой альтернативой.
 
 **Статус:** проект технической спецификации  
 **Версия:** 1.1  
@@ -39,7 +41,7 @@
                     │ WebDAV / Sync API │
                     │ Drop Point        │
                     │ Sharing           │
-                    │ Telegram Bot      │
+                    │ Gryphon Adapter   │
                     │ Backup Ingest     │
                     │ Laboratory Assets │
                     └─────────┬─────────┘
@@ -80,7 +82,7 @@
 
 ## 1.2. Gateway
 
-Собственный сервер и приложение, через которое проходят все внешние операции: загрузка, скачивание, синхронизация, sharing, резервные копии, Telegram-коды, интеграция с Laboratory и работа с графом.
+Собственный сервер и приложение, через которое проходят все внешние операции: загрузка, скачивание, синхронизация, sharing, резервные копии, Drop-коды через Gryphon, интеграция с Laboratory и работа с графом.
 
 ## 1.3. Resource
 
@@ -100,7 +102,7 @@
 
 ## 1.7. Drop Point
 
-Минимальная публичная страница, позволяющая загрузить один или несколько файлов в каталог `drop point` по короткоживущему многоклиентскому коду, полученному через Telegram-бота. Drop Point не показывает содержимое хранилища и не позволяет скачивать, переименовывать или удалять данные.
+Минимальная публичная страница, позволяющая загрузить один или несколько файлов в каталог `drop point` по короткоживущему многоклиентскому коду, полученному через подключённую в Gryphon функцию Saturn. Drop Point не показывает содержимое хранилища и не позволяет скачивать, переименовывать или удалять данные.
 
 ## 1.8. Mastermind
 
@@ -127,7 +129,7 @@
 Система должна обеспечивать:
 
 1. Собственный web-интерфейс для работы с файлами и папками.
-2. Быструю загрузку файлов через Drop Point по короткоживущему Telegram-коду с общей очередью для нескольких устройств.
+2. Быструю загрузку файлов через Drop Point по короткоживущему коду, выданному через Gryphon, с общей очередью для нескольких устройств.
 3. Хранение и синхронизацию каталога Mastermind.
 4. Безопасное хранение и версионирование KeePass-файла.
 5. Приём автоматических резервных копий внутренних сервисов с отдельной аутентификацией.
@@ -179,7 +181,7 @@ Gateway
 ├── storage
 ├── files
 ├── drop
-├── telegram
+├── gryphon-adapter
 ├── shares
 ├── backups
 ├── sync
@@ -236,7 +238,7 @@ Gateway
 | StorageAdapter | Единый интерфейс к Storage Box; скрывает SFTP |
 | Worker | Хеширование, индексация, версии, retention, reconciliation, упаковка папок |
 | PostgreSQL | Метаданные, версии, сессии, shares, audit, очереди |
-| Telegram module | Получение команды, выдача и отзыв Drop-кодов |
+| Gryphon adapter | Аутентифицированные service-scoped команды, выдача и отзыв Drop-кодов; bot token и webhook остаются в Gryphon |
 | WebDAV/Sync endpoint | Синхронизация ПК через Gateway |
 | Storage Box | Физические файлы, системные каталоги, временные объекты |
 
@@ -269,7 +271,7 @@ Gateway
 
 Открыты:
 
-- TCP 443 — web, API, Drop Point, shares, Telegram webhook, WebDAV;
+- TCP 443 — web, API, Drop Point, shares и WebDAV;
 - TCP 80 — только перенаправление на HTTPS, если требуется.
 
 Административный SSH:
@@ -749,19 +751,22 @@ Files | Laboratory | Drop Point | Shared | Trash | Activity | Settings
 
 ---
 
-# 10. Drop Point и Telegram-бот
+# 10. Drop Point и Gryphon
 
 ## 10.1. Пользовательский сценарий
 
-1. Пользователь на доверенном телефоне пишет боту `/drop` или нажимает кнопку «Получить код».
-2. Bot проверяет Telegram `user_id` по allowlist.
-3. Gateway создаёт короткоживущий код общего Drop-канала.
-4. Bot отправляет код и срок действия.
+1. Пользователь на доверенном телефоне вызывает функцию Saturn `/drop` у бота,
+   подключённого в Gryphon, или нажимает кнопку «Получить код».
+2. Gryphon проверяет service-scoped привязку Telegram identity и передаёт
+   аутентифицированную команду адаптеру Saturn.
+3. Saturn создаёт короткоживущий код общего Drop-канала.
+4. Gryphon отправляет код и срок действия, не раскрывая bot token Saturn.
 5. На чужом устройстве пользователь открывает `https://drive.example.com/drop`.
 6. Вводит код.
 7. Получает upload-only session.
 8. Перетаскивает файлы.
-9. После завершения Telegram присылает уведомление.
+9. После завершения Saturn отправляет уведомление через service-scoped Gryphon
+   client socket.
 10. Файлы появляются в `/drop point/<date>/`.
 
 ## 10.2. Параметры кода по умолчанию
@@ -799,17 +804,20 @@ Files | Laboratory | Drop Point | Shared | Trash | Activity | Settings
 - глобальный лимит попыток;
 - задержка после ошибок;
 - CAPTCHA только при аномалии, не по умолчанию;
-- уведомление в Telegram о подозрительных попытках;
+- уведомление через Gryphon о подозрительных попытках;
 - кнопка `/revoke` для отзыва всех активных Drop sessions.
 
-## 10.5. Telegram webhook
+## 10.5. Gryphon boundary
 
-- использовать HTTPS webhook;
-- задать Telegram `secret_token` и проверять заголовок webhook;
-- принимать только необходимые update types;
-- проверять `from.id`, а не username;
-- bot token хранить в secret store;
-- дедуплицировать updates по `update_id`.
+- Telegram HTTPS webhook, `secret_token`, bot token, update filtering and
+  `update_id` deduplication belong only to Gryphon;
+- Saturn stores neither a bot token nor a Telegram webhook secret;
+- Saturn accepts commands only through its authenticated internal Gryphon
+  adapter and verifies the service-scoped identity/authorization supplied by
+  that contract;
+- outbound notifications use only the service client socket and credential;
+- connecting a bot and binding a Telegram user remain separate operator
+  decisions.
 
 ## 10.6. Ограничение риска чужого устройства
 
@@ -1412,10 +1420,10 @@ GET  /api/v1/drop/uploads/{id}/status
 POST /api/v1/drop/complete
 ```
 
-## 18.5. Telegram
+## 18.5. Gryphon adapter
 
 ```text
-POST /internal/telegram/webhook
+POST /api/internal/gryphon/command
 ```
 
 Команды:
@@ -1672,7 +1680,7 @@ Session cookie:
 - PostgreSQL health;
 - worker queue depth.
 
-## 23.3. Alerts через Telegram
+## 23.3. Alerts через Gryphon
 
 - backup не поступил в ожидаемое окно;
 - место >80% и >90%;
@@ -1732,7 +1740,7 @@ Gateway не должен хранить основной архив. Локал
 
 | Угроза | Последствие | Мера |
 |---|---|---|
-| Перебор Drop-кода | чужой upload | короткий абсолютный TTL, rate limit, Telegram alert |
+| Перебор Drop-кода | чужой upload | короткий абсолютный TTL, rate limit, alert через Gryphon |
 | Кража Drop-кода | upload мусора | upload-only, batch quota, no list/read/delete |
 | Path traversal | запись вне `drop point` | canonical path + server-generated destination |
 | Вредоносный файл | exploit preview | store outside webroot, sandbox/allowlist preview |
@@ -1744,7 +1752,7 @@ Gateway не должен хранить основной архив. Локал
 | Потеря PostgreSQL | потеря metadata/shares | частые dumps, JSONL exports, restore test |
 | Компрометация Gateway | доступ к Storage Box | sub-account, least privilege, second copy, secret rotation |
 | Компрометация Storage Box password | direct access | random offline password, external reachability off |
-| Telegram spoof | выдача кода чужому | allowlist user ID, webhook secret, update dedupe |
+| Telegram spoof | выдача кода чужому | service-scoped Gryphon binding, webhook secret и update dedupe внутри Gryphon |
 | Ошибка массового delete | потеря архива | soft delete, delayed purge, snapshots |
 | «View-only» обход | получатель сохраняет файл | честно обозначить ограничение; watermark позже |
 | Provider lock-in | сложный переезд | standard paths, StorageAdapter, rclone, manifests, exit test |
@@ -1849,15 +1857,16 @@ Fallback, если random writes окажутся нестабильными:
 ## 27.3. Docker Compose
 
 ```text
-compose
-├── reverse-proxy
-├── gateway-api
-├── gateway-worker
-├── postgres
-└── optional-clamav
+server-managed Nginx (outside Saturn Compose)
+└── Saturn Compose
+    ├── gateway-api
+    ├── gateway-worker
+    ├── postgres
+    └── optional-clamav
 ```
 
-Telegram может быть модулем `gateway-api`; отдельный контейнер не обязателен.
+Gryphon is a separate shared service. Saturn contains only its authenticated
+command adapter and client-socket integration.
 
 ## 27.4. Secrets
 
@@ -1899,11 +1908,11 @@ Telegram может быть модулем `gateway-api`; отдельный к
 - SFTP disconnect на середине операции;
 - retry и idempotency;
 - WebDAV clients;
-- Telegram webhook signature header.
+- authenticated Gryphon command adapter and rejected invalid service token.
 
 ## 28.3. End-to-end tests
 
-1. Получить Drop code в Telegram.
+1. Получить Drop code через подключённую Gryphon-функцию Saturn.
 2. Погасить код.
 3. Загрузить файл с обрывом и продолжить.
 4. Увидеть файл в Drop Point.
@@ -1978,9 +1987,9 @@ Telegram может быть модулем `gateway-api`; отдельный к
 
 **Checkpoint:** обычный файловый менеджер работает; отказ в середине upload не создаёт видимый повреждённый файл.
 
-## Этап 2. Drop Point и Telegram
+## Этап 2. Drop Point и Gryphon
 
-- bot webhook;
+- authenticated Gryphon adapter and service client;
 - `/drop` и `/revoke`;
 - code lifecycle;
 - upload-only sessions;
@@ -2056,7 +2065,7 @@ Telegram может быть модулем `gateway-api`; отдельный к
 5. Удалённый файл восстанавливается из trash.
 6. Перезаписанный KeePass восстанавливается из версии.
 7. Drop code допускает несколько устройств до общей абсолютной границы 30 минут от выпуска и не даёт list/read/delete.
-8. Telegram bot выдаёт код только разрешённому user ID.
+8. Gryphon выдаёт код только identity, привязанной к Saturn service connection.
 9. Backup producer видит только собственный upload API.
 10. Mastermind хранится целиком и может быть открыт как обычная Obsidian folder после выгрузки.
 11. Share поддерживает expiry, password и revoke.
@@ -2174,7 +2183,7 @@ reconciliation:
 5. [Obsidian Help — How Obsidian stores data](https://obsidian.md/help/data-storage): vault как папка с Markdown-файлами и подпапками.
 6. [KeePass Help — Security](https://keepass.info/help/base/security.html): шифрование всей database.
 7. [KeePass Help — Synchronization](https://keepass.info/help/v2/sync.html): синхронизация с file/URL и обработка конкурентных изменений.
-8. [Telegram Bot API](https://core.telegram.org/bots/api): webhook, update ID, user ID и webhook secret token.
+8. [Telegram Bot API](https://core.telegram.org/bots/api): transport contract implemented by Gryphon; Saturn does not consume bot tokens or webhooks directly.
 9. [tus — resumable file uploads](https://tus.io/) и [tus protocol](https://tus.io/protocols/resumable-upload).
 10. [RFC 4918 — WebDAV](https://datatracker.ietf.org/doc/html/rfc4918).
 11. [RFC 9110 — HTTP Semantics](https://datatracker.ietf.org/doc/html/rfc9110), раздел Range Requests.

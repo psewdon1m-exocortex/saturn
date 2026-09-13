@@ -1,5 +1,7 @@
 # Saturn production operations
 
+This document specializes [Part 04 — bootstrap and deployment](../../../.docs/PART_04_BOOTSTRAP_AND_DEPLOYMENT.md); that central contract remains authoritative.
+
 ## Promotion boundary
 
 DEV and PROD are independent installations. PROD requires its own Storage Box
@@ -13,8 +15,9 @@ unscoped `v*` tags. The release workflow accepts only protected
 `saturn-vMAJOR.MINOR.PATCH` tag pushes, builds candidate OCI images once with
 SBOM/provenance, tests those exact digests, signs the release manifest and
 refuses replacement of existing version tags/releases. Publish the pinned
-Updater release first; Updater 0.4.0 is the first version that resolves the
-module-scoped Saturn tag.
+Updater release first. Updater 0.4.0 introduced module-scoped Saturn tag
+resolution; the current coordinated deployment baseline requires 0.4.4 or
+newer.
 The Ed25519 and RSA private keys exist only in GitHub Secrets and are exposed
 only to the protected release-signing job. CI derives the public counterparts
 and embeds them in the exact versioned `bootstrap.sh`. On a clean host bootstrap

@@ -2,8 +2,10 @@
 
 Status: active  
 Owner: system operator  
-Implementation root: `C:\.projects\exocortex\saturn`  
-Normative sources: `vault/docs/technical_solution_storage_gateway.md` and `C:\.projects\exocortex\.docs`
+Implementation root: the [Saturn repository](../..).
+
+Normative sources: the [storage-gateway specification](../technical_solution_storage_gateway.md)
+and workspace-wide [Part 00](../../../.docs/PART_00_SYSTEM_UNIFICATION_SPECIFICATION.md)
 
 The current physical storage contract and its migration/rollback gates are
 defined in `STORAGE_ROOT_LAYOUT_V2.md`. It supersedes legacy `gateway/drive`
@@ -52,7 +54,7 @@ A stage may become `COMPLETE` only when:
 **Entry state**
 
 - technical solution and root `.docs` are available;
-- the editable boundary is limited to `vault`;
+- the editable boundary is limited to the Saturn repository;
 - DEV Storage Box access is available or can be qualified in Stage 1.
 
 **Work**
@@ -513,7 +515,7 @@ Status: `COMPLETE_WITH_ISOLATED_DECISIONS` — see
 **Work**
 
 - align Storage, Shared, Trash, public Share and public/in-house Drop with the
-  new Saturn templates and the Part I interaction contract;
+  new Saturn templates and the Part 01 interaction contract;
 - add sortable collections, URL breadcrumbs, full context operations,
   responsive public states and owner folder ZIP download;
 - replace direct public Drop streaming with the bounded local buffer, durable

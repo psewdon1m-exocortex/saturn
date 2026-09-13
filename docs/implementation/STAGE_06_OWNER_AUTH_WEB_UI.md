@@ -1,5 +1,7 @@
 # Stage 6 — Authenticated owner Web UI
 
+This document specializes [Part 01 — interface and interaction unification](../../../.docs/PART_01_INTERFACE_AND_INTERACTION_UNIFICATION.md); that central contract remains authoritative.
+
 Status: `COMPLETE`
 
 ## Purpose

@@ -1,5 +1,7 @@
 # Stage 13 — Production hardening, deployment and exit
 
+This document specializes [Part 04 — bootstrap and deployment](../../../.docs/PART_04_BOOTSTRAP_AND_DEPLOYMENT.md); that central contract remains authoritative.
+
 Status: `BLOCKED` on external production inputs  
 Implementation result: `READY_FOR_PRODUCTION_ACTIVATION`
 

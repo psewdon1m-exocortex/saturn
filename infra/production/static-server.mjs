@@ -27,7 +27,7 @@ const contentTypes = new Map([
   [".woff2", "font/woff2"],
 ]);
 
-const spaRoute = /^(?:\/$|\/files(?:\/.*)?$|\/inbox(?:\/.*)?$|\/shared(?:\/.*)?$|\/trash(?:\/.*)?$|\/settings(?:\/.*)?$|\/synchronization(?:\/.*)?$|\/drop$|\/s\/[A-Za-z0-9_-]+$)/;
+const spaRoute = /^(?:\/$|\/dashboard$|\/files(?:\/.*)?$|\/inbox(?:\/.*)?$|\/shared(?:\/.*)?$|\/trash(?:\/.*)?$|\/settings(?:\/.*)?$|\/synchronization(?:\/.*)?$|\/drop$|\/s\/[A-Za-z0-9_-]+$)/;
 const blockedTopLevel = new Set(["artifacts", "data", "docs", "spool"]);
 
 function securityHeaders(response) {

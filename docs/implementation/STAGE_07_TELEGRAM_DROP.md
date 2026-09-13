@@ -1,5 +1,7 @@
 # Stage 7 — Gryphon-mediated Telegram Drop access
 
+This document specializes [Part 10 — service agents UI and operator workflows](../../../.docs/PART_10_SERVICE_AGENTS_UI_AND_OPERATOR_WORKFLOWS.md); that central contract remains authoritative.
+
 Status: `SUPERSEDED AND MIGRATED`
 
 Saturn still owns Drop codes, upload-only sessions, quotas, revocation and the durable upload pipeline. Gryphon now owns every Telegram-specific concern: bot tokens, webhook registration, update deduplication, callback data, outbound delivery and service-scoped identity binding.

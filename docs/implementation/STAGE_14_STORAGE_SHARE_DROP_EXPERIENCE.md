@@ -9,10 +9,10 @@ transfer state correspond to authoritative backend state.
 
 ## Source Of Truth
 
-- `C:/.projects/exocortex/.docs/PART_I_INTERFACE_AND_INTERACTION_UNIFICATION.md`
-- the applicable security, observability, backup, update and Telegram rules in
-  `C:/.projects/exocortex/.docs/`
-- the Saturn templates in `C:/.projects/exocortex/saturn/.src/`
+- [Part 01](../../../.docs/PART_01_INTERFACE_AND_INTERACTION_UNIFICATION.md)
+- the applicable security, observability, backup, update and Telegram rules
+  indexed by [Part 00](../../../.docs/PART_00_SYSTEM_UNIFICATION_SPECIFICATION.md)
+- the [Saturn templates](../../.src/)
 - the operator requirements recorded in the task that introduced this stage
 
 The root specification is read-only. This document records how it is applied
@@ -20,38 +20,38 @@ inside Saturn.
 
 ## Stage 14.1 — Contract And Compatibility Baseline
 
-### Entry state
+### 14.1 Entry state
 
 - owner authentication, file CRUD, reversible trash, public shares and the
   existing direct-to-storage Drop upload path pass their current tests;
 - resource IDs and protected-root rules are already authoritative;
 - the DEV Storage Box is reachable through the Gateway.
 
-### Work
+### 14.1 Work
 
 - record material differences before changing them;
 - define UI states, API shapes, database migrations and rollback boundaries;
 - preserve all existing storage bytes and stable resource IDs.
 
-### Exit state
+### 14.1 Exit state
 
 - every remaining material difference is either explicitly decided or isolated
   so independent work cannot prejudice the decision;
 - this stage document and the architecture decision log agree.
 
-### Verification gate
+### 14.1 Verification gate
 
 - documentation review;
 - clean type check and existing test baseline.
 
 ## Stage 14.2 — Owner Storage Workspace
 
-### Entry state
+### 14.2 Entry state
 
 - folder navigation resolves stable resource IDs from URL path segments;
 - file and folder operations work through authenticated Gateway APIs.
 
-### Work
+### 14.2 Work
 
 - sortable `Name`, `Modified` and `Size` headings with visible direction;
 - clickable breadcrumbs and refresh-safe canonical folder URLs;
@@ -63,14 +63,14 @@ inside Saturn.
 - cached/indexed folder size only; unknown size renders as an em dash;
 - share creation and share-status details from the selected resource.
 
-### Exit state
+### 14.2 Exit state
 
 - all menu actions call the same Gateway service operations as the visible
   toolbar;
 - protected roots cannot be moved or deleted from any UI path;
 - no recursive SFTP size walk is triggered by listing a folder.
 
-### Verification gate
+### 14.2 Verification gate
 
 - component/type tests for sorting, menu enablement and path generation;
 - API integration tests for copy, cut/move, trash, rename and share;
@@ -78,14 +78,14 @@ inside Saturn.
 
 ## Stage 14.3 — Owner Shared, Public Share And Trash
 
-### Entry state
+### 14.3 Entry state
 
 - active share records contain policy and counters but store capability tokens
   only as non-reversible hashes;
 - public folder browsing and bounded ZIP generation already exist;
 - trash is reversible.
 
-### Work
+### 14.3 Work
 
 - searchable active owner share list with two rankings, expandable policy details,
   copy action for a currently available capability and immediate revoke from
@@ -97,7 +97,7 @@ inside Saturn.
 - expired/revoked/exhausted capabilities render a neutral not-found state;
 - Trash uses the same collection hierarchy, sorting and selection mechanics.
 
-### Exit state
+### 14.3 Exit state
 
 - public folder descendants cannot escape the shared root;
 - every content response still claims a download session exactly once;
@@ -106,7 +106,7 @@ inside Saturn.
 - revoke remains protected by the owner session and CSRF validation;
 - old capability URLs are never reconstructed from hashes.
 
-### Verification gate
+### 14.3 Verification gate
 
 - share service/controller tests for locked, open, expired, descendant and
   download-limit cases;
@@ -144,14 +144,14 @@ inside Saturn.
 
 ## Stage 14.4 — Buffered Public And In-House Drop
 
-### Entry state
+### 14.4 Entry state
 
 - a Drop code creates an upload-only channel and each client receives its own
   scoped session credentials;
 - the existing implementation streams upload chunks directly to SFTP;
 - no local durable queue survives a page refresh.
 
-### Work
+### 14.4 Work
 
 - code admission and channel/session lifetime share one absolute timestamp 30
   minutes after issue; aggregate reservation limit: 100 GiB;
@@ -227,7 +227,7 @@ inside Saturn.
   preserve the same reading order as breadcrumb, search, collection and upload
   panel without removing any file-manager capability.
 
-### Exit state
+### 14.4 Exit state
 
 - no public Drop request receives Storage Box credentials or lists storage;
 - API restart and page refresh recover durable upload status;
@@ -235,7 +235,7 @@ inside Saturn.
   checksum verification;
 - buffer exhaustion fails closed before consuming unsafe disk space.
 
-### Verification gate
+### 14.4 Verification gate
 
 - unit tests for quota reservation, offsets, watermarks, cancellation and
   state transitions;
@@ -246,12 +246,12 @@ inside Saturn.
 
 ## Stage 14.5 — Settings Completion
 
-### Entry state
+### 14.5 Entry state
 
 - Appearance, Security, Backup, Updates and Logs cards exist;
 - Kernel URL/token and basic Telegram/device controls exist.
 
-### Work
+### 14.5 Work
 
 - align all mandatory groups with the unification specification;
 - expose Telegram configuration/binding state without returning secrets;
@@ -260,13 +260,13 @@ inside Saturn.
   responsibilities already exist in Saturn;
 - keep unavailable backup/update actions explicitly unavailable with a reason.
 
-### Exit state
+### 14.5 Exit state
 
 - controls represent authoritative service state after reload;
 - secret inputs are write-only and always reopen empty;
 - destructive mutations require recent owner proof and confirmation.
 
-### Verification gate
+### 14.5 Verification gate
 
 - Settings API and permission tests;
 - keyboard/narrow-screen/accessibility browser pass;
@@ -274,11 +274,11 @@ inside Saturn.
 
 ## Stage 14.6 — Release Gate
 
-### Entry state
+### 14.6 Entry state
 
 - stages 14.1–14.5 pass their local gates.
 
-### Exit state
+### 14.6 Exit state
 
 - database migrations apply forward on a copy of DEV state;
 - package tests, lint, type check and production build pass;

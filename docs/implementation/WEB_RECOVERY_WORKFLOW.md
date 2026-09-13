@@ -1,5 +1,7 @@
 # Web backup and recovery workflow
 
+This document specializes [Part 03 — backup and recovery](../../../.docs/PART_03_BACKUP_AND_RECOVERY.md); that central contract remains authoritative.
+
 Status: `COMPLETE`
 Verified: 2026-09-03
 Surface: Settings → Backup

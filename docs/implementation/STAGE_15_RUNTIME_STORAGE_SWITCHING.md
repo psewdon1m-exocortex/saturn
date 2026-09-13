@@ -1,5 +1,7 @@
 # Stage 15 — Runtime storage switching
 
+This document specializes [Part 04 — bootstrap and deployment](../../../.docs/PART_04_BOOTSTRAP_AND_DEPLOYMENT.md); that central contract remains authoritative.
+
 Status: `COMPLETE_LOCAL`
 
 ## Objective

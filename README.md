@@ -1,5 +1,21 @@
 # Saturn
 
+> Documentation authority: the workspace-wide [Part 00](../.docs/PART_00_SYSTEM_UNIFICATION_SPECIFICATION.md)
+> and its applicable Parts are normative. This repository documents
+> Saturn-specific details only; a conflict is corrected here and a material
+> implementation difference follows the Part 00 divergence protocol.
+
+## Required pre-push gate
+
+After native checks and before every push, complete the checks required by
+[Part 06 — Unified acceptance checklist](../.docs/PART_06_UNIFIED_ACCEPTANCE_CHECKLIST.md) and run the versioned policy in
+`.github/pre-push-gate.json` through `scripts/pre-push-gate.py`. CI repeats the
+gate on `main`. Security is always reviewed; backup/restore, updater, embedded
+Documentation and affected technical docs are reviewed when relevant. Apply
+SEO/GEO checks to intentionally public/indexable surfaces and concealment,
+crawler and probe-resistance checks to private or authenticated surfaces.
+Every area requires `PASS` evidence or a reasoned `N/A`.
+
 Saturn is the Exocortex storage gateway and operator-facing file service. The
 implementation entry point is [docs/implementation/README.md](docs/implementation/README.md);
 the complete target architecture is documented in
@@ -38,7 +54,7 @@ Production releases are created only by tags matching
 versioned OCI repositories are `saturn-app` and `saturn-web`, and its
 installation bundle is `saturn-0.1.12.zip`. Legacy unscoped tags such as
 `v0.0.1` run verification only and cannot publish a Saturn release. Publish
-the pinned `updater-v0.4.3` dependency before the Saturn tag. The existing
+the pinned `updater-v0.4.4` dependency before the Saturn tag. The existing
 `saturn-v0.1.0` through `saturn-v0.1.11` releases remain immutable.
 
 ## Production installation
@@ -48,8 +64,11 @@ Each service keeps its own bootstrap and environment. For Saturn:
 ```sh
 curl -fsSL https://github.com/psewdon1m-exocortex/saturn/releases/download/saturn-v0.1.12/bootstrap.sh | sudo sh
 sudoedit /etc/vault/.env.production
+sudo chmod 600 /etc/vault/.env.production
 sudo vaultctl validate
 sudo vaultctl install
+sudo vaultctl status
+curl -fsS http://127.0.0.1:3000/health/ready
 sudo vaultctl bootstrap-storage
 sudo vaultctl smoke
 ```

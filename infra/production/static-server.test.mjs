@@ -19,11 +19,13 @@ test("serves only the Saturn SPA allow-list and immutable assets", async () => {
     const address = server.address();
     assert(address !== null && typeof address === "object");
     const origin = `http://127.0.0.1:${String(address.port)}`;
-    const spa = await fetch(`${origin}/files/archive/photos`);
-    assert.equal(spa.status, 200);
-    assert.equal(await spa.text(), "saturn-index");
-    assert.equal(spa.headers.get("cache-control"), "private, no-store");
-    assert.match(spa.headers.get("content-security-policy") ?? "", /frame-ancestors 'none'/);
+    for (const route of ["/dashboard", "/files/archive/photos"]) {
+      const spa = await fetch(`${origin}${route}`);
+      assert.equal(spa.status, 200);
+      assert.equal(await spa.text(), "saturn-index");
+      assert.equal(spa.headers.get("cache-control"), "private, no-store");
+      assert.match(spa.headers.get("content-security-policy") ?? "", /frame-ancestors 'none'/);
+    }
     const asset = await fetch(`${origin}/assets/app-abc.js`);
     assert.equal(asset.status, 200);
     assert.match(asset.headers.get("cache-control") ?? "", /immutable/);

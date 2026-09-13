@@ -1,7 +1,9 @@
 # Existing baseline
 
+This document specializes [Part 00 — system unification specification](../../../.docs/PART_00_SYSTEM_UNIFICATION_SPECIFICATION.md); that central contract remains authoritative.
+
 Recorded: 2026-08-25  
-Scope: `C:\.projects\exocortex\saturn`
+Scope: the Saturn repository root (`../..` from this document).
 
 ## Repository state
 
