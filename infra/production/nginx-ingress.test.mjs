@@ -62,6 +62,15 @@ test("installer prepares independent runtime secrets and a dedicated SFTP key", 
   assert.match(installer, /refresh_runtime_secrets/);
   assert.match(installer, /sync_gryphon_validation_secret/);
   assert.match(installer, /install -o root -g root -m 0600 "\$source_file" "\$GRYPHON_VALIDATION_SECRET"/);
+  assert.match(installer, /for service in updater neptune gryphon/);
+  assert.match(installer, /release-trust\/\$service\.pem/);
+  assert.match(bootstrap, /for service in updater neptune gryphon/);
+  assert.match(bootstrap, /release-trust\/\$service\.pem/);
+  assert.match(installer, /bootstrap-credentials\/saturn\.env/);
+  assert.match(installer, /stat -c '%u:%a'/);
+  assert.match(installer, /rm -f "\$credential_file"/);
+  assert.doesNotMatch(installer, /\/opt\/exocortex\/kernel\/\.env/);
+  assert.doesNotMatch(installer, /copy_local_kernel_bootstrap/);
   assert.match(compose, /^  secret-runtime-init:$/m);
   assert.match(compose, /runtime_secrets:\/run\/secrets:ro/);
   assert.match(compose, /^  runtime_secrets:$/m);
@@ -79,10 +88,14 @@ test("verified bootstrap writes release locks and can refresh a prepared 0.1.4 b
 });
 
 test("clean-host bootstrap pins both Saturn public release keys", () => {
-  assert.match(bootstrap, /saturn-ed25519\.pem/);
-  assert.match(bootstrap, /release_base\/saturn\.pem/);
-  assert.match(bootstrap, /bootstrap_trust=true/);
+  assert.match(bootstrap, /SATURN_EXACT_RELEASE_VERSION="__SATURN_BOOTSTRAP_RELEASE_VERSION__"/);
+  assert.match(bootstrap, /SATURN_ED25519_PUBLIC_KEY_B64="__SATURN_BOOTSTRAP_ED25519_PUBLIC_KEY_BASE64__"/);
+  assert.match(bootstrap, /SATURN_RSA_PUBLIC_KEY_B64="__SATURN_BOOTSTRAP_RSA_PUBLIC_KEY_BASE64__"/);
+  assert.doesNotMatch(bootstrap, /api\.github\.com\/repos/);
+  assert.doesNotMatch(bootstrap, /release_base\/saturn\.pem/);
+  assert.match(bootstrap, /installed Saturn Ed25519 release key differs from this release/);
+  assert.match(bootstrap, /installed Saturn RSA release key differs from this release/);
   assert.match(releaseWorkflow, /openssl pkey .*saturn-ed25519\.pem/);
   assert.match(releaseWorkflow, /--export-public-key artifacts\/release\/saturn\.pem/);
-  assert.match(releaseWorkflow, /bootstrap\.sh artifacts\/release\/bootstrap\.sh/);
+  assert.match(releaseWorkflow, /build-bootstrap\.mjs/);
 });

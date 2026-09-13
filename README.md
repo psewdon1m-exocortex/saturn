@@ -34,19 +34,19 @@ release can publish artifacts.
 ## Release identity
 
 Production releases are created only by tags matching
-`saturn-vMAJOR.MINOR.PATCH`. The current fix identity is `saturn-v0.1.7`; its
+`saturn-vMAJOR.MINOR.PATCH`. The current fix identity is `saturn-v0.1.8`; its
 versioned OCI repositories are `saturn-app` and `saturn-web`, and its
-installation bundle is `saturn-0.1.7.zip`. Legacy unscoped tags such as
+installation bundle is `saturn-0.1.8.zip`. Legacy unscoped tags such as
 `v0.0.1` run verification only and cannot publish a Saturn release. Publish
-the pinned `updater-v0.4.2` dependency before the Saturn tag. The existing
-`saturn-v0.1.0` through `saturn-v0.1.6` releases remain immutable.
+the pinned `updater-v0.4.3` dependency before the Saturn tag. The existing
+`saturn-v0.1.0` through `saturn-v0.1.7` releases remain immutable.
 
 ## Production installation
 
 Each service keeps its own bootstrap and environment. For Saturn:
 
 ```sh
-curl -fsSL https://github.com/psewdon1m-exocortex/saturn/releases/download/saturn-v0.1.7/bootstrap.sh | sudo sh
+curl -fsSL https://github.com/psewdon1m-exocortex/saturn/releases/download/saturn-v0.1.8/bootstrap.sh | sudo sh
 sudoedit /etc/vault/.env.production
 sudo vaultctl validate
 sudo vaultctl install
@@ -54,12 +54,12 @@ sudo vaultctl bootstrap-storage
 sudo vaultctl smoke
 ```
 
-If `0.1.4`, `0.1.5` or `0.1.6` was prepared but Saturn has not been started yet,
+If `0.1.4`, `0.1.5`, `0.1.6` or `0.1.7` was prepared but Saturn has not been started yet,
 refresh the prepared bundle without deleting the existing configuration. This
 also repairs the earlier Linux file-secret validation failures:
 
 ```sh
-curl -fsSL https://github.com/psewdon1m-exocortex/saturn/releases/download/saturn-v0.1.7/bootstrap.sh | sudo sh -s -- --refresh
+curl -fsSL https://github.com/psewdon1m-exocortex/saturn/releases/download/saturn-v0.1.8/bootstrap.sh | sudo sh -s -- --refresh
 ```
 
 Edit only these values in `/etc/vault/.env.production`:
@@ -87,6 +87,13 @@ key is never used for SFTP. `vaultctl validate` materializes `OWNER_ACCESS_KEY` 
 mode-`0600` Compose secret without exposing the plaintext value to application
 containers. DEV identity and second-copy evidence are not runtime configuration
 and do not block installation.
+
+On a same-host deployment, Kernel creates a one-time root-only
+`/etc/exocortex/bootstrap-credentials/saturn.env`. Saturn imports and deletes
+that file during prepare/refresh; it never reads `/opt/exocortex/kernel/.env`.
+For an already installed Kernel, run `sudo kernel-install credentials` before
+the Saturn bootstrap. If Kernel is on another host, fill `KERNEL_URL` and
+`KERNEL_SERVICE_TOKEN` manually in Saturn's own `.env.production`.
 
 Saturn's private signing keys remain only in GitHub Secrets and are exposed only to the protected
 release job. CI derives and embeds the public counterparts in that versioned

@@ -114,6 +114,15 @@ jobs:
           test -n "$RELEASE_SIGNING_PRIVATE_KEY"
           install -m 0600 /dev/null "$RUNNER_TEMP/saturn-release-key.pem"
           printf '%s' "$RELEASE_SIGNING_PRIVATE_KEY" > "$RUNNER_TEMP/saturn-release-key.pem"
+          mkdir -p artifacts/release
+          openssl pkey -in "$RUNNER_TEMP/saturn-release-key.pem" -pubout -out artifacts/release/saturn-ed25519.pem
+          node scripts/sign-release.mjs --export-public-key artifacts/release/saturn.pem
+          node scripts/build-bootstrap.mjs \
+            infra/production/bootstrap.sh \
+            artifacts/release/saturn-ed25519.pem \
+            artifacts/release/saturn.pem \
+            artifacts/release/bootstrap.sh \
+            "${{ steps.identity.outputs.version }}"
           updater_version="$(tr -d '[:space:]' < .release/updater.version)"
           UPDATER_BUNDLE_DIR="$PWD/.release-inputs/updater" \
           UPDATER_BUNDLE_VERSION="$updater_version" \
@@ -124,9 +133,13 @@ jobs:
             "${{ steps.identity.outputs.image_root }}/saturn-web@${{ steps.web.outputs.digest }}" \
             "$RUNNER_TEMP/saturn-release-key.pem" \
             artifacts/release
-          openssl pkey -in "$RUNNER_TEMP/saturn-release-key.pem" -pubout -out artifacts/release/saturn-ed25519.pem
-          node scripts/sign-release.mjs --export-public-key artifacts/release/saturn.pem
-          install -m 0755 infra/production/bootstrap.sh artifacts/release/bootstrap.sh
+          node scripts/release-bundle.mjs verify \
+            artifacts/release/release-manifest.json \
+            artifacts/release/saturn-ed25519.pem \
+            "artifacts/release/saturn-${{ steps.identity.outputs.version }}.zip" \
+            "artifacts/release/saturn-${{ steps.identity.outputs.version }}.sbom.json"
+          sh -n artifacts/release/bootstrap.sh
+          if grep -q '__SATURN_BOOTSTRAP_' artifacts/release/bootstrap.sh; then exit 1; fi
           rm -f "$RUNNER_TEMP/saturn-release-key.pem"
       - name: Promote tested digests to version tags
         shell: bash

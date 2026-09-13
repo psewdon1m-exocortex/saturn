@@ -20,11 +20,6 @@ get_config() {
   sed -n "s/^$1=//p" "$CONFIG_FILE" | tail -n 1
 }
 
-get_config_from() {
-  source_file=$1; source_key=$2
-  sed -n "s/^$source_key=//p" "$source_file" | tail -n 1
-}
-
 set_config() {
   key=$1; value=$2; temporary="$CONFIG_FILE.tmp"
   awk -v key="$key" -v value="$value" 'BEGIN { found=0 } index($0,key "=")==1 { print key "=" value; found=1; next } { print } END { if (!found) print key "=" value }' "$CONFIG_FILE" >"$temporary"
@@ -140,21 +135,30 @@ prepare_runtime_secrets() {
   sync_gryphon_validation_secret
 }
 
-copy_local_kernel_bootstrap() {
-  kernel_env=/opt/exocortex/kernel/.env
-  [ -r "$kernel_env" ] || return 0
+import_kernel_bootstrap_credentials() {
+  credential_file=/etc/exocortex/bootstrap-credentials/saturn.env
   current_url=$(get_config KERNEL_URL)
   current_token=$(get_config KERNEL_SERVICE_TOKEN)
+  needs_url=false; needs_token=false
   case "$current_url" in ""|*CHANGE_ME*|*replace-me*|*.example.*)
-    local_url=$(get_config_from "$kernel_env" KERNEL_URL)
-    [ -n "$local_url" ] && set_config KERNEL_URL "$local_url"
-    ;;
+    needs_url=true ;;
   esac
   case "$current_token" in ""|CHANGE_ME*|change-*|replace-*)
-    local_token=$(get_config_from "$kernel_env" KERNEL_SERVICE_TOKEN)
-    [ -n "$local_token" ] && set_config KERNEL_SERVICE_TOKEN "$local_token"
-    ;;
+    needs_token=true ;;
   esac
+  [ "$needs_url" = true ] || [ "$needs_token" = true ] || return 0
+  [ -f "$credential_file" ] && [ ! -L "$credential_file" ] || return 0
+  [ "$(stat -c '%u:%a' "$credential_file" 2>/dev/null)" = "0:600" ] || die "$credential_file must be root-owned with mode 0600"
+  handoff_url=$(sed -n 's/^KERNEL_URL=//p' "$credential_file" | tail -n 1)
+  handoff_token=$(sed -n 's/^KERNEL_SERVICE_TOKEN=//p' "$credential_file" | tail -n 1)
+  case "$handoff_url" in https://*.*) ;; *) die "Kernel bootstrap credential has an invalid URL" ;; esac
+  case "$handoff_url" in *CHANGE_ME*|*.example.*) die "Kernel bootstrap credential still contains an example URL" ;; esac
+  [ "${#handoff_token}" -ge 24 ] || die "Kernel bootstrap credential has an invalid token"
+  case "$handoff_token" in CHANGE_ME*|change-*|replace-*) die "Kernel bootstrap credential still contains a placeholder token" ;; esac
+  [ "$needs_url" = false ] || set_config KERNEL_URL "$handoff_url"
+  [ "$needs_token" = false ] || set_config KERNEL_SERVICE_TOKEN "$handoff_token"
+  rm -f "$credential_file"
+  unset handoff_token
 }
 
 prepare_agent_mounts() {
@@ -191,6 +195,9 @@ verify_updater_bundle() {
   [ -x "$UPDATER_BUNDLE/install.sh" ] || die "verified release is missing updater/install.sh"
   [ -x "$UPDATER_BUNDLE/updater-linux-amd64" ] || die "verified release is missing updater/updater-linux-amd64"
   [ -f "$UPDATER_BUNDLE/systemd/updater.service" ] || die "verified release is missing updater/systemd/updater.service"
+  for service in updater neptune gryphon; do
+    [ -f "$UPDATER_BUNDLE/release-trust/$service.pem" ] || die "verified release is missing updater/release-trust/$service.pem"
+  done
 }
 
 prepare() {
@@ -202,7 +209,7 @@ prepare() {
   apply_release_lock
   prepare_agent_mounts
   prepare_generated_secrets
-  copy_local_kernel_bootstrap
+  import_kernel_bootstrap_credentials
   printf '%s\n' "Prepared $CONFIG_FILE"
   printf '%s\n' "Runtime secrets, a dedicated SFTP key, Updater token and socket groups were prepared automatically."
   printf '%s\n' "Show the SFTP public key with: vaultctl storage-public-key"
@@ -218,7 +225,7 @@ refresh() {
   apply_release_lock
   prepare_agent_mounts
   prepare_generated_secrets
-  copy_local_kernel_bootstrap
+  import_kernel_bootstrap_credentials
   printf '%s\n' "Refreshed the prepared Saturn release and preserved $CONFIG_FILE."
   printf '%s\n' "Deprecated DEV/second-copy fields were removed; set OWNER_ACCESS_KEY, then run: vaultctl validate && vaultctl install"
 }
@@ -245,7 +252,6 @@ install_release() {
   [ -f "$CONFIG_FILE" ] || die "missing $CONFIG_FILE; run the signed bootstrap first"
   verify_updater_bundle
   prepare_agent_mounts
-  copy_local_kernel_bootstrap
   validate
   "$UPDATER_BUNDLE/install.sh" saturn "$CONFIG_FILE" "$UPDATER_BUNDLE/updater-linux-amd64"
   set -a; . "$CONFIG_FILE"; set +a

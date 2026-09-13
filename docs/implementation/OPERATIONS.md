@@ -38,8 +38,10 @@ pinned in `.release/updater.version`; CI refuses to build with another version.
    and socket group IDs, and preserves existing values. If
    `/root/saturn-storage-ed25519` already contains a dedicated SFTP key, it is
    imported; otherwise a new key is generated. Release-signing keys are never
-   used for storage. If Kernel is installed locally, its URL and service token
-   are copied too.
+   used for storage. Kernel's installer supplies its URL and service token in a
+   one-time root-only Saturn handoff. Saturn consumes and deletes that file; it
+   never reads Kernel's `.env`. Run `kernel-install credentials` first when
+   Kernel was installed before this handoff contract.
 2. Confirm the bootstrap reported the verified manifest and immutable image
    digests and that neither trust file conflicts with an existing key.
 3. Edit only `VAULT_DOMAIN`, `PUBLIC_ORIGIN`, `OWNER_ACCESS_KEY`, `KERNEL_URL`,
@@ -76,15 +78,15 @@ pinned in `.release/updater.version`; CI refuses to build with another version.
    real data. Independent second-copy delivery and restore evidence remain a
    separate disaster-recovery procedure; they are not Saturn runtime variables.
 
-For a host where `0.1.4`, `0.1.5` or `0.1.6` was only prepared and not started,
-run the `0.1.7` bootstrap with `--refresh`. It preserves
+For a host where `0.1.4`, `0.1.5`, `0.1.6` or `0.1.7` was only prepared and not started,
+run the `0.1.8` bootstrap with `--refresh`. It preserves
 `/etc/vault/.env.production`, removes the obsolete `VAULT_DEV_STORAGE_*` and
 `VAULT_SECOND_COPY_ID` entries, repairs the absolute runtime env path, writes
 the new release lock, and preserves the old bundle under
 `/opt/vault.previous-<timestamp>`:
 
 ```sh
-curl -fsSL https://github.com/psewdon1m-exocortex/saturn/releases/download/saturn-v0.1.7/bootstrap.sh | sudo sh -s -- --refresh
+curl -fsSL https://github.com/psewdon1m-exocortex/saturn/releases/download/saturn-v0.1.8/bootstrap.sh | sudo sh -s -- --refresh
 ```
 
 `READINESS_TIMEOUT_MS` defaults to 3000 ms and bounds database, storage and
