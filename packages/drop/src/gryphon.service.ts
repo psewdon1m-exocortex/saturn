@@ -3,6 +3,12 @@ import http from "node:http";
 import type { DropNotificationSink, TelegramIdentity } from "./types.js";
 import type { DropService } from "./drop.service.js";
 
+export const SATURN_COMMAND_CATALOG = [
+  { name: "drop", description: "Create a Drop Point code", adapterCommand: "drop" },
+  { name: "drop_status", description: "Show Drop Point status", adapterCommand: "status" },
+  { name: "drop_revoke", description: "Revoke Drop Point access", adapterCommand: "revoke" },
+] as const;
+
 export interface GryphonCommandEnvelope {
   readonly schema: "exocortex.telegram.command.v1";
   readonly eventId: string;
@@ -45,10 +51,17 @@ function identity(input: GryphonCommandEnvelope): TelegramIdentity {
   };
 }
 
+function validateTarget(input: Readonly<{ schema: string; serviceId: string }>): void {
+  if (input.schema !== "exocortex.telegram.command.v1" || input.serviceId !== "saturn") {
+    throw new Error("Gryphon command targets another service");
+  }
+}
+
 export class GryphonCommandService {
   constructor(private readonly drop: DropService) {}
 
   async handle(input: GryphonCommandEnvelope): Promise<GryphonCommandResponse> {
+    validateTarget(input);
     const actor = identity(input);
     if (input.command === "start" || input.command === "menu") {
       return response("Saturn is ready. Choose an action.", [[
@@ -65,7 +78,7 @@ export class GryphonCommandService {
       return response(`Saturn Drop access revoked: ${String(revoked.sessions)} session(s), ${String(revoked.challenges)} code(s).`);
     }
     if (input.command === "status") return response("Saturn status: Gryphon identity is linked; Drop access is available.");
-    return response("Saturn commands: drop, revoke, status.");
+    return response("Saturn commands: /drop, /drop_status, /drop_revoke.");
   }
 }
 

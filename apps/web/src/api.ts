@@ -125,7 +125,6 @@ export const api = {
   rollbackSaturnUpdate: (id: string) => request<{ id: string; state: string }>(`/operator/updates/jobs/${encodeURIComponent(id)}/rollback`, { method: "POST" }),
   installUpdater: () => request<{ id: string; state: string }>("/operator/updates/updater/install", { method: "POST" }),
   initializeGryphon: () => request<{ id: string; state: string }>("/operator/gryphon/initialize", { method: "POST" }),
-  registerGryphonBot: (alias: string, bot_token: string) => request<{ id: string; state: string }>("/operator/gryphon/bots", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ alias, bot_token }) }),
   recoveryStatus: () => request<RecoveryStatus>("/operator/recovery"),
   neptuneStatus: () => request<NeptuneStatus>("/operator/neptune/status"),
   neptuneAvailability: () => request<NeptuneAvailability>("/operator/neptune/availability"),

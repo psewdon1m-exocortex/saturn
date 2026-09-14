@@ -1,7 +1,9 @@
 import fs from "node:fs";
 import { Body, ConflictException, Controller, Delete, Get, Inject, NotFoundException, Post, Put, UseFilters, UseGuards } from "@nestjs/common";
+import type { OnApplicationBootstrap, OnApplicationShutdown } from "@nestjs/common";
 import type { SaturnConfig } from "@saturn/config";
 import type { Database } from "@saturn/database";
+import { SATURN_COMMAND_CATALOG } from "@saturn/drop";
 import { z } from "zod";
 import { APP_CONFIG, DATABASE } from "./tokens.js";
 import { registeredOrigin } from "./kernel-discovery.js";
@@ -10,7 +12,6 @@ import { OwnerTokenGuard, RequireRecentReauthentication } from "./owner-token.gu
 import { SaturnApiExceptionFilter } from "./saturn-api-exception.filter.js";
 
 const installSchema = z.object({ version: z.string().regex(/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/) }).strict();
-const botSchema = z.object({ alias: z.string().regex(/^[a-z][a-z0-9-]{1,47}$/), bot_token: z.string().regex(/^\d{5,}:[A-Za-z0-9_-]{20,200}$/) }).strict();
 const statusSchema = z.object({
   schema: z.literal("exocortex.gryphon.service-status.v1"),
   version: z.string().min(1),
@@ -18,6 +19,7 @@ const statusSchema = z.object({
   state: z.string(),
   connected: z.boolean(),
   commandPrefix: z.string().nullable(),
+  commands: z.array(z.object({ name: z.string(), description: z.string(), adapterCommand: z.string() })).optional(),
   bot: z.object({ id: z.string(), alias: z.string(), username: z.string().optional(), state: z.string() }).nullable(),
   binding: z.object({ linkedAt: z.string() }).nullable(),
 });
@@ -30,24 +32,45 @@ const connectionSchema = z.object({ botId: z.string().min(1).max(200) }).strict(
 const challengeSchema = z.object({
   code: z.string().min(1), expiresAt: z.iso.datetime(), command: z.string().min(1), botUsername: z.string().optional(),
 });
+const catalogSchema = z.object({
+  schema: z.literal("exocortex.telegram.command-catalog.v1"),
+  serviceId: z.literal("saturn"),
+  commands: z.array(z.object({ name: z.string(), description: z.string(), adapterCommand: z.string() })),
+});
 type JsonObject = Record<string, unknown>;
+
+function commandCatalogIsCurrent(commands: z.infer<typeof statusSchema>["commands"]): boolean {
+  return commands !== undefined && commands.length === SATURN_COMMAND_CATALOG.length
+    && commands.every((item) => {
+      const expected = SATURN_COMMAND_CATALOG.find((candidate) => candidate.name === item.name);
+      return expected !== undefined && item.name === expected.name
+        && item.description === expected.description && item.adapterCommand === expected.adapterCommand;
+    });
+}
 
 @Controller("operator/gryphon")
 @UseGuards(OwnerTokenGuard)
 @UseFilters(SaturnApiExceptionFilter)
-export class GryphonOwnerController {
+export class GryphonOwnerController implements OnApplicationBootstrap, OnApplicationShutdown {
+  private commandCatalogTimer: ReturnType<typeof setInterval> | undefined;
+
   constructor(@Inject(APP_CONFIG) private readonly config: SaturnConfig, @Inject(DATABASE) private readonly database: Database) {}
+
+  onApplicationBootstrap(): void {
+    if (this.commandCatalogTimer !== undefined) return;
+    void this.reconcileCommandCatalog();
+    this.commandCatalogTimer = setInterval(() => { void this.reconcileCommandCatalog(); }, 60_000);
+    this.commandCatalogTimer.unref();
+  }
+
+  onApplicationShutdown(): void {
+    if (this.commandCatalogTimer !== undefined) clearInterval(this.commandCatalogTimer);
+    this.commandCatalogTimer = undefined;
+  }
 
   @Post("initialize")
   @RequireRecentReauthentication()
   initialize() { return updater("/v1/lifecycle/gryphon-initialization", { head_id: process.env.UPDATER_HEAD_ID?.trim() || "saturn" }); }
-
-  @Post("bots")
-  @RequireRecentReauthentication()
-  registerBot(@Body() body: unknown) {
-    const input = botSchema.parse(body);
-    return updater("/v1/lifecycle/gryphon-bot", { head_id: process.env.UPDATER_HEAD_ID?.trim() || "saturn", ...input });
-  }
 
   private request(method: string, route: string, body?: JsonObject) {
     const tokenFile = this.config.gryphon.serviceTokenFile;
@@ -62,11 +85,13 @@ export class GryphonOwnerController {
 
   @Put("connection") async connect(@Body() body: unknown) {
     const input = connectionSchema.parse(body);
-    return statusSchema.parse(await this.request("PUT", "/v1/service/connection", {
+    const status = statusSchema.parse(await this.request("PUT", "/v1/service/connection", {
       botId: input.botId,
       commandPrefix: "saturn",
       adapterUrl: new URL("/internal/gryphon/command", await registeredOrigin(this.database, this.config, "saturn")()).toString(),
     }));
+    await this.syncCommandCatalog().catch(() => undefined);
+    return status;
   }
 
   @Delete("connection") disconnect() { return this.request("DELETE", "/v1/service/connection"); }
@@ -74,6 +99,22 @@ export class GryphonOwnerController {
   @Post("link-challenge")
   @RequireRecentReauthentication()
   async linkChallenge() { return challengeSchema.parse(await this.request("POST", "/v1/service/link-challenges")); }
+
+  async syncCommandCatalog() {
+    return catalogSchema.parse(await this.request("PUT", "/v1/service/command-catalog", {
+      schema: "exocortex.telegram.command-catalog.v1",
+      commands: SATURN_COMMAND_CATALOG,
+    }));
+  }
+
+  private async reconcileCommandCatalog(): Promise<void> {
+    try {
+      const status = await this.status();
+      if (status.connected && !commandCatalogIsCurrent(status.commands)) await this.syncCommandCatalog();
+    } catch {
+      // Startup readiness is independent; the next interval retries reconciliation.
+    }
+  }
 
   @Post("update/check")
   async check() {

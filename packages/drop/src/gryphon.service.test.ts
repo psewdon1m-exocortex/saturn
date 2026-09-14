@@ -4,7 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { GryphonCommandService, GryphonNotificationSink, type GryphonCommandEnvelope } from "./gryphon.service.js";
-import type { DropService } from "./drop.service.js";
+import { DropService } from "./drop.service.js";
+import type { DropFileGateway, DropRepository } from "./types.js";
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -23,11 +24,26 @@ function envelope(command: string): GryphonCommandEnvelope {
 
 describe("Gryphon Saturn adapter", () => {
   it("issues a Drop code for the identity verified by Gryphon", async () => {
-    const issueDropCodeForGryphon = vi.fn().mockResolvedValue({ code: "ABCD-EFGH", expiresAt: new Date("2026-09-08T18:10:00.000Z") });
-    const service = new GryphonCommandService({ issueDropCodeForGryphon } as unknown as DropService);
+    const createDropChallenge = vi.fn().mockResolvedValue(true);
+    const drop = new DropService({
+      repository: { createDropChallenge } as unknown as DropRepository,
+      files: {} as DropFileGateway,
+      pepper: "drop-pepper-that-is-at-least-thirty-two-characters",
+      options: {
+        publicOrigin: "https://vault.test",
+        codeTtlMs: 1_800_000,
+        sessionTtlMs: 1_800_000,
+        maxFiles: 20,
+        maxBytes: 1024,
+        failureLimit: 5,
+        globalFailureLimit: 100,
+        failureWindowMs: 900_000,
+      },
+    });
+    const service = new GryphonCommandService(drop);
     const result = await service.handle(envelope("drop"));
-    expect(issueDropCodeForGryphon).toHaveBeenCalledWith({ userId: "42", chatId: "42" });
-    expect(result.actions[0]?.text).toContain("ABCD-EFGH");
+    expect(createDropChallenge).toHaveBeenCalledWith(expect.objectContaining({ identity: { userId: "42", chatId: "42" } }));
+    expect(result.actions[0]?.text).toMatch(/Saturn Drop code: [0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}/);
   });
 
   it("returns neutral callback actions for the Saturn menu", async () => {
@@ -48,6 +64,25 @@ describe("Gryphon Saturn adapter", () => {
     const result = await service.handle(envelope("binding_revoked"));
     expect(revokeGryphonAccess).toHaveBeenCalledWith({ userId: "42", chatId: "42" });
     expect(result.actions[0]?.text).toContain("2 session(s), 1 code(s)");
+  });
+
+  it("routes the global status and revoke adapter commands", async () => {
+    const revokeGryphonAccess = vi.fn().mockResolvedValue({ sessions: 1, challenges: 1 });
+    const service = new GryphonCommandService({ revokeGryphonAccess } as unknown as DropService);
+    expect((await service.handle(envelope("status"))).actions[0]?.text).toContain("Drop access is available");
+    expect((await service.handle(envelope("revoke"))).actions[0]?.text).toContain("1 session(s), 1 code(s)");
+    expect(revokeGryphonAccess).toHaveBeenCalledOnce();
+  });
+
+  it("does not execute Saturn actions for Chronos commands or envelopes", async () => {
+    const issueDropCodeForGryphon = vi.fn();
+    const revokeGryphonAccess = vi.fn();
+    const service = new GryphonCommandService({ issueDropCodeForGryphon, revokeGryphonAccess } as unknown as DropService);
+    expect((await service.handle(envelope("timer"))).actions[0]?.text).toContain("/drop");
+    await expect(service.handle({ ...envelope("drop"), serviceId: "chronos" } as unknown as GryphonCommandEnvelope))
+      .rejects.toThrow("another service");
+    expect(issueDropCodeForGryphon).not.toHaveBeenCalled();
+    expect(revokeGryphonAccess).not.toHaveBeenCalled();
   });
 
   it("uses the upload ID as the completion-notification idempotency key", async () => {

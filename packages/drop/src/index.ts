@@ -3,7 +3,7 @@ export { DropBufferStore } from "./buffer-store.js";
 export type { DropBufferCapacity, DropBufferStoreOptions } from "./buffer-store.js";
 export { DropDrainService } from "./drop-drain.service.js";
 export { PostgresDropRepository } from "./postgres-drop.repository.js";
-export { GryphonCommandService, GryphonNotificationSink } from "./gryphon.service.js";
+export { GryphonCommandService, GryphonNotificationSink, SATURN_COMMAND_CATALOG } from "./gryphon.service.js";
 export type { GryphonCommandEnvelope, GryphonCommandResponse } from "./gryphon.service.js";
 export type {
   DropCompletion,
