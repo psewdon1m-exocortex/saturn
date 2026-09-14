@@ -16,6 +16,16 @@ SEO/GEO checks to intentionally public/indexable surfaces and concealment,
 crawler and probe-resistance checks to private or authenticated surfaces.
 Every area requires `PASS` evidence or a reasoned `N/A`.
 
+## Required pre-release known-problem gate
+
+Before a service-qualified release is finalized, evaluate every active ID in
+[Part 12](https://github.com/psewdon1m-exocortex/general/blob/main/PART_12_KNOWN_DEPLOYMENT_AND_OPERATIONS_PROBLEMS.md) against the exact candidate. Retain
+`known-problems-report.json` bound to the service revision, qualified tag,
+immutable central-documentation revision and catalog digest. Missing, stale,
+failed, unknown or unsupported `N/A` evidence blocks publication. This is a
+normative release requirement; until the repository workflow generates and
+enforces that report, the release pipeline remains an implementation gap.
+
 Saturn is the Exocortex storage gateway and operator-facing file service. The
 implementation entry point is [docs/implementation/README.md](docs/implementation/README.md);
 the complete target architecture is documented in
@@ -86,7 +96,7 @@ Edit only these values in `/etc/vault/.env.production`:
 ```dotenv
 VAULT_DOMAIN=exocortex-saturn.shmoza.net
 PUBLIC_ORIGIN=https://exocortex-saturn.shmoza.net
-OWNER_ACCESS_KEY=<at-least-32-url-safe-characters>
+OWNER_ACCESS_KEY=<operator-chosen-value>
 KERNEL_URL=https://exocortex-kernel.shmoza.net
 KERNEL_SERVICE_TOKEN=<normally-imported-from-the-local-Kernel-install>
 STORAGE_HOST=<production-SFTP-host>
@@ -106,6 +116,17 @@ key is never used for SFTP. `vaultctl validate` materializes `OWNER_ACCESS_KEY` 
 mode-`0600` Compose secret without exposing the plaintext value to application
 containers. DEV identity and second-copy evidence are not runtime configuration
 and do not block installation.
+
+`OWNER_ACCESS_KEY` must be explicitly supplied but is otherwise an opaque exact
+value. It has no minimum/maximum length, required or forbidden character class,
+URL-safe/ASCII restriction, strength/entropy check or known/example/placeholder
+denylist. Bootstrap, login, rotation and restore must not trim, normalize, fold
+case or truncate it.
+
+> Implementation gap (2026-09-14): the current installer restricts the key to
+> at least 32 URL-safe characters, while the API and web rotation workflow
+> enforce a 32–512-character range. These `BST-13` behaviors are not normative
+> and block the next production release until code and tests are corrected.
 
 On a same-host deployment, Kernel creates a one-time root-only
 `/etc/exocortex/bootstrap-credentials/saturn.env`. Saturn imports and deletes

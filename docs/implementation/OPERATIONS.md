@@ -50,8 +50,12 @@ pinned in `.release/updater.version`; CI refuses to build with another version.
 3. Edit only `VAULT_DOMAIN`, `PUBLIC_ORIGIN`, `OWNER_ACCESS_KEY`, `KERNEL_URL`,
    an otherwise automatically imported `KERNEL_SERVICE_TOKEN`, and the five
    `STORAGE_*` values in `/etc/vault/.env.production`; keep mode `0600`.
-   `OWNER_ACCESS_KEY` is the value entered on the login page and must contain at
-   least 32 URL-safe characters. Set `VAULT_DOMAIN` and
+   `OWNER_ACCESS_KEY` is the exact opaque value entered on the login page. It
+   must be explicitly present but has no minimum/maximum length, character-set,
+   URL-safe/ASCII, strength/entropy or value-denylist policy and must not be
+   trimmed or normalized. The current 32-character/URL-safe validator is a
+   release-blocking `BST-13` implementation gap, not an operator requirement.
+   Set `VAULT_DOMAIN` and
    `PUBLIC_ORIGIN=https://VAULT_DOMAIN` to the same canonical hostname.
 4. Authorize the output of `vaultctl storage-public-key` once on the production
    Storage Box sub-account if that dedicated key was not already authorized.

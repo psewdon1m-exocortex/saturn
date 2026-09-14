@@ -24,7 +24,7 @@ keyboard-operable responsive Web UI.
 - `ANONYMOUS`: only health and login are available; protected responses are
   `no-store` and reveal no resource existence.
 - `AUTHENTICATING`: a bounded database-backed rate limit is checked before the
-  bootstrap access key is compared in constant time.
+  bootstrap access key is compared in constant time as an opaque exact value.
 - `AUTHENTICATED`: a random opaque token exists only in a server-side-hashed
   session row and an HttpOnly cookie; a separate CSRF cookie/header pair is
   required for browser mutations.
@@ -61,11 +61,19 @@ keyboard-operable responsive Web UI.
 
 ## Authentication decision
 
-The already provisioned 256-bit bootstrap access key is used as the initial and
-break-glass owner proof. It is exchanged for an opaque server-side session and
-is never put in local/session storage or a long-lived Authorization header.
-This is a high-entropy access key, not a human password; password hashing rules
-do not apply to its file-backed constant-time comparison.
+The already provisioned operator-chosen bootstrap Access Key is used as the
+initial and break-glass owner proof. It is exchanged for an opaque server-side
+session and is never put in local/session storage or a long-lived Authorization
+header. The Access Key itself has no minimum/maximum length, required or
+forbidden character class, URL-safe/ASCII restriction, strength/entropy check or
+known/example/placeholder denylist. Bootstrap, login, rotation and recovery
+must compare the exact value without trim, normalization, case folding or
+truncation. Verifier protection, constant-time comparison, rate limiting and
+session controls remain mandatory and do not create a composition policy.
+
+> Implementation gap (2026-09-14): the current installer, API and web rotation
+> controls still enforce the 32-character/URL-safe or 32–512-character rules.
+> They violate shared issue `BST-13` and must be removed before release.
 
 Passkey enrollment remains a supported hardening target once the canonical
 PROD RP ID/domain is provisioned. PROD is not exposed with real data until the

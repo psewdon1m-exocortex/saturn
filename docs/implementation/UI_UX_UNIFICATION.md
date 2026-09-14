@@ -96,7 +96,10 @@ fallbacks only.
 - Settings cards in Appearance, Security, Bot connection, Backup, Updates and
   Logs logical order, with no page-level save action.
 - Access Key only authentication. Credential fields always open empty and no
-  credential is persisted in browser storage.
+  credential is persisted in browser storage. The key is required only as an
+  explicitly supplied opaque exact value: the UI has no length, composition,
+  character-set, URL-safe/ASCII, strength/entropy or denylist validation and no
+  strength meter or composition hint; it never trims or normalizes the value.
 - Kernel reads expose only non-secret URL, public identity, reachability and
   revision. Token replacement is write-only and may activate only after remote
   validation; an unconfigured Kernel remains explicitly unavailable.
