@@ -945,6 +945,8 @@ button.share-status--active:active { transform: scale(.985); }
 .log-type--success { color: var(--success); }
 .log-type--failure { color: var(--danger); }
 .update-discovery { display: grid; gap: 14px; padding-top: 20px; }
+.update-discovery .local-agent-actions { display: grid; gap: 10px; }
+.update-discovery .local-agent-actions .button { justify-self: start; }
 .documentation-content { padding: 30px; display: grid; gap: 20px; }
 .documentation-content .universal-card__body p { color: var(--white-80); line-height: 1.6; }
 

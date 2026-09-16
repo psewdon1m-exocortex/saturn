@@ -58,7 +58,7 @@ DEV credentials are not substitutes for any item in this table.
    the sub-account.
 2. Fill only the domain/origin, owner Access Key, Kernel coordinates and
    production `STORAGE_*` inputs in `.env.production`; run `vaultctl validate`.
-3. After publishing the pinned `updater-v0.4.4`, push the protected
+3. After publishing the pinned `updater-v0.4.9`, push the protected
    `saturn-v0.1.12` tag. The release workflow builds candidate images once,
    tests those digests, signs the bundle and publishes only on pass. Unscoped
    `v*` tags run verification only and are not production-release identities.

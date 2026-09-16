@@ -16,7 +16,7 @@ unscoped `v*` tags. The release workflow accepts only protected
 SBOM/provenance, tests those exact digests, signs the release manifest and
 refuses replacement of existing version tags/releases. Publish the pinned
 Updater release first. Updater 0.4.0 introduced module-scoped Saturn tag
-resolution; the current coordinated deployment baseline requires 0.4.4 or
+resolution; the current coordinated deployment baseline requires 0.4.9 or
 newer.
 The Ed25519 and RSA private keys exist only in GitHub Secrets and are exposed
 only to the protected release-signing job. CI derives the public counterparts

@@ -6,7 +6,7 @@ import { DROP_POINT_RESOURCE_ID, SYNC_RESOURCE_ID } from "./types.js";
 const pdfJsMock = vi.hoisted(() => ({ getDocument: vi.fn() }));
 vi.mock("pdfjs-dist", () => ({ GlobalWorkerOptions: { workerSrc: "" }, getDocument: pdfJsMock.getDocument }));
 
-afterEach(() => { cleanup(); window.sessionStorage.clear(); Reflect.deleteProperty(window.navigator, "clipboard"); vi.restoreAllMocks(); vi.unstubAllGlobals(); window.history.replaceState({}, "", "/"); });
+afterEach(() => { cleanup(); window.localStorage.clear(); window.sessionStorage.clear(); Reflect.deleteProperty(window.navigator, "clipboard"); vi.restoreAllMocks(); vi.unstubAllGlobals(); window.history.replaceState({}, "", "/"); });
 
 function requestUrl(input: RequestInfo | URL): string {
   if (typeof input === "string") return input;
@@ -942,6 +942,52 @@ describe("owner Saturn UI", () => {
       });
       expect(jsonRequestBody(request?.[1]).settingsOrder).toEqual(["security", "appearance", "backup", "gryphon", "updates", "logs"]);
     });
+  });
+
+  it("discovers an available Saturn release inside the update dialog and exposes installation", async () => {
+    window.history.replaceState({}, "", "/settings");
+    const now = new Date().toISOString();
+    let installedVersion = "0.1.13";
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      void init;
+      const url = requestUrl(input);
+      if (url === "/api/v1/public/reachability") return json({ status: "ready" });
+      if (url.endsWith("/auth/session")) return json({ state: "authenticated" });
+      if (url.endsWith("/auth/preferences")) return json(preferences({ updatedAt: now }));
+      if (url.endsWith("/auth/reauthenticate")) return json({ state: "authenticated" }, 201);
+      if (url.endsWith("/operator/updates/check")) return json({ installed_version: "0.1.13", available_version: "0.1.14", update_available: true });
+      if (url.endsWith("/operator/updates/install")) return json({ id: "update-job-1", state: "REQUESTED" }, 201);
+      if (url.endsWith("/operator/updates/jobs/update-job-1")) { installedVersion = "0.1.14"; return json({ id: "update-job-1", state: "COMPLETED", rollback_available: true }); }
+      if (url.endsWith("/operator/updates")) return json({ installedVersion, updater: { state: "ready", version: "0.4.1" }, registry: { state: "ready" }, discoveryEnabled: true });
+      if (url.endsWith("/operator/kernel")) return json({ configured: true, reachability: "ready", revision: 1 });
+      if (url.endsWith("/operator/recovery")) return json({ exportEnabled: true, restoreEnabled: true, busy: false, maxArchiveBytes: 128 * 1024 * 1024, maxChunkBytes: 8 * 1024 * 1024 });
+      if (url.endsWith("/operator/gryphon/status")) return json({ schema: "exocortex.gryphon.service-status.v1", version: "1.2.3", serviceId: "saturn", state: "unlinked", connected: false, commandPrefix: null, bot: null, binding: null });
+      if (url.endsWith("/operator/gryphon/bots")) return json({ schema: "exocortex.gryphon.service-bots.v1", serviceId: "saturn", bots: [] });
+      if (url.includes("/activity") || url.includes("/devices") || url.includes("/backup-services")) return json([]);
+      return json({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<App />);
+
+    const proof = await screen.findByLabelText("Current Access Key");
+    fireEvent.change(proof, { target: { value: "owner-proof" } });
+    fireEvent.click(screen.getByRole("button", { name: "Verify owner" }));
+    await waitFor(() => expect(fetchMock.mock.calls.some((call) => requestUrl(call[0]).endsWith("/auth/reauthenticate"))).toBe(true));
+
+    fireEvent.click(screen.getByRole("button", { name: "Check for updates" }));
+    const dialog = within(await screen.findByRole("dialog", { name: "Check for updates" }));
+    expect(await dialog.findByText("Available: 0.1.14")).toBeTruthy();
+    const install = dialog.getByRole("button", { name: "Back up and install Saturn 0.1.14" });
+    expect(install).toHaveProperty("disabled", false);
+    fireEvent.click(install);
+    await waitFor(() => {
+      const request = fetchMock.mock.calls.find((call) => requestUrl(call[0]).endsWith("/operator/updates/install"));
+      expect(jsonRequestBody(request?.[1])).toEqual({ version: "0.1.14" });
+    });
+    expect(await dialog.findByText("COMPLETED", {}, { timeout: 3_000 })).toBeTruthy();
+    await waitFor(() => expect(dialog.queryByRole("button", { name: "Back up and install Saturn 0.1.14" })).toBeNull());
+    expect(await dialog.findByText("v0.1.14")).toBeTruthy();
+    expect(fetchMock.mock.calls.filter((call) => requestUrl(call[0]).endsWith("/operator/updates/install"))).toHaveLength(1);
   });
 
   it("keeps storage credentials write-only and requires owner proof plus a fresh connection test", async () => {

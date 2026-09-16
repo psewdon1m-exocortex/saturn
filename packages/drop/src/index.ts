@@ -7,6 +7,7 @@ export { GryphonCommandService, GryphonNotificationSink, SATURN_COMMAND_CATALOG 
 export type { GryphonCommandEnvelope, GryphonCommandResponse } from "./gryphon.service.js";
 export type {
   DropCompletion,
+  DropChallenge,
   DropFileGateway,
   DropNotificationSink,
   DropOptions,

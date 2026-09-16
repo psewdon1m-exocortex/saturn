@@ -121,6 +121,7 @@ describe("DropService", () => {
   it("lets a Gryphon-verified identity open a shared multi-client channel", async () => {
     const { service } = fixture(); const identity = { userId: "12345", chatId: "12345" };
     const drop = await service.issueDropCodeForGryphon(identity);
+    expect(drop.url).toBe("https://vault.test/drop");
     expect(drop.code.replaceAll("-", "")).toHaveLength(8);
     const outcomes = await Promise.allSettled([service.redeem(drop.code, "192.0.2.2", "browser"), service.redeem(drop.code, "192.0.2.3", "browser")]);
     const sessions = outcomes.flatMap((value) => value.status === "fulfilled" ? [value.value.session] : []);

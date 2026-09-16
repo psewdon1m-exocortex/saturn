@@ -44,6 +44,8 @@ describe("Gryphon Saturn adapter", () => {
     const result = await service.handle(envelope("drop"));
     expect(createDropChallenge).toHaveBeenCalledWith(expect.objectContaining({ identity: { userId: "42", chatId: "42" } }));
     expect(result.actions[0]?.text).toMatch(/Saturn Drop code: [0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}/);
+    expect(result.actions[0]?.text).toContain("Open Drop Point: https://vault.test/drop");
+    expect(result.actions[0]?.text).not.toMatch(/https:\/\/vault\.test\/drop\?[^\s]*code=/i);
   });
 
   it("returns neutral callback actions for the Saturn menu", async () => {

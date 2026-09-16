@@ -115,7 +115,7 @@ if (command === "build") {
   await fs.writeFile(manifestPath, `${JSON.stringify(signed, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
   const [reference, digest] = appImage.split("@");
   const compatible = { schema_version: 1, service: "saturn", version, image: { reference, digest }, web_image: webImage,
-    compose_bundle: { url: bundleUrl, sha256: payload.bundle.sha256.slice(7) }, database_schema: payload.databaseSchemaGeneration, minimum_updater_version: "0.4.4" };
+    compose_bundle: { url: bundleUrl, sha256: payload.bundle.sha256.slice(7) }, database_schema: payload.databaseSchemaGeneration, minimum_updater_version: pinnedUpdaterVersion };
   const compatiblePath = path.join(output, "saturn-release.json");
   await fs.writeFile(compatiblePath, `${JSON.stringify(compatible, null, 2)}\n`);
   const signedCompatible = spawnSync(process.execPath, [path.join(root, "scripts/sign-release.mjs"), compatiblePath], { stdio: "inherit", windowsHide: true });

@@ -7,6 +7,7 @@ import { v7 as uuidv7 } from "uuid";
 import type { DropBufferStore } from "./buffer-store.js";
 import type {
   DropCompletion,
+  DropChallenge,
   DropFileGateway,
   DropNotificationSink,
   DropOptions,
@@ -124,16 +125,16 @@ export class DropService {
     return this.#hmac("drop-user-agent", userAgent.slice(0, 1024));
   }
 
-  issueDropCode(now = new Date()): Promise<{ readonly code: string; readonly expiresAt: Date }> {
+  issueDropCode(now = new Date()): Promise<DropChallenge> {
     return this.#issueDropCode(undefined, now);
   }
 
-  issueDropCodeForGryphon(identity: TelegramIdentity, now = new Date()): Promise<{ readonly code: string; readonly expiresAt: Date }> {
+  issueDropCodeForGryphon(identity: TelegramIdentity, now = new Date()): Promise<DropChallenge> {
     validateIdentity(identity);
     return this.#issueDropCode(identity, now);
   }
 
-  async #issueDropCode(identity: TelegramIdentity | undefined, now: Date): Promise<{ readonly code: string; readonly expiresAt: Date }> {
+  async #issueDropCode(identity: TelegramIdentity | undefined, now: Date): Promise<DropChallenge> {
     const raw = code(8);
     const expiresAt = new Date(now.getTime() + this.#options.codeTtlMs);
     const created = await this.#repository.createDropChallenge({
@@ -150,7 +151,7 @@ export class DropService {
       source: identity === undefined ? "owner" : "telegram",
       ...(identity === undefined ? {} : { telegramUserId: identity.userId }),
     });
-    return { code: displayCode(raw), expiresAt };
+    return { code: displayCode(raw), url: new URL("/drop", this.#options.publicOrigin).toString(), expiresAt };
   }
 
   async redeem(rawCode: string, sourceIp: string, userAgent: string, now = new Date()): Promise<NewDropSession> {

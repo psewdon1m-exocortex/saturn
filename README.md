@@ -64,7 +64,7 @@ Production releases are created only by tags matching
 versioned OCI repositories are `saturn-app` and `saturn-web`, and its
 installation bundle is `saturn-0.1.12.zip`. Legacy unscoped tags such as
 `v0.0.1` run verification only and cannot publish a Saturn release. Publish
-the pinned `updater-v0.4.4` dependency before the Saturn tag. The existing
+the pinned `updater-v0.4.9` dependency before the Saturn tag. The existing
 `saturn-v0.1.0` through `saturn-v0.1.11` releases remain immutable.
 
 ## Production installation

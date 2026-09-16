@@ -6,6 +6,12 @@ export interface TelegramIdentity {
   readonly displayName?: string;
 }
 
+export interface DropChallenge {
+  readonly code: string;
+  readonly url: string;
+  readonly expiresAt: Date;
+}
+
 export interface DropSession {
   readonly id: string;
   readonly channelId: string;

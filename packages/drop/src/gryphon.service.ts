@@ -71,7 +71,7 @@ export class GryphonCommandService {
     }
     if (input.command === "drop") {
       const challenge = await this.drop.issueDropCodeForGryphon(actor);
-      return response(`Saturn Drop code: ${challenge.code}\nExpires: ${challenge.expiresAt.toISOString()}\nEnter it only at the Saturn /drop page.`);
+      return response(`Saturn Drop code: ${challenge.code}\nOpen Drop Point: ${challenge.url}\nExpires: ${challenge.expiresAt.toISOString()}\nEnter the code only on this page.`);
     }
     if (input.command === "revoke" || input.command === "binding_revoked") {
       const revoked = await this.drop.revokeGryphonAccess(actor);

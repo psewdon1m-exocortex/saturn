@@ -5,7 +5,11 @@ export class ApiError extends Error {
   readonly code?: string;
 
   constructor(status: number, body: unknown) {
-    super(`Gateway request failed with status ${String(status)}`);
+    const detail = typeof body === "object" && body !== null
+      ? ["message", "error"].map((key) => key in body ? (body as Record<string, unknown>)[key] : undefined)
+        .find((value): value is string => typeof value === "string" && value.trim().length > 0)?.trim().slice(0, 500)
+      : undefined;
+    super(detail === undefined ? `Gateway request failed with status ${String(status)}` : `${detail} (HTTP ${String(status)})`);
     this.status = status;
     if (typeof body === "object" && body !== null && "code" in body && typeof body.code === "string") this.code = body.code;
   }
@@ -162,7 +166,7 @@ export const api = {
   testStorage: (input: StorageConnectionInput) => request<Omit<StorageConnectionStatus, "profileId" | "revision" | "activatedAt" | "source">>("/operator/storage/test", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) }),
   switchStorage: (input: StorageConnectionInput) => request<StorageConnectionStatus>("/operator/storage/switch", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...input, confirmation: "SWITCH WITHOUT MIGRATION" }) }),
   activity: (before?: number, limit = 100) => request<readonly AuditEventInfo[]>(`/activity?limit=${String(limit)}${before === undefined ? "" : `&before=${String(before)}`}`),
-  createDropCode: () => request<{ readonly code: string; readonly expiresAt: string }>("/drop/codes", { method: "POST" }),
+  createDropCode: () => request<{ readonly code: string; readonly url: string; readonly expiresAt: string }>("/drop/codes", { method: "POST" }),
   openInternalDropSession: () => request<DropSessionInfo>("/drop/internal/session", { method: "POST" }),
   dropBuffer: () => request<{ readonly capacity?: NonNullable<DropSessionInfo["buffer"]>; readonly sessionTtlMs: number; readonly continuationTtlMs: number; readonly workers: number; readonly intervalMs: number; readonly maximumFileBytes: number }>("/drop/buffer"),
   resource: (id: string) => request<Resource>(`/resources/${encodeURIComponent(id)}`),
