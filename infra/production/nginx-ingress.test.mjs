@@ -24,6 +24,12 @@ test("owner UI and API use the public-authenticated ingress profile", () => {
   assert.match(ownerUi, /proxy_pass http:\/\/saturn_web;/);
 });
 
+test("public appearance exposes only the explicit accent endpoint", () => {
+  const appearance = locationBody(/location = \/api\/v1\/auth\/public-appearance \{([\s\S]*?)\n    \}/);
+  assert.match(appearance, /proxy_pass http:\/\/saturn_api;/);
+  assert.doesNotMatch(appearance, /\b(?:allow|deny)\b/);
+});
+
 test("health remains host-local and unknown TLS SNI fails closed", () => {
   for (const route of ["live", "ready"]) {
     const body = locationBody(new RegExp(`location = /health/${route} \\{([\\s\\S]*?)\\n    \\}`));

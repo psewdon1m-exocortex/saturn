@@ -5,7 +5,7 @@ import type { Database } from "@saturn/database";
 import { z } from "zod";
 import { registeredOrigin } from "./kernel-discovery.js";
 import { updater, updaterToken, unixJson } from "./neptune.controller.js";
-import { OwnerTokenGuard, RequireRecentReauthentication } from "./owner-token.guard.js";
+import { OwnerTokenGuard } from "./owner-token.guard.js";
 import { RecoveryWorkflowService } from "./recovery-workflow.service.js";
 import { SaturnApiExceptionFilter } from "./saturn-api-exception.filter.js";
 import { APP_CONFIG, DATABASE } from "./tokens.js";
@@ -37,11 +37,9 @@ export class UpdaterController {
   @Post("check") check() { return updater("/v1/releases/check", { head_id: headId() }, 90_000); }
   @Get("jobs/:id") job(@Param("id") id: string) { return agent("GET", `/v1/jobs/${jobId(id)}`); }
   @Post("jobs/:id/rollback")
-  @RequireRecentReauthentication()
   rollback(@Param("id") id: string) { return updater(`/v1/jobs/${jobId(id)}/rollback`, {}); }
 
   @Post("install")
-  @RequireRecentReauthentication()
   async install(@Body() body: unknown) {
     const input = versionSchema.parse(body);
     const checked = await this.check();
@@ -60,6 +58,5 @@ export class UpdaterController {
       backup: { filename: snapshot.filename, sha256: createHash("sha256").update(archive).digest("hex"), data_base64: archive.toString("base64") } }, 90_000);
   }
   @Post("updater/install")
-  @RequireRecentReauthentication()
   selfUpdate() { return updater("/v1/lifecycle/updater-self-update", { head_id: headId() }); }
 }

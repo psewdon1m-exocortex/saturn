@@ -82,6 +82,7 @@ const dropDrain = new DropDrainService({
   buffer: dropBuffer,
   files: fileService,
   workers: config.drop.drainWorkers,
+  chunkBytes: config.limits.uploadChunkMaxBytes,
 });
 const archiveRunner = new ArchiveJobRunner(
   new PostgresArchiveJobRepository(database),

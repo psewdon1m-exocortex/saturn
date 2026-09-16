@@ -85,6 +85,7 @@ async function publicShareRequest<T>(token: string, relativePath = "", options: 
 }
 
 export const api = {
+  publicAppearance: () => request<{ readonly accentColor: string }>("/auth/public-appearance"),
   session: () => request<{ readonly state: string; readonly expiresAt?: string }>("/auth/session"),
   login: (accessKey: string) => request<{ readonly state: string }>("/auth/login", {
     method: "POST",
@@ -456,18 +457,37 @@ async function continueOwnerUpload(id: string, file: File, onProgress: (progress
   if (!["created", "uploading", "failed_retryable"].includes(status.status)) throw new Error("This upload can no longer be resumed.");
   const chunkBytes = 8 * 1024 * 1024;
   let offset = status.offset;
+  let failures = 0;
   onProgress(file.size === 0 ? 1 : offset / file.size);
   while (offset < file.size) {
     const chunk = file.slice(offset, Math.min(file.size, offset + chunkBytes));
-    await request<undefined>(`/uploads/${encodeURIComponent(id)}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/offset+octet-stream", "Upload-Offset": String(offset) },
-      body: chunk,
-    });
-    offset += chunk.size;
+    try {
+      await request<undefined>(`/uploads/${encodeURIComponent(id)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/offset+octet-stream", "Upload-Offset": String(offset) },
+        body: chunk,
+      });
+      offset += chunk.size;
+      failures = 0;
+    } catch (error) {
+      failures += 1;
+      if (failures > 5) throw error;
+      const remote = await ownerUploadOffset(id);
+      if (remote.length !== file.size || remote.offset < offset || remote.offset > file.size) throw error;
+      offset = remote.offset;
+      await new Promise((resolve) => window.setTimeout(resolve, Math.min(2_000, 200 * 2 ** (failures - 1))));
+    }
     onProgress(file.size === 0 ? 1 : offset / file.size);
   }
-  const completed = await request<{ readonly resource: Resource }>(`/uploads/${encodeURIComponent(id)}/complete`, { method: "POST" });
+  let completed: { readonly resource: Resource } | undefined;
+  for (let attempt = 0; attempt < 3 && completed === undefined; attempt += 1) {
+    try { completed = await request<{ readonly resource: Resource }>(`/uploads/${encodeURIComponent(id)}/complete`, { method: "POST" }); }
+    catch (error) {
+      if (attempt === 2) throw error;
+      await new Promise((resolve) => window.setTimeout(resolve, 500 * 2 ** attempt));
+    }
+  }
+  if (completed === undefined) throw new Error("Upload completion did not return a result.");
   onProgress(1);
   forgetRecoverableOwnerUpload(id);
   return completed.resource;

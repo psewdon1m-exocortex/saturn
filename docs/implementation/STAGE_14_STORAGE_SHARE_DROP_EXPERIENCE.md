@@ -168,6 +168,9 @@ inside Saturn.
   `FAILED` and `CANCELLED` terminal branches;
 - two background drain workers by default and a hard configuration maximum of
   four;
+- each drain reads the local buffer with the configured upload chunk size, so
+  a 400+ MiB file produces bounded multi-megabyte SFTP writes instead of
+  thousands of filesystem-default fragments;
 - checksum verification before `STORED` and atomic Gateway commit into the
   Drop Point root;
 - channel-shared list/status/remove/cancel endpoints, server-sent upload

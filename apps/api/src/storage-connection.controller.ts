@@ -1,6 +1,6 @@
 import { BadRequestException, Body, Controller, Get, Inject, Post, UseGuards } from "@nestjs/common";
 import { z } from "zod";
-import { OwnerTokenGuard, RequireRecentReauthentication } from "./owner-token.guard.js";
+import { OwnerTokenGuard } from "./owner-token.guard.js";
 import { StorageConnectionService } from "./storage-connection.service.js";
 
 const connectionSchema = z.object({
@@ -28,7 +28,6 @@ export class StorageConnectionController {
   }
 
   @Post("test")
-  @RequireRecentReauthentication()
   async test(@Body() body: unknown) {
     const parsed = connectionSchema.safeParse(body);
     if (!parsed.success) throw new BadRequestException({ code: "invalid_storage_connection" });
@@ -37,7 +36,6 @@ export class StorageConnectionController {
   }
 
   @Post("switch")
-  @RequireRecentReauthentication()
   async switch(@Body() body: unknown) {
     const parsed = switchSchema.safeParse(body);
     if (!parsed.success) throw new BadRequestException({ code: "invalid_storage_switch" });

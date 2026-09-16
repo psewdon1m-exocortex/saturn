@@ -99,8 +99,9 @@ export class DropBufferStore {
     return { bytes, sha256: hash.digest("hex") };
   }
 
-  openRead(relativePath: string): Readable {
-    return createReadStream(this.#absolute(relativePath));
+  openRead(relativePath: string, highWaterMark?: number): Readable {
+    if (highWaterMark !== undefined && (!Number.isSafeInteger(highWaterMark) || highWaterMark < 1)) throw new Error("Drop buffer read size is invalid");
+    return createReadStream(this.#absolute(relativePath), highWaterMark === undefined ? {} : { highWaterMark });
   }
 
   async delete(relativePath: string): Promise<void> {

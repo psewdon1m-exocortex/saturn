@@ -55,7 +55,7 @@ export function LocalAgentActions({ kind, enabled, discoveryEnabled = enabled, a
     void check();
   }, [autoDiscover, check, discoveryEnabled, job, kind]);
   return <div className="local-agent-actions">
-    {kind === "saturn" ? <><button className="button" disabled={!discoveryEnabled || busy} onClick={() => void check()}>{pending ? "Checking signed releases…" : release === undefined ? "Discover signed Saturn release" : "Check again"}</button>
+    {kind === "saturn" ? <>{autoDiscover ? pending ? <p role="status">Checking signed releases…</p> : null : <button className="button" disabled={!discoveryEnabled || busy} onClick={() => void check()}>{pending ? "Checking signed releases…" : "Check for updates"}</button>}
       {release ? <p>{release.update_available ? `Available: ${release.available_version ?? "unknown"}` : "Saturn is up to date."}</p> : null}
       {release?.update_available && release.available_version ? <button className="button button--primary" disabled={!enabled || busy} onClick={() => void run(() => api.installSaturnUpdate(release.available_version ?? ""))}>Back up and install Saturn {release.available_version}</button> : null}
       {job?.state === "COMPLETED" && job.rollback_available ? <button className="button" disabled={busy} onClick={() => void run(() => api.rollbackSaturnUpdate(job.id))}>Restore previous Saturn version and snapshot</button> : null}</> : null}

@@ -87,7 +87,7 @@ pinned in `.release/updater.version`; CI refuses to build with another version.
    real data. Independent second-copy delivery and restore evidence remain a
    separate disaster-recovery procedure; they are not Saturn runtime variables.
 
-For a host with an older prepared release, run the `0.1.12` bootstrap with
+For a host with an older prepared release, run the `0.1.16` bootstrap with
 `--refresh`. It preserves
 `/etc/vault/.env.production`, removes the obsolete `VAULT_DEV_STORAGE_*` and
 `VAULT_SECOND_COPY_ID` entries, repairs the absolute runtime env path, writes
@@ -95,7 +95,7 @@ the new release lock, and preserves the old bundle under
 `/opt/vault.previous-<timestamp>`:
 
 ```sh
-curl -fsSL https://github.com/psewdon1m-exocortex/saturn/releases/download/saturn-v0.1.12/bootstrap.sh | sudo sh -s -- --refresh
+curl -fsSL https://github.com/psewdon1m-exocortex/saturn/releases/download/saturn-v0.1.16/bootstrap.sh | sudo sh -s -- --refresh
 ```
 
 `READINESS_TIMEOUT_MS` defaults to 3000 ms and bounds database, storage and
@@ -162,8 +162,8 @@ backend configuration.
 ## Runtime target change
 
 Use Settings → Security → Advanced security → Storage connection for an
-operator-approved target change. Recent owner proof, exact host fingerprint and
-a successful connection test are mandatory. A switch rebuilds the active
+operator-approved target change. An authenticated owner session, exact host
+fingerprint and a successful connection test are mandatory. A switch rebuilds the active
 catalog from the target and migrates no bytes; it also revokes active shares,
 devices and pending transfers so capabilities cannot cross file sets. API and
 worker must mount the same mode-`0700` `STORAGE_RUNTIME_CONFIG_DIR`. To return,

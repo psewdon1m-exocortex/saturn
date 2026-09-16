@@ -8,7 +8,7 @@ import { z } from "zod";
 import { APP_CONFIG, DATABASE } from "./tokens.js";
 import { registeredOrigin } from "./kernel-discovery.js";
 import { updater, unixJson } from "./neptune.controller.js";
-import { OwnerTokenGuard, RequireRecentReauthentication } from "./owner-token.guard.js";
+import { OwnerTokenGuard } from "./owner-token.guard.js";
 import { SaturnApiExceptionFilter } from "./saturn-api-exception.filter.js";
 
 const installSchema = z.object({ version: z.string().regex(/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/) }).strict();
@@ -69,7 +69,6 @@ export class GryphonOwnerController implements OnApplicationBootstrap, OnApplica
   }
 
   @Post("initialize")
-  @RequireRecentReauthentication()
   initialize() { return updater("/v1/lifecycle/gryphon-initialization", { head_id: process.env.UPDATER_HEAD_ID?.trim() || "saturn" }); }
 
   private request(method: string, route: string, body?: JsonObject) {
@@ -97,7 +96,6 @@ export class GryphonOwnerController implements OnApplicationBootstrap, OnApplica
   @Delete("connection") disconnect() { return this.request("DELETE", "/v1/service/connection"); }
 
   @Post("link-challenge")
-  @RequireRecentReauthentication()
   async linkChallenge() { return challengeSchema.parse(await this.request("POST", "/v1/service/link-challenges")); }
 
   async syncCommandCatalog() {

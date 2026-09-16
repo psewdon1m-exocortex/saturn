@@ -23,7 +23,7 @@ export function HelperRecoveryPanel({ enabled }: { readonly enabled: boolean }) 
     } catch (error) { setMessage(error instanceof Error ? error.message : "Recovery failed"); }
     finally { setPending(false); }
   }
-  return <section className="settings-group"><h3>Helper recovery</h3><p>Encrypted state of Updater, Neptune and Gryphon includes local credentials and bindings. Keep the recovery passphrase separately. Install trusted binaries and provision external trust keys before restoring on a new host.</p>
+  return <section className="settings-group"><h3>Helper recovery</h3><p>Encrypted state of Updater, Neptune and Gryphon includes their local credentials and bindings. It does not contain Saturn files, the Saturn database or release trust keys. Keep the recovery passphrase separately. Install trusted binaries and provision external trust keys before restoring on a new host.</p>
     <form onSubmit={event => void exportArchive(event)}><label>Recovery passphrase<input type="password" autoComplete="off" minLength={16} maxLength={1024} value={key} onChange={event => setKey(event.target.value)} required /></label><button className="button" disabled={!enabled || pending}>Download encrypted helper state</button></form>
     <label>Helper archive<input type="file" accept=".exorecovery" disabled={pending} onChange={event => setFile(event.target.files?.[0])} /></label>
     <label>Type RESTORE HELPERS to replace helper state<input autoComplete="off" value={confirmation} onChange={event => setConfirmation(event.target.value)} /></label>

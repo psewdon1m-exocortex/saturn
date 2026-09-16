@@ -8,13 +8,16 @@ export class DropDrainService {
   readonly #buffer: DropBufferStore;
   readonly #files: DropFileGateway;
   readonly #workers: number;
+  readonly #chunkBytes: number;
 
-  constructor(input: { readonly repository: DropRepository; readonly buffer: DropBufferStore; readonly files: DropFileGateway; readonly workers: number }) {
+  constructor(input: { readonly repository: DropRepository; readonly buffer: DropBufferStore; readonly files: DropFileGateway; readonly workers: number; readonly chunkBytes: number }) {
     if (!Number.isSafeInteger(input.workers) || input.workers < 1 || input.workers > 4) throw new Error("Drop drain worker count is invalid");
+    if (!Number.isSafeInteger(input.chunkBytes) || input.chunkBytes < 1) throw new Error("Drop drain chunk size is invalid");
     this.#repository = input.repository;
     this.#buffer = input.buffer;
     this.#files = input.files;
     this.#workers = input.workers;
+    this.#chunkBytes = input.chunkBytes;
   }
 
   async drain(): Promise<number> {
@@ -46,7 +49,7 @@ export class DropDrainService {
       let offset = current.receivedSize;
       if (offset > item.expectedSize) throw new Error("Remote upload offset exceeds buffered file size");
       let sourceOffset = 0;
-      for await (const chunk of this.#buffer.openRead(item.localPath)) {
+      for await (const chunk of this.#buffer.openRead(item.localPath, this.#chunkBytes)) {
         const value = Buffer.from(chunk as Uint8Array);
         const end = sourceOffset + value.length;
         if (end <= offset) { sourceOffset = end; continue; }

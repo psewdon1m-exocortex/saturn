@@ -21,6 +21,9 @@ coverage/
 
 # Test and runtime state
 artifacts/
+.release-evidence/
+known-problems-report.json
+__pycache__/
 playwright-report/
 test-results/
 spool/

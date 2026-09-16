@@ -9,7 +9,7 @@ import type { SaturnConfig } from "@saturn/config";
 import type { Database } from "@saturn/database";
 import type { RuntimeStorageManager } from "@saturn/storage";
 import { z } from "zod";
-import { OwnerTokenGuard, RequireRecentReauthentication } from "./owner-token.guard.js";
+import { OwnerTokenGuard } from "./owner-token.guard.js";
 import { resolveKernelOrigin } from "./kernel-discovery.js";
 import type { StorageHealthPort } from "./health.service.js";
 import { APP_CONFIG, ARCHIVE_REPOSITORY, AUDIT_SERVICE, DATABASE, STORAGE_HEALTH, STORAGE_RUNTIME } from "./tokens.js";
@@ -174,6 +174,8 @@ export class OperatorController {
         SELECT id::text, filename, expected_size::text, received_size::text, status, created_at, updated_at
         FROM upload_sessions
         WHERE status IN ('created', 'uploading', 'verifying', 'committing', 'failed_retryable')
+          AND expires_at > now()
+          AND (status NOT IN ('verifying', 'committing') OR updated_at >= now() - interval '15 minutes')
         ORDER BY
           CASE status
             WHEN 'uploading' THEN 0
@@ -239,8 +241,7 @@ export class OperatorController {
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     }))], sampledAt);
-    const visibleArchiveJobs = archiveJobs.filter((job) => !["completed", "failed", "cancelled"].includes(job.state)
-      || sampledAt - (job.completedAt?.getTime() ?? job.updatedAt.getTime()) <= 10_000);
+    const visibleArchiveJobs = archiveJobs.filter((job) => !["completed", "failed", "cancelled"].includes(job.state));
     const archiveTasks = visibleArchiveJobs.map((job) => ({
       id: job.id,
       direction: "archive" as const,
@@ -304,7 +305,6 @@ export class OperatorController {
   }
 
   @Put("kernel/url")
-  @RequireRecentReauthentication()
   async changeKernelUrl(@Body() body: unknown) {
     const parsed = kernelUrlSchema.safeParse(body);
     if (!parsed.success) throw new BadRequestException({ code: "invalid_kernel_url" });
@@ -332,7 +332,6 @@ export class OperatorController {
   }
 
   @Post("kernel/token")
-  @RequireRecentReauthentication()
   async rotateKernelToken(@Body() body: unknown) {
     const parsed = kernelTokenSchema.safeParse(body);
     if (!parsed.success) throw new BadRequestException({ code: "invalid_kernel_token" });

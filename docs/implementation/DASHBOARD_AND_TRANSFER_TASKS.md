@@ -38,9 +38,12 @@ read-only operational telemetry:
 - Gateway reachability uses the existing readiness probe; no synthetic success
   state is introduced.
 
-The monitor contains no credential or storage path and retains completed or
-failed download summaries only briefly so a polling UI can observe the terminal
-state. It is local to the API process: a future multi-instance deployment must
+The monitor contains no credential or storage path and removes completed,
+failed and cancelled rows before the next task snapshot. Expired uploads and
+stale verification/commit remnants are excluded from the live dashboard; SFTP
+reads also enforce an idle timeout so a dead remote stream reaches a retryable
+failure instead of remaining in `Verifying` forever. The monitor is local to
+the API process: a future multi-instance deployment must
 replace or aggregate it through shared telemetry before claiming fleet-wide
 download flow.
 
@@ -65,7 +68,7 @@ download flow.
 
 **Verification**
 
-- monitor unit tests cover streaming bytes, terminal state, throughput and
+- monitor unit tests cover streaming bytes, immediate terminal cleanup, throughput and
   upload queue classification;
 - API and web typechecks prove the shared response shape and injection wiring.
 
@@ -113,7 +116,7 @@ pixel tolerance, and all tests and builds pass.
 - `pnpm verify` passes: lint, all 19 workspace typechecks, all tests (including
   10 web tests and 7 API tests), and every production build.
 - Streaming tests prove measured bytes reach the consumer unchanged, terminal
-  state is observable only for the bounded retention window, and persisted
+  rows disappear from the next task snapshot, and persisted
   uploads report queue position and byte-delta throughput.
 - At the `1919x1034px` browser fixture, card origins are exactly
   `y=151/347/543/739/935`; single-row cards are `166px` high and Tasks is

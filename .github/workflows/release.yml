@@ -39,6 +39,8 @@ jobs:
         shell: bash
         run: |
           version="$(node scripts/release-identity.mjs "$GITHUB_REF_NAME")"
+          package_version="$(node -p "require('./package.json').version")"
+          test "$version" = "$package_version"
           repository="${GITHUB_REPOSITORY,,}"
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "image_root=ghcr.io/$repository" >> "$GITHUB_OUTPUT"
@@ -103,7 +105,11 @@ jobs:
           docker pull "${{ steps.identity.outputs.image_root }}/saturn-web@${{ steps.web.outputs.digest }}"
           docker tag "${{ steps.identity.outputs.image_root }}/saturn-app@${{ steps.app.outputs.digest }}" vault-app:stage13
           docker tag "${{ steps.identity.outputs.image_root }}/saturn-web@${{ steps.web.outputs.digest }}" vault-web:stage13
-          VAULT_STAGE13_PREBUILT=true pnpm verify:stage:13
+          python3 scripts/known-problems-gate.py \
+            --record stage13 \
+            --command bash -lc 'VAULT_STAGE13_PREBUILT=true pnpm verify:stage:13'
+      - name: Qualify every pre-signing Part 12 check
+        run: python3 scripts/known-problems-gate.py --phase pre-signing
       - name: Build signed release bundle
         env:
           RELEASE_SIGNING_PRIVATE_KEY: ${{ secrets.VAULT_RELEASE_SIGNING_PRIVATE_KEY }}
@@ -141,33 +147,55 @@ jobs:
           sh -n artifacts/release/bootstrap.sh
           if grep -q '__SATURN_BOOTSTRAP_' artifacts/release/bootstrap.sh; then exit 1; fi
           rm -f "$RUNNER_TEMP/saturn-release-key.pem"
-      - name: Promote tested digests to version tags
-        shell: bash
-        run: |
-          if docker buildx imagetools inspect "${{ steps.identity.outputs.image_root }}/saturn-app:${{ steps.identity.outputs.version }}" >/dev/null 2>&1; then
-            echo "application version tag already exists; refusing replacement" >&2
-            exit 1
-          fi
-          if docker buildx imagetools inspect "${{ steps.identity.outputs.image_root }}/saturn-web:${{ steps.identity.outputs.version }}" >/dev/null 2>&1; then
-            echo "web version tag already exists; refusing replacement" >&2
-            exit 1
-          fi
-          docker buildx imagetools create --tag "${{ steps.identity.outputs.image_root }}/saturn-app:${{ steps.identity.outputs.version }}" "${{ steps.identity.outputs.image_root }}/saturn-app@${{ steps.app.outputs.digest }}"
-          docker buildx imagetools create --tag "${{ steps.identity.outputs.image_root }}/saturn-web:${{ steps.identity.outputs.version }}" "${{ steps.identity.outputs.image_root }}/saturn-web@${{ steps.web.outputs.digest }}"
-      - name: Publish under the existing immutable tag
+      - name: Stage immutable candidate assets without final discovery
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            echo "release already exists; refusing replacement" >&2
-            exit 1
+            test "$(gh release view "$GITHUB_REF_NAME" --json isPrerelease --jq .isPrerelease)" = "true"
+            echo "Reusing the existing immutable prerelease candidate."
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              --verify-tag \
+              --prerelease \
+              --latest=false \
+              --title "Saturn ${{ steps.identity.outputs.version }}" \
+              --generate-notes \
+              artifacts/release/*
           fi
-          gh release create "$GITHUB_REF_NAME" \
-            --verify-tag \
-            --title "Saturn ${{ steps.identity.outputs.version }}" \
-            --generate-notes \
-            artifacts/release/*
+      - name: Verify anonymous published assets and final trust
+        env:
+          RELEASE_VERSION: ${{ steps.identity.outputs.version }}
+        run: |
+          python3 scripts/known-problems-gate.py \
+            --record published-assets \
+            --command node scripts/verify-published-release.mjs artifacts/release
+          python3 scripts/known-problems-gate.py --phase final
+          cp known-problems-report.json artifacts/release/known-problems-report.json
+      - name: Attach final qualification evidence
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "$GITHUB_REF_NAME" artifacts/release/known-problems-report.json
+      - name: Promote tested digests to immutable version tags
+        shell: bash
+        run: |
+          app_version_digest="$(docker buildx imagetools inspect "${{ steps.identity.outputs.image_root }}/saturn-app:${{ steps.identity.outputs.version }}" --format '{{.Manifest.Digest}}' 2>/dev/null || true)"
+          if [ -n "$app_version_digest" ]; then
+            test "$app_version_digest" = "${{ steps.app.outputs.digest }}"
+          else
+            docker buildx imagetools create --tag "${{ steps.identity.outputs.image_root }}/saturn-app:${{ steps.identity.outputs.version }}" "${{ steps.identity.outputs.image_root }}/saturn-app@${{ steps.app.outputs.digest }}"
+          fi
+          web_version_digest="$(docker buildx imagetools inspect "${{ steps.identity.outputs.image_root }}/saturn-web:${{ steps.identity.outputs.version }}" --format '{{.Manifest.Digest}}' 2>/dev/null || true)"
+          if [ -n "$web_version_digest" ]; then
+            test "$web_version_digest" = "${{ steps.web.outputs.digest }}"
+          else
+            docker buildx imagetools create --tag "${{ steps.identity.outputs.image_root }}/saturn-web:${{ steps.identity.outputs.version }}" "${{ steps.identity.outputs.image_root }}/saturn-web@${{ steps.web.outputs.digest }}"
+          fi
+      - name: Enable final service-qualified discovery
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release edit "$GITHUB_REF_NAME" --prerelease=false --latest=false
       - name: Preserve release evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -176,5 +204,8 @@ jobs:
           path: |
             artifacts/release/
             artifacts/verification/stage-13-production-hardening.json
+            .release-evidence/
+            known-problems-report.json
+          include-hidden-files: true
           if-no-files-found: ignore
           retention-days: 30

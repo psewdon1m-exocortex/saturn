@@ -176,7 +176,6 @@ export class AuthController {
 
   @Delete("sessions")
   @UseGuards(OwnerTokenGuard)
-  @RequireRecentReauthentication()
   async revokeAll(@Res({ passthrough: true }) reply: FastifyReply) {
     const revoked = await this.#auth.revokeAll();
     this.#clearCookies(reply);
@@ -187,6 +186,12 @@ export class AuthController {
   @UseGuards(OwnerTokenGuard)
   preferences() {
     return this.#auth.getPreferences();
+  }
+
+  @Get("public-appearance")
+  async publicAppearance() {
+    const preferences = await this.#auth.getPreferences();
+    return { accentColor: preferences.accentColor };
   }
 
   @Put("preferences")

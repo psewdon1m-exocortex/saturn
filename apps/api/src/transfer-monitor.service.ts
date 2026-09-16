@@ -75,7 +75,6 @@ interface TaskControl {
   readonly waiters: Set<{ readonly resolve: () => void; readonly reject: (error: Error) => void }>;
 }
 
-const TERMINAL_RETENTION_MS = 10_000;
 const RATE_SAMPLE_INTERVAL_MS = 250;
 
 function boundedBytes(value: number): number {
@@ -326,10 +325,10 @@ export class TransferMonitorService {
 
   #prune(now: number): void {
     for (const [id, task] of this.#downloads) {
-      if (task.terminalAt !== undefined && now - task.terminalAt > TERMINAL_RETENTION_MS) this.#downloads.delete(id);
+      if (task.terminalAt !== undefined && now >= task.terminalAt) this.#downloads.delete(id);
     }
     for (const [id, control] of this.#controls) {
-      if (control.terminalAt !== undefined && now - control.terminalAt > TERMINAL_RETENTION_MS) this.#controls.delete(id);
+      if (control.terminalAt !== undefined && now >= control.terminalAt) this.#controls.delete(id);
     }
   }
 }

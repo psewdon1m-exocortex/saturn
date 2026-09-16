@@ -22,9 +22,10 @@ Before a service-qualified release is finalized, evaluate every active ID in
 [Part 12](https://github.com/psewdon1m-exocortex/general/blob/main/PART_12_KNOWN_DEPLOYMENT_AND_OPERATIONS_PROBLEMS.md) against the exact candidate. Retain
 `known-problems-report.json` bound to the service revision, qualified tag,
 immutable central-documentation revision and catalog digest. Missing, stale,
-failed, unknown or unsupported `N/A` evidence blocks publication. This is a
-normative release requirement; until the repository workflow generates and
-enforces that report, the release pipeline remains an implementation gap.
+failed, unknown or unsupported `N/A` evidence blocks publication. The workflow
+records exact-candidate Stage 13 evidence before signing, stages assets as a
+prerelease, verifies their anonymous bytes and trust chain, attaches the final
+report and only then makes the release discoverable.
 
 Saturn is the Exocortex storage gateway and operator-facing file service. The
 implementation entry point is [docs/implementation/README.md](docs/implementation/README.md);
@@ -48,6 +49,8 @@ corepack enable
 corepack prepare pnpm@11.24.0 --activate
 pnpm install --frozen-lockfile
 pnpm exec playwright install --with-deps chromium
+python3 scripts/test-known-problems-gate.py
+python3 scripts/known-problems-gate.py --phase structure
 pnpm verify:stage:13
 python3 scripts/pre-push-gate.py --upstream-result success
 ```
@@ -60,19 +63,19 @@ release can publish artifacts.
 ## Release identity
 
 Production releases are created only by tags matching
-`saturn-vMAJOR.MINOR.PATCH`. The current fix identity is `saturn-v0.1.12`; its
+`saturn-vMAJOR.MINOR.PATCH`. The current fix identity is `saturn-v0.1.16`; its
 versioned OCI repositories are `saturn-app` and `saturn-web`, and its
-installation bundle is `saturn-0.1.12.zip`. Legacy unscoped tags such as
+installation bundle is `saturn-0.1.16.zip`. Legacy unscoped tags such as
 `v0.0.1` run verification only and cannot publish a Saturn release. Publish
 the pinned `updater-v0.4.9` dependency before the Saturn tag. The existing
-`saturn-v0.1.0` through `saturn-v0.1.11` releases remain immutable.
+`saturn-v0.1.0` through `saturn-v0.1.15` releases remain immutable.
 
 ## Production installation
 
 Each service keeps its own bootstrap and environment. For Saturn:
 
 ```sh
-curl -fsSL https://github.com/psewdon1m-exocortex/saturn/releases/download/saturn-v0.1.12/bootstrap.sh | sudo sh
+curl -fsSL https://github.com/psewdon1m-exocortex/saturn/releases/download/saturn-v0.1.16/bootstrap.sh | sudo sh
 sudoedit /etc/vault/.env.production
 sudo chmod 600 /etc/vault/.env.production
 sudo vaultctl validate
@@ -88,7 +91,7 @@ the existing configuration. This also repairs the earlier Linux file-secret
 validation failures:
 
 ```sh
-curl -fsSL https://github.com/psewdon1m-exocortex/saturn/releases/download/saturn-v0.1.12/bootstrap.sh | sudo sh -s -- --refresh
+curl -fsSL https://github.com/psewdon1m-exocortex/saturn/releases/download/saturn-v0.1.16/bootstrap.sh | sudo sh -s -- --refresh
 ```
 
 Edit only these values in `/etc/vault/.env.production`:

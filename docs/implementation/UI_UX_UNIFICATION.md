@@ -60,8 +60,15 @@ remains a separate Gryphon CLI action. The bot may activate the Gateway-owned
 Drop-code capability but does not own that capability. Drop-buffer health remains an operational status under Security's
 collapsed advanced controls.
 
-The same advanced Security disclosure owns the runtime upload limits. It uses
-integer GiB controls for local buffer capacity and maximum file size, validates
+The same advanced Security disclosure owns the storage profile, helper recovery,
+session revocation and runtime upload limits. These controls are available to an
+already authenticated owner session without a second global unlock form. The
+Access Key rotation dialog remains the narrow exception: it always asks for the
+exact current key inside the operation, rotates the session and revokes the
+other owner sessions.
+
+The upload-limit controls use
+integer GiB fields for local buffer capacity and maximum file size, validate
 that a single file stays at or below the 90% refusal watermark, and shows the
 authoritative capacity returned by the Gateway. Saving affects both owner and
 Drop uploads without a process restart; environment values remain bootstrap

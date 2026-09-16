@@ -59,8 +59,10 @@ DEV credentials are not substitutes for any item in this table.
 2. Fill only the domain/origin, owner Access Key, Kernel coordinates and
    production `STORAGE_*` inputs in `.env.production`; run `vaultctl validate`.
 3. After publishing the pinned `updater-v0.4.9`, push the protected
-   `saturn-v0.1.12` tag. The release workflow builds candidate images once,
-   tests those digests, signs the bundle and publishes only on pass. Unscoped
+   `saturn-v0.1.16` tag. The release workflow builds candidate images once,
+   tests those digests, completes the revision-bound Part 12 pre-signing gate,
+   signs and stages the bundle, verifies published bytes anonymously, then
+   publishes only on final qualification. Unscoped
    `v*` tags run verification only and are not production-release identities.
 4. Run the exact `saturn-vX.Y.Z` release's HTTPS `bootstrap.sh` on the clean
    host. It installs its embedded Ed25519 and RSA public keys in the two trust

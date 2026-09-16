@@ -75,6 +75,7 @@ server {
     location = /robots.txt { proxy_pass http://saturn_web; }
 
     # Public capability APIs. Keep this list explicit.
+    location = /api/v1/auth/public-appearance { proxy_pass http://saturn_api; }
     location ^~ /api/v1/public/shares/ { proxy_pass http://saturn_api; proxy_request_buffering off; proxy_buffering off; }
     location = /api/v1/drop/redeem { proxy_pass http://saturn_api; proxy_request_buffering off; }
     location = /api/v1/drop/session { proxy_pass http://saturn_api; proxy_buffering off; }

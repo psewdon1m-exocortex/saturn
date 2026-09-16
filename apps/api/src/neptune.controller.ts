@@ -4,7 +4,7 @@ import http from "node:http";
 import { Body, Controller, Get, Headers, HttpCode, Inject, Param, Post, Put, Res, UseFilters, UseGuards } from "@nestjs/common";
 import type { FastifyReply } from "fastify";
 import { z } from "zod";
-import { OwnerTokenGuard, RequireRecentReauthentication } from "./owner-token.guard.js";
+import { OwnerTokenGuard } from "./owner-token.guard.js";
 import { RecoveryWorkflowService } from "./recovery-workflow.service.js";
 import { SaturnApiExceptionFilter } from "./saturn-api-exception.filter.js";
 
@@ -127,7 +127,6 @@ export class NeptuneOwnerController {
   }
 
   @Post("initialize")
-  @RequireRecentReauthentication()
   async initialize(@Body() body: unknown) {
     const input = initializeSchema.parse(body);
     return updater("/v1/components/neptune-linux/initialize", {

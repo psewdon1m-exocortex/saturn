@@ -6,7 +6,7 @@ import { DROP_POINT_RESOURCE_ID, SYNC_RESOURCE_ID } from "./types.js";
 const pdfJsMock = vi.hoisted(() => ({ getDocument: vi.fn() }));
 vi.mock("pdfjs-dist", () => ({ GlobalWorkerOptions: { workerSrc: "" }, getDocument: pdfJsMock.getDocument }));
 
-afterEach(() => { cleanup(); window.localStorage.clear(); window.sessionStorage.clear(); Reflect.deleteProperty(window.navigator, "clipboard"); vi.restoreAllMocks(); vi.unstubAllGlobals(); window.history.replaceState({}, "", "/"); });
+afterEach(() => { cleanup(); document.documentElement.style.setProperty("--accent", "#00a8ff"); window.localStorage.clear(); window.sessionStorage.clear(); Reflect.deleteProperty(window.navigator, "clipboard"); vi.restoreAllMocks(); vi.unstubAllGlobals(); window.history.replaceState({}, "", "/"); });
 
 function requestUrl(input: RequestInfo | URL): string {
   if (typeof input === "string") return input;
@@ -905,7 +905,7 @@ describe("owner Saturn UI", () => {
       const request = fetchMock.mock.calls.find((call) => requestUrl(call[0]).endsWith("/auth/preferences") && call[1]?.method === "PUT" && jsonRequestBody(call[1]).accentColor === "#111111");
       expect(request).toBeTruthy();
     });
-    fireEvent.click(screen.getByText("Advanced security and owner proof"));
+    fireEvent.click(screen.getByText("Advanced security"));
     const uploadBuffer = screen.getByLabelText("Upload buffer capacity, GiB");
     const maximumFile = screen.getByLabelText("Maximum upload file size, GiB");
     expect(uploadBuffer).toHaveProperty("value", "110");
@@ -969,13 +969,9 @@ describe("owner Saturn UI", () => {
     vi.stubGlobal("fetch", fetchMock);
     render(<App />);
 
-    const proof = await screen.findByLabelText("Current Access Key");
-    fireEvent.change(proof, { target: { value: "owner-proof" } });
-    fireEvent.click(screen.getByRole("button", { name: "Verify owner" }));
-    await waitFor(() => expect(fetchMock.mock.calls.some((call) => requestUrl(call[0]).endsWith("/auth/reauthenticate"))).toBe(true));
-
-    fireEvent.click(screen.getByRole("button", { name: "Check for updates" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Check for updates" }));
     const dialog = within(await screen.findByRole("dialog", { name: "Check for updates" }));
+    expect(dialog.queryByRole("button", { name: "Discover signed Saturn release" })).toBeNull();
     expect(await dialog.findByText("Available: 0.1.14")).toBeTruthy();
     const install = dialog.getByRole("button", { name: "Back up and install Saturn 0.1.14" });
     expect(install).toHaveProperty("disabled", false);
@@ -990,7 +986,7 @@ describe("owner Saturn UI", () => {
     expect(fetchMock.mock.calls.filter((call) => requestUrl(call[0]).endsWith("/operator/updates/install"))).toHaveLength(1);
   });
 
-  it("keeps storage credentials write-only and requires owner proof plus a fresh connection test", async () => {
+  it("keeps storage credentials write-only and requires a fresh connection test", async () => {
     window.history.replaceState({}, "", "/settings");
     const now = new Date().toISOString();
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -1013,12 +1009,9 @@ describe("owner Saturn UI", () => {
     render(<App />);
 
     expect(await screen.findByText(/sub1@old\.example:22/)).toBeTruthy();
-    fireEvent.click(screen.getByText("Advanced security and owner proof"));
+    fireEvent.click(screen.getByText("Advanced security"));
     const configure = screen.getByRole("button", { name: "Configure storage" });
-    expect(configure).toHaveProperty("disabled", true);
-    fireEvent.change(screen.getByLabelText("Current Access Key"), { target: { value: "owner-proof" } });
-    fireEvent.click(screen.getByRole("button", { name: "Verify owner" }));
-    await waitFor(() => expect(configure).toHaveProperty("disabled", false));
+    expect(configure).toHaveProperty("disabled", false);
     fireEvent.click(configure);
     const dialog = within(screen.getByRole("dialog", { name: "Configure storage" }));
     expect(dialog.getByLabelText("New storage password")).toHaveProperty("value", "");
@@ -1314,6 +1307,7 @@ describe("public Share UI", () => {
     window.history.replaceState({}, "", `/s/${token}`);
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       const url = requestUrl(input);
+      if (url.endsWith("/auth/public-appearance")) return json({ accentColor: "#ff4d00" });
       if (url === "/api/v1/public/reachability") return json({ status: "ready" });
       if (url.includes("/children")) return json([
         { id: "file-2", type: "file", name: "readme.txt", sizeBytes: 512, updatedAt: "2026-09-01T00:00:00.000Z" },
@@ -1324,6 +1318,7 @@ describe("public Share UI", () => {
     render(<App />);
 
     expect(await screen.findByText("readme.txt")).toBeTruthy();
+    await waitFor(() => expect(document.documentElement.style.getPropertyValue("--accent")).toBe("#ff4d00"));
     expect(document.querySelector(".share-public-notice p")?.textContent).toContain("Download permission is not granted for this link.");
     expect(screen.queryByRole("link", { name: "Download readme.txt" })).toBeNull();
     const downloadAll = screen.getByRole("button", { name: "Download all - 512 B" });

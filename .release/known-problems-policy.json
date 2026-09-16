@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "service": "saturn",
+  "catalog_revision": "c54527d1d72c096daccb61a130dfc35152937944",
+  "catalog_sha256": "50c76318747867575935e77fff0520c9517fe513912fef4c8c08944de9562ac5",
+  "remote_path": "PART_12_KNOWN_DEPLOYMENT_AND_OPERATIONS_PROBLEMS.md",
+  "active_ids": 97,
+  "case_defaults": {
+    "REL": ["stage13"],
+    "BST": ["stage13"],
+    "TRUST": ["stage13"],
+    "PERM": ["stage13"],
+    "CTR": ["stage13"],
+    "NET": ["stage13"],
+    "HLT": ["stage13"],
+    "INT": ["stage13"],
+    "DATA": ["stage13"],
+    "OPS": ["stage13"]
+  },
+  "case_overrides": {},
+  "final_checks": ["REL-03", "REL-06", "REL-09", "TRUST-06"],
+  "not_applicable": {
+    "TRUST-07": {
+      "reason": "Saturn consumes only typed Gryphon control contracts and never stores a Telegram bot token, registers a provider webhook, or sends a provider-facing secret value; those trust boundaries belong to Gryphon.",
+      "paths": ["apps/api/src/gryphon-owner.controller.ts", "docs/implementation/EXPOSURE_AND_CONNECTION_MATRIX.md"]
+    },
+    "INT-09": {
+      "reason": "Saturn exposes typed storage and drop-point operations to Gryphon but does not own the global chat command catalog, provider command menu, reply keyboard, aliases, or conversational state machine.",
+      "paths": ["apps/api/src/gryphon-owner.controller.ts", "docs/implementation/OPERATIONS.md"]
+    },
+    "INT-10": {
+      "reason": "Saturn does not register Telegram or other external-provider webhooks and owns no provider callback activation lifecycle; its Gryphon integration is an authenticated outbound control contract.",
+      "paths": ["apps/api/src/gryphon-owner.controller.ts", "docs/implementation/EXPOSURE_AND_CONNECTION_MATRIX.md"]
+    },
+    "INT-11": {
+      "reason": "Saturn has no external webhook ingestion queue, repository or tenant filter, provider delivery worker, or callback ping that could be mistaken for end-to-end event processing.",
+      "paths": ["apps/api/src/gryphon-owner.controller.ts", "docs/implementation/EXPOSURE_AND_CONNECTION_MATRIX.md"]
+    }
+  }
+}

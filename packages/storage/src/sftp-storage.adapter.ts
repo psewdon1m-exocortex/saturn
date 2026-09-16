@@ -107,16 +107,23 @@ export class SftpStorageAdapter implements StorageAdapter {
       ...(end === undefined ? {} : { end }),
     });
     let released = false;
+    let idleTimer: NodeJS.Timeout | undefined;
     const release = (broken: boolean): void => {
       if (released) return;
       released = true;
+      if (idleTimer !== undefined) clearTimeout(idleTimer);
       void lease.release(broken);
     };
+    const resetIdleTimeout = (): void => {
+      if (idleTimer !== undefined) clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => stream.destroy(new Error("SFTP read idle timeout")), this.#storage.operationTimeoutMs);
+    };
+    stream.on("data", resetIdleTimeout);
     stream.once("end", () => release(false));
     stream.once("close", () => release(false));
     stream.once("error", () => release(true));
     // Pin the remote file handle before the caller releases its metadata lock.
-    try { await once(stream, "open", { signal: AbortSignal.timeout(this.#storage.operationTimeoutMs) }); }
+    try { await once(stream, "open", { signal: AbortSignal.timeout(this.#storage.operationTimeoutMs) }); resetIdleTimeout(); }
     catch (error) { stream.destroy(); release(true); throw error; }
     return stream;
   }

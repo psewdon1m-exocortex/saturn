@@ -9,16 +9,13 @@ async function collect(stream: Readable): Promise<Buffer> {
 }
 
 describe("TransferMonitorService", () => {
-  it("measures the real download stream and briefly exposes its terminal state", async () => {
+  it("measures the real download stream and removes its terminal task immediately", async () => {
     vi.useFakeTimers();
     try {
       vi.setSystemTime(new Date("2026-09-02T10:00:00.000Z"));
       const monitor = new TransferMonitorService();
       const stream = monitor.trackDownload(Readable.from([Buffer.from("saturn")]), { filename: "archive.bin", totalBytes: 6 });
       expect((await collect(stream)).toString()).toBe("saturn");
-      const snapshot = monitor.snapshot([], Date.now());
-      expect(snapshot.tasks[0]).toMatchObject({ direction: "download", filename: "archive.bin", state: "completed", transferredBytes: 6, totalBytes: 6, percent: 100 });
-      vi.advanceTimersByTime(10_001);
       expect(monitor.snapshot([], Date.now()).tasks).toHaveLength(0);
     } finally { vi.useRealTimers(); }
   });
@@ -91,6 +88,6 @@ describe("TransferMonitorService", () => {
     expect(monitor.snapshot([]).tasks[0]).toMatchObject({ state: "downloading", canPause: true, canResume: false, canCancel: true });
     expect(monitor.control(id, "cancel")).toBe("cancelled");
     expect(source.destroyed).toBe(true);
-    expect(monitor.snapshot([]).tasks[0]).toMatchObject({ state: "cancelled", canPause: false, canResume: false, canCancel: false });
+    expect(monitor.snapshot([]).tasks).toHaveLength(0);
   });
 });

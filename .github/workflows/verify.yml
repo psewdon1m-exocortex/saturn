@@ -27,6 +27,10 @@ jobs:
         run: pnpm install --frozen-lockfile
       - name: Install Chromium runtime
         run: pnpm exec playwright install --with-deps chromium
+      - name: Validate the pinned Part 12 catalog and fail-closed gate
+        run: |
+          python3 scripts/test-known-problems-gate.py
+          python3 scripts/known-problems-gate.py --phase structure
       - name: Run production-like verification
         run: pnpm verify:stage:13
       - name: Preserve verification evidence
@@ -34,7 +38,11 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: saturn-verification-${{ github.sha }}
-          path: artifacts/verification/
+          path: |
+            artifacts/verification/
+            .release-evidence/
+            known-problems-report.json
+          include-hidden-files: true
           if-no-files-found: ignore
           retention-days: 14
 

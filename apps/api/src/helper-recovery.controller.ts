@@ -4,7 +4,7 @@ import { RouteConfig } from "@nestjs/platform-fastify";
 import type { FastifyReply } from "fastify";
 import { z } from "zod";
 import { updaterToken } from "./neptune.controller.js";
-import { OwnerTokenGuard, RequireRecentReauthentication } from "./owner-token.guard.js";
+import { OwnerTokenGuard } from "./owner-token.guard.js";
 import { SaturnApiExceptionFilter } from "./saturn-api-exception.filter.js";
 
 const schema = z.object({ passphrase: z.string().min(16).max(1024), archive_base64: z.string().max(180 * 1024 * 1024).optional(), confirmation: z.literal("RESTORE HELPERS").optional() }).strict();
@@ -13,12 +13,10 @@ const schema = z.object({ passphrase: z.string().min(16).max(1024), archive_base
 @UseFilters(SaturnApiExceptionFilter)
 export class HelperRecoveryController {
   @Post("export")
-  @RequireRecentReauthentication()
   export(@Body() body: unknown, @Res() reply: FastifyReply) { return this.proxy("export", body, reply); }
 
   @Post("restore")
   @RouteConfig({ bodyLimit: 190 * 1024 * 1024 })
-  @RequireRecentReauthentication()
   restore(@Body() body: unknown, @Res() reply: FastifyReply) { return this.proxy("restore", body, reply); }
 
   private async proxy(action: string, body: unknown, reply: FastifyReply): Promise<void> {
