@@ -1164,14 +1164,19 @@ function FilesView({ initialFolderId, title, routeSegments, onPathChange, shareC
       });
       onShareCapabilityCreated(created.share.id, created.url);
       closeShareComposer();
-      setShareDetails(created.share);
+      setShareDetails(undefined);
       await loadShares();
-      addNotice("success", "Share created. Its capability remains available in Shared for this session.");
+      try {
+        await navigator.clipboard.writeText(created.url);
+        addNotice("success", "Share created and its link copied.");
+      } catch {
+        addNotice("info", "Share created. Clipboard access was blocked; the link remains available in Shared.");
+      }
     } catch (error) {
       if (error instanceof ApiError && error.code === "share_denied") {
         setShareError("This resource cannot be shared in its current state or security classification.");
       } else if (error instanceof ApiError && error.code === "invalid_request") {
-        setShareError("Check the expiry date and use at least 12 characters when a password is enabled.");
+        setShareError("Check the expiry date and keep the optional password within 128 characters.");
       } else {
         handleError(error, "The share could not be created.");
       }
@@ -1195,6 +1200,24 @@ function FilesView({ initialFolderId, title, routeSegments, onPathChange, shareC
   const copyText = async (value: string) => {
     try { await navigator.clipboard.writeText(value); addNotice("success", "Share link copied."); }
     catch { addNotice("error", "Clipboard access was blocked. Select and copy the visible link manually."); }
+  };
+
+  const copyShareCapability = async (share: ShareInfo) => {
+    try {
+      let value = shareCapabilities[share.id];
+      let replaced = false;
+      if (value === undefined) {
+        const capability = await api.shareCapability(share.id);
+        value = capability.url;
+        replaced = capability.replaced;
+        onShareCapabilityCreated(share.id, value);
+      }
+      await navigator.clipboard.writeText(value);
+      addNotice("success", replaced ? "The legacy share link was securely replaced and copied. Its previous URL is no longer active." : "Share link copied.");
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) onUnauthorized();
+      else addNotice("error", "The share link could not be copied.");
+    }
   };
 
   const extractArchive = async (resource: Resource) => {
@@ -1381,12 +1404,12 @@ function FilesView({ initialFolderId, title, routeSegments, onPathChange, shareC
       {shareResource === undefined ? null : <Dialog title={`Share — ${shareResource.name}`} description="Create a read-only capability. Expiry and password are optional." onClose={closeShareComposer}><form className="dialog-form" onSubmit={(event) => void createShare(event)}>
         <label>Access<select value={shareMode} onChange={(event) => setShareMode(event.target.value as ShareInfo["mode"])}>{shareResource.type === "file" ? <><option value="view">View</option><option value="download">Download</option></> : <><option value="browse">Browse</option><option value="download_folder">Browse + download all</option></>}</select></label>
         <label>Expires<input type="datetime-local" value={shareExpiresAt} min={new Date().toISOString().slice(0, 16)} onChange={(event) => setShareExpiresAt(event.target.value)} /></label>
-        <label>Password<input type="password" value={sharePassword} minLength={12} maxLength={128} onChange={(event) => setSharePassword(event.target.value)} autoComplete="new-password" placeholder="Off" /></label>
+        <label>Password<input type="password" value={sharePassword} maxLength={128} onChange={(event) => setSharePassword(event.target.value)} autoComplete="new-password" placeholder="Off" /></label>
         {shareError ? <p className="form-error" role="alert">{shareError}</p> : null}
         <div className="dialog__actions"><button className="button" type="button" onClick={closeShareComposer}>Cancel</button><button className="button button--primary" type="submit" disabled={pending}>Create share</button></div>
       </form></Dialog>}
       {shareDetails === undefined ? null : <Dialog title="Share" description={shareDetails.resourceName} onClose={() => setShareDetails(undefined)}><div className="share-details">
-        {shareCapabilities[shareDetails.id] === undefined ? <p className="muted">This historical link cannot be copied because Saturn stores only its non-reversible hash. You can still revoke access.</p> : <div className="share-link-field"><input aria-label="Share link" value={shareCapabilities[shareDetails.id]} readOnly /><button className="button" type="button" onClick={() => void copyText(shareCapabilities[shareDetails.id] ?? "")}>Copy</button></div>}
+        {shareCapabilities[shareDetails.id] === undefined ? <div className="share-link-field"><p className="muted">Load and copy this link. Legacy hash-only records are securely replaced once because their original token cannot be recovered.</p><button className="button" type="button" disabled={pending || shareDetails.state !== "active"} onClick={() => void copyShareCapability(shareDetails)}>Copy link</button></div> : <div className="share-link-field"><input aria-label="Share link" value={shareCapabilities[shareDetails.id]} readOnly /><button className="button" type="button" onClick={() => void copyText(shareCapabilities[shareDetails.id] ?? "")}>Copy</button></div>}
         <dl><div><dt>Access</dt><dd>{shareDetails.mode.replace("_", " ")}</dd></div><div><dt>Expires</dt><dd>{shareDetails.expiresAt === undefined ? "None" : new Date(shareDetails.expiresAt).toLocaleString()}</dd></div><div><dt>Password</dt><dd>{shareDetails.locked ? "On" : "Off"}</dd></div><div><dt>Status</dt><dd>{shareDetails.state}</dd></div></dl>
         <div className="dialog__actions"><button className="button button--danger" type="button" disabled={pending || shareDetails.state !== "active"} onClick={() => void revokeShare(shareDetails)}>Revoke</button></div>
       </div></Dialog>}
@@ -1600,8 +1623,9 @@ function TrashView({ retentionDays, addNotice, onUnauthorized }: { readonly rete
   );
 }
 
-function SharedView({ shareCapabilities, onShareCapabilityRevoked, addNotice, onAnonymous }: {
+function SharedView({ shareCapabilities, onShareCapabilityCreated, onShareCapabilityRevoked, addNotice, onAnonymous }: {
   readonly shareCapabilities: Readonly<Record<string, string>>;
+  readonly onShareCapabilityCreated: (id: string, url: string) => void;
   readonly onShareCapabilityRevoked: (id: string) => void;
   readonly addNotice: (kind: Notice["kind"], message: string) => void;
   readonly onAnonymous: () => void;
@@ -1635,10 +1659,21 @@ function SharedView({ shareCapabilities, onShareCapabilityRevoked, addNotice, on
     finally { setPending(false); }
   };
   const copyLink = async (id: string) => {
-    const value = shareCapabilities[id];
-    if (value === undefined) { addNotice("info", "This historical capability is non-recoverable. Reissue is awaiting the operator policy decision."); return; }
-    try { await navigator.clipboard.writeText(value); addNotice("success", "Share link copied."); }
-    catch { addNotice("error", "Clipboard access was blocked. Copy the visible link manually."); }
+    try {
+      let value = shareCapabilities[id];
+      let replaced = false;
+      if (value === undefined) {
+        const capability = await api.shareCapability(id);
+        value = capability.url;
+        replaced = capability.replaced;
+        onShareCapabilityCreated(id, value);
+      }
+      await navigator.clipboard.writeText(value);
+      addNotice("success", replaced ? "The legacy share link was securely replaced and copied. Its previous URL is no longer active." : "Share link copied.");
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) onAnonymous();
+      else addNotice("error", "The share link could not be copied.");
+    }
   };
   const changeSort = (field: SortField) => setSort((current) => current.field === field
     ? { field, direction: current.direction === "ascending" ? "descending" : "ascending" }
@@ -1683,7 +1718,7 @@ function SharedView({ shareCapabilities, onShareCapabilityRevoked, addNotice, on
                     <time dateTime={share.updatedAt}>{formatStorageDate(share.updatedAt)}</time>
                   </button>
                   <span className="share-owner-row__access">{formatShareAccess(share.mode)}</span>
-                  <button className="share-owner-row__copy" type="button" disabled={share.state !== "active" || capability === undefined} title={capability === undefined ? "Historical capability is not recoverable from its stored hash" : "Copy capability URL"} onClick={() => void copyLink(share.id)}>Copy link</button>
+                  <button className="share-owner-row__copy" type="button" disabled={share.state !== "active"} title="Copy capability URL" onClick={() => void copyLink(share.id)}>Copy link</button>
                 </div>
                 {isExpanded ? <div className="share-owner-row__details">
                   <dl>
@@ -1694,7 +1729,7 @@ function SharedView({ shareCapabilities, onShareCapabilityRevoked, addNotice, on
                     <div><dt>Access</dt><dd>{formatShareAccess(share.mode)}</dd></div>
                     <div><dt>Downloads</dt><dd>{String(share.downloadCount)}{share.maxDownloads === undefined ? "" : ` / ${String(share.maxDownloads)}`}</dd></div>
                   </dl>
-                  {capability === undefined ? <p className="muted">This historical link cannot be copied because Saturn stores only its non-reversible hash. You can still revoke access.</p> : <input aria-label={`Share URL for ${share.resourceName}`} value={capability} readOnly />}
+                  {capability === undefined ? <p className="muted">Use Copy link to load the protected URL. A legacy hash-only link is replaced once because its original token cannot be recovered.</p> : <input aria-label={`Share URL for ${share.resourceName}`} value={capability} readOnly />}
                   <button className="button button--danger" type="button" onClick={() => void revoke(share)} disabled={pending || share.state !== "active"}>Revoke</button>
                 </div> : null}
               </article>;
@@ -2960,7 +2995,7 @@ function AuthenticatedApp({ health, onAnonymous }: { readonly health: GatewayHea
         {route.view === "dashboard" ? <DashboardView preferences={preferences} setPreferences={setPreferences} addNotice={addNotice} /> : null}
         {route.view === "files" ? <FilesView initialFolderId={ROOT_RESOURCE_ID} title="Storage" routeSegments={route.folderSegments} onPathChange={navigateFilesPath} shareCapabilities={shareCapabilities} onShareCapabilityCreated={rememberShareCapability} onShareCapabilityRevoked={forgetShareCapability} addNotice={addNotice} onUnauthorized={onAnonymous} /> : null}
         {route.view === "inbox" ? <InHouseDropView health={health.gateway} routeSegments={route.folderSegments} onPathChange={navigateInboxPath} shareCapabilities={shareCapabilities} onShareCapabilityCreated={rememberShareCapability} onShareCapabilityRevoked={forgetShareCapability} addNotice={addNotice} onUnauthorized={onAnonymous} /> : null}
-        {route.view === "shared" ? <SharedView shareCapabilities={shareCapabilities} onShareCapabilityRevoked={forgetShareCapability} addNotice={addNotice} onAnonymous={onAnonymous} /> : null}
+        {route.view === "shared" ? <SharedView shareCapabilities={shareCapabilities} onShareCapabilityCreated={rememberShareCapability} onShareCapabilityRevoked={forgetShareCapability} addNotice={addNotice} onAnonymous={onAnonymous} /> : null}
         {route.view === "synchronization" ? <SynchronizationView addNotice={addNotice} /> : null}
         {route.view === "trash" ? <TrashView retentionDays={preferences.trashRetentionDays} addNotice={addNotice} onUnauthorized={onAnonymous} /> : null}
         {route.view === "settings" ? <SettingsView preferences={preferences} setPreferences={setPreferences} addNotice={addNotice} onAnonymous={onAnonymous} /> : null}

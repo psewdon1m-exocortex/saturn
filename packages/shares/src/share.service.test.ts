@@ -17,6 +17,7 @@ function fixture(overrides: { readonly failureLimit?: number } = {}) {
     getShareById: (id: string) => Promise.resolve(shares.get(id)),
     getShareByTokenHash: (hash: string) => Promise.resolve([...shares.values()].find((value) => value.tokenHash === hash)),
     listShares: () => Promise.resolve([...shares.values()]),
+    rotateShareCapability: (id: string, input: { tokenHash: string; tokenCiphertext: string }, now: Date) => { const current = shares.get(id); if (current === undefined || current.state !== "active") return Promise.reject(new Error("missing")); if (current.tokenCiphertext !== undefined) return Promise.resolve({ share: current, rotated: false }); const value = { ...current, ...input, updatedAt: now }; shares.set(id, value); return Promise.resolve({ share: value, rotated: true }); },
     updateShare: (id: string, input: Record<string, unknown>, now: Date) => { const current = shares.get(id); if (current === undefined) return Promise.reject(new Error("missing")); const value = { ...current, ...input, updatedAt: now } as ShareRecord; shares.set(id, value); return Promise.resolve(value); },
     revokeShare: (id: string, now: Date) => { const current = shares.get(id); if (current === undefined) return Promise.reject(new Error("missing")); const value = { ...current, state: "revoked" as const, revokedAt: now, updatedAt: now }; shares.set(id, value); return Promise.resolve(value); },
     sourceAllowed: () => Promise.resolve(true),
@@ -60,24 +61,43 @@ function fixture(overrides: { readonly failureLimit?: number } = {}) {
 }
 
 describe("ShareService", () => {
-  it("discloses a 256-bit capability once and stores only its domain-separated hash", async () => {
+  it("protects a 256-bit capability at rest and can copy it again later", async () => {
     const { service, shares } = fixture();
     const created = await service.createShare({ resourceId: "file", mode: "download" });
     expect(created.token).toMatch(/^[A-Za-z0-9_-]{43}$/);
     expect(created.url).toBe(`https://vault.test/s/${created.token}`);
     expect(JSON.stringify([...shares.values()])).not.toContain(created.token);
     expect((await service.listShares())[0]).not.toHaveProperty("token");
+    expect(shares.get(created.share.id)?.tokenCiphertext).toMatch(/^v1\./);
+    await expect(service.getShareCapability(created.share.id)).resolves.toEqual({ url: created.url, replaced: false });
+  });
+
+  it("replaces a legacy hash-only capability once so its link becomes copyable", async () => {
+    const { service, shares } = fixture();
+    const created = await service.createShare({ resourceId: "file", mode: "download" });
+    const record = shares.get(created.share.id);
+    if (record === undefined) throw new Error("share fixture missing");
+    const { tokenCiphertext: _omitted, ...legacyRecord } = record;
+    void _omitted;
+    shares.set(record.id, legacyRecord);
+
+    const recovered = await service.getShareCapability(record.id);
+    expect(recovered.replaced).toBe(true);
+    expect(recovered.url).not.toBe(created.url);
+    await expect(service.metadata(created.token, { sourceIp: "192.0.2.1", userAgent: "browser" })).rejects.toMatchObject({ code: "not_found" });
+    const replacementToken = recovered.url.slice(recovered.url.lastIndexOf("/") + 1);
+    await expect(service.metadata(replacementToken, { sourceIp: "192.0.2.1", userAgent: "browser" })).resolves.toHaveProperty("share.id", record.id);
   });
 
   it("uses Argon2id, binds the short session and counts one download across ranges", async () => {
     const { service, shares } = fixture();
-    const created = await service.createShare({ resourceId: "file", mode: "download", password: "correct-horse-battery" });
+    const created = await service.createShare({ resourceId: "file", mode: "download", password: "x" });
     const record = [...shares.values()][0];
     expect(record?.passwordHash).toMatch(/^argon2id\$/);
     const locked = await service.metadata(created.token, { sourceIp: "192.0.2.1", userAgent: "browser" });
     expect(locked.share.locked).toBe(true);
     await expect(service.unlock(created.token, "incorrect-password", { sourceIp: "192.0.2.1", userAgent: "browser" })).rejects.toMatchObject({ code: "denied" });
-    const unlocked = await service.unlock(created.token, "correct-horse-battery", { sourceIp: "192.0.2.1", userAgent: "browser" });
+    const unlocked = await service.unlock(created.token, "x", { sourceIp: "192.0.2.1", userAgent: "browser" });
     const input = { sourceIp: "192.0.2.1", userAgent: "browser", sessionToken: unlocked.session.token };
     const first = await service.openContent(created.token, { offset: 0, length: 3 }, input);
     expect(Buffer.concat(await first.stream.toArray())).toEqual(Buffer.from("abc"));

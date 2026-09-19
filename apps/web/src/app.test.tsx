@@ -700,6 +700,8 @@ describe("owner Saturn UI", () => {
       { id: "01900000-0000-7000-8000-000000000201", resourceId: "01900000-0000-7000-8000-000000000301", resourceType: "folder", resourceName: "alpha archive", resourceSize: 0, mode: "browse", state: "active", locked: true, expiresAt: "2026-09-08T00:00:00.000Z", downloadCount: 0, createdAt: older, updatedAt: older },
     ] as const;
     let revokeAttempts = 0;
+    const writeText = vi.fn(async () => undefined);
+    Object.defineProperty(window.navigator, "clipboard", { configurable: true, value: { writeText } });
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = requestUrl(input);
       if (url === "/api/v1/public/reachability") return json({ status: "ready" });
@@ -708,6 +710,9 @@ describe("owner Saturn UI", () => {
       if (url.endsWith(`/shares/${shares[1].id}`) && init?.method === "DELETE") {
         revokeAttempts += 1;
         return json({ ...shares[1], state: "revoked", updatedAt: newer });
+      }
+      if (url.endsWith(`/shares/${shares[1].id}/capability`) && init?.method === "POST") {
+        return json({ url: "https://saturn.test/s/recovered-share-token", replaced: true });
       }
       if (url.includes("/shares?")) return json(shares);
       return json({});
@@ -733,8 +738,11 @@ describe("owner Saturn UI", () => {
     fireEvent.click(screen.getByRole("button", { name: /alpha archive/i }));
     expect(screen.getByText("Password").parentElement?.textContent).toContain("On");
     expect(screen.getByText("Expires at").parentElement?.textContent).not.toContain("None");
-    expect(screen.getByText(/You can still revoke access/i)).toBeTruthy();
-    for (const button of screen.getAllByRole("button", { name: "Copy link" })) expect(button).toHaveProperty("disabled", true);
+    expect(screen.getByText(/legacy hash-only link is replaced once/i)).toBeTruthy();
+    for (const button of screen.getAllByRole("button", { name: "Copy link" })) expect(button).toHaveProperty("disabled", false);
+    fireEvent.click(screen.getAllByRole("button", { name: "Copy link" })[0] as HTMLButtonElement);
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("https://saturn.test/s/recovered-share-token"));
+    expect(await screen.findByLabelText("Share URL for alpha archive")).toHaveProperty("value", "https://saturn.test/s/recovered-share-token");
 
     fireEvent.click(screen.getByRole("button", { name: "Revoke" }));
     await waitFor(() => expect(revokeAttempts).toBe(1));
@@ -746,12 +754,14 @@ describe("owner Saturn UI", () => {
     expect([...document.querySelectorAll(".share-owner-row__name")].map((item) => item.textContent)).toEqual(["zeta-report.pdf"]);
   });
 
-  it("creates a password-protected share without requesting the Access Key again", async () => {
+  it("creates a share with a short optional password, copies its link and closes the composer", async () => {
     window.history.replaceState({}, "", "/files");
     const now = new Date().toISOString();
     const rootId = "00000000-0000-7000-8000-000000000001";
     const file = { id: "01900000-0000-7000-8000-000000000101", parentId: rootId, type: "file", name: "report.pdf", storagePath: "report.pdf", sizeBytes: 1024, mimeType: "application/pdf", status: "active", createdAt: now, updatedAt: now } as const;
     const createdShare = { id: "01900000-0000-7000-8000-000000000102", resourceId: file.id, resourceType: "file", resourceName: file.name, resourceSize: file.sizeBytes, resourceMimeType: file.mimeType, mode: "download", state: "active", locked: false, downloadCount: 0, createdAt: now, updatedAt: now } as const;
+    const writeText = vi.fn(async () => undefined);
+    Object.defineProperty(window.navigator, "clipboard", { configurable: true, value: { writeText } });
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = requestUrl(input);
       if (url === "/api/v1/public/reachability") return json({ status: "ready" });
@@ -770,14 +780,16 @@ describe("owner Saturn UI", () => {
 
     fireEvent.click(await screen.findByLabelText("Select report.pdf"));
     fireEvent.click(screen.getByRole("button", { name: "Share" }));
-    fireEvent.change(await screen.findByLabelText("Password"), { target: { value: "protected-share-password" } });
+    fireEvent.change(await screen.findByLabelText("Password"), { target: { value: "x" } });
     fireEvent.click(await screen.findByRole("button", { name: "Create share" }));
 
-    expect(await screen.findByLabelText("Share link")).toHaveProperty("value", "http://saturn.test/s/share-token");
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("http://saturn.test/s/share-token"));
+    await waitFor(() => expect(screen.queryByLabelText("Password")).toBeNull());
+    expect(screen.queryByLabelText("Share link")).toBeNull();
     expect(screen.queryByLabelText("Share Access Key")).toBeNull();
     expect(fetchMock.mock.calls.some((call) => requestUrl(call[0]).endsWith("/auth/reauthenticate"))).toBe(false);
     const createCall = fetchMock.mock.calls.find((call) => requestUrl(call[0]).endsWith("/shares") && call[1]?.method === "POST");
-    expect(jsonRequestBody(createCall?.[1])).toMatchObject({ resourceId: file.id, mode: "download", password: "protected-share-password" });
+    expect(jsonRequestBody(createCall?.[1])).toMatchObject({ resourceId: file.id, mode: "download", password: "x" });
 
     fireEvent.click(screen.getByRole("button", { name: "Shared" }));
     expect(await screen.findByRole("heading", { name: "shared" })).toBeTruthy();

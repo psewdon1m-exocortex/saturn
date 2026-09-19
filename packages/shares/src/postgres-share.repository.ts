@@ -4,6 +4,7 @@ import type { SharePackage, ShareRecord, ShareRepository, ShareSession } from ".
 interface ShareRow {
   id: string;
   token_hash: string;
+  token_ciphertext: string | null;
   resource_id: string;
   resource_type: "file" | "folder";
   mode: ShareRecord["mode"];
@@ -50,6 +51,7 @@ function share(row: ShareRow): ShareRecord {
   return {
     id: row.id,
     tokenHash: row.token_hash,
+    ...(row.token_ciphertext === null ? {} : { tokenCiphertext: row.token_ciphertext }),
     resourceId: row.resource_id,
     resourceType: row.resource_type,
     mode: row.mode,
@@ -106,10 +108,10 @@ export class PostgresShareRepository implements ShareRepository {
     return this.#database.withSql(async (sql) => {
       const rows = await sql<ShareRow[]>`
         INSERT INTO shares (
-          id, token_hash, resource_id, resource_type, mode, state, password_hash,
+          id, token_hash, token_ciphertext, resource_id, resource_type, mode, state, password_hash,
           expires_at, max_downloads, allowed_cidr, classification_ceiling, created_at, updated_at
         ) VALUES (
-          ${input.id}, ${input.tokenHash}, ${input.resourceId}, ${input.resourceType}, ${input.mode}, 'active',
+          ${input.id}, ${input.tokenHash}, ${input.tokenCiphertext ?? null}, ${input.resourceId}, ${input.resourceType}, ${input.mode}, 'active',
           ${input.passwordHash ?? null}, ${input.expiresAt ?? null}, ${input.maxDownloads ?? null},
           ${input.allowedCidr ?? null}, ${input.classificationCeiling}, ${input.createdAt}, ${input.createdAt}
         ) RETURNING *
@@ -140,6 +142,23 @@ export class PostgresShareRepository implements ShareRepository {
     return this.#database.withSql(async (sql) => (await sql<ShareRow[]>`
       SELECT * FROM shares ORDER BY created_at DESC, id DESC OFFSET ${offset} LIMIT ${limit}
     `).map(share));
+  }
+
+  rotateShareCapability(id: string, input: { readonly tokenHash: string; readonly tokenCiphertext: string }, now: Date): Promise<{ readonly share: ShareRecord; readonly rotated: boolean }> {
+    return this.#database.transaction(async (sql) => {
+      const rows = await sql<ShareRow[]>`
+        UPDATE shares SET token_hash = ${input.tokenHash}, token_ciphertext = ${input.tokenCiphertext}, updated_at = ${now}
+        WHERE id = ${id} AND state = 'active' AND token_ciphertext IS NULL RETURNING *
+      `;
+      const row = rows[0];
+      if (row !== undefined) {
+        await sql`UPDATE share_sessions SET state = 'revoked' WHERE share_id = ${id} AND state = 'active'`;
+        return { share: share(row), rotated: true };
+      }
+      const current = (await sql<ShareRow[]>`SELECT * FROM shares WHERE id = ${id} AND state = 'active' LIMIT 1`)[0];
+      if (current === undefined) throw new Error("Active share not found");
+      return { share: share(current), rotated: false };
+    });
   }
 
   updateShare(id: string, input: { readonly mode?: ShareRecord["mode"]; readonly expiresAt?: Date | null; readonly passwordHash?: string | null; readonly maxDownloads?: number | null; readonly allowedCidr?: string | null }, now: Date): Promise<ShareRecord> {

@@ -305,19 +305,22 @@ inside Saturn.
   the API to the previous version; never delete uncommitted staging files as an
   implicit rollback step.
 
-### MD-14-02 — Re-copying historical capability URLs — pending
+### MD-14-02 — Re-copying capability URLs — implemented
 
 - Applicable rule: capability tokens must not be derivable from the stored
   share record and must not be logged or exposed broadly.
-- Previous behavior: only an HMAC is persisted and the URL is disclosed once.
+- Previous behavior: only an HMAC was persisted and the URL was disclosed once.
 - Requested UI: every existing share row has a Copy link action.
-- Options: keep one-time disclosure and show Copy only while the token remains
-  in page memory; rotate/reissue a capability for historical rows; or add an
-  encrypted recoverable-token store with a separate key and migration.
-- Recommendation: reissue/rotate explicitly. It preserves non-recoverable
-  storage and makes invalidation visible.
-- Blocked work: historical-row Copy behavior only. Search, ranking, expansion,
-  creation and revoke continue independently.
+- Decision: new capabilities are stored as an HMAC verifier plus an
+  AES-256-GCM envelope derived from the existing share pepper. The owner-only
+  capability endpoint decrypts the URL only on an explicit Copy action; list
+  responses, logs and public APIs never receive the token.
+- Legacy migration: rows created before migration 0036 remain hash-only. Their
+  first owner Copy action generates a replacement capability, revokes active
+  share sessions and reports that the previous URL is no longer active. Later
+  Copy actions return the same protected URL without rotating it again.
+- Result: every active share row has a working Copy link action across browser
+  refreshes while capability values remain encrypted at rest.
 
 ### MD-14-03 — Files directly in storage root — pending
 

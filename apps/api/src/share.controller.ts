@@ -14,14 +14,14 @@ const createSchema = z.object({
   resourceId: z.uuid(),
   mode,
   expiresAt: z.iso.datetime({ offset: true }).optional(),
-  password: z.string().min(12).max(128).optional(),
+  password: z.string().min(1).max(128).optional(),
   maxDownloads: z.number().int().min(1).max(1_000_000).optional(),
   allowedCidr: z.string().min(3).max(64).optional(),
 }).strict();
 const updateSchema = z.object({
   mode: mode.optional(),
   expiresAt: z.union([z.iso.datetime({ offset: true }), z.null()]).optional(),
-  password: z.union([z.string().min(12).max(128), z.null()]).optional(),
+  password: z.union([z.string().min(1).max(128), z.null()]).optional(),
   maxDownloads: z.union([z.number().int().min(1).max(1_000_000), z.null()]).optional(),
   allowedCidr: z.union([z.string().min(3).max(64), z.null()]).optional(),
 }).strict();
@@ -105,6 +105,10 @@ export class ShareOwnerController {
   list(@Query("offset") offset?: string, @Query("limit") limit?: string) {
     return this.shares.listShares(offset === undefined ? 0 : Number(offset), limit === undefined ? 100 : Number(limit));
   }
+
+  @Post(":id/capability")
+  @HttpCode(200)
+  capability(@Param("id") id: string) { return this.shares.getShareCapability(id); }
 
   @Patch(":id")
   @RequireRecentReauthentication()

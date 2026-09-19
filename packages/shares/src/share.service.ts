@@ -1,4 +1,4 @@
-import { argon2, createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { argon2, createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { Readable, Transform } from "node:stream";
 import type { AuditSink } from "@saturn/audit";
 import type { Resource, SecurityClassification } from "@saturn/file-core";
@@ -64,7 +64,7 @@ async function verifyPassword(encoded: string, password: string): Promise<boolea
 
 function validatePassword(password: string): string {
   const bytes = Buffer.byteLength(password, "utf8");
-  if (password.length < 12 || password.length > 128 || bytes > 256 || /[\r\n]/.test(password)) throw new Error("Share password is invalid");
+  if (password.length < 1 || password.length > 128 || bytes > 256 || /[\r\n]/.test(password)) throw new Error("Share password is invalid");
   return password;
 }
 
@@ -124,6 +124,33 @@ export class ShareService {
   #userAgentHash(userAgent: string): string { return this.#hmac("share-user-agent", userAgent.slice(0, 1024)); }
   #tokenHash(token: string): string { return this.#hmac("share-capability-token", token); }
 
+  #capabilityKey(): Buffer {
+    return createHmac("sha256", this.#pepper).update("share-capability-encryption-key").digest();
+  }
+
+  #encryptCapability(id: string, token: string): string {
+    const nonce = randomBytes(12);
+    const cipher = createCipheriv("aes-256-gcm", this.#capabilityKey(), nonce);
+    cipher.setAAD(Buffer.from(`saturn-share-capability\0${id}`, "utf8"));
+    const ciphertext = Buffer.concat([cipher.update(token, "utf8"), cipher.final()]);
+    return `v1.${nonce.toString("base64url")}.${ciphertext.toString("base64url")}.${cipher.getAuthTag().toString("base64url")}`;
+  }
+
+  #decryptCapability(share: ShareRecord): string {
+    const parts = share.tokenCiphertext?.split(".") ?? [];
+    if (parts.length !== 4 || parts[0] !== "v1") throw new ShareServiceError("denied");
+    try {
+      const decipher = createDecipheriv("aes-256-gcm", this.#capabilityKey(), Buffer.from(parts[1] ?? "", "base64url"));
+      decipher.setAAD(Buffer.from(`saturn-share-capability\0${share.id}`, "utf8"));
+      decipher.setAuthTag(Buffer.from(parts[3] ?? "", "base64url"));
+      const token = Buffer.concat([decipher.update(Buffer.from(parts[2] ?? "", "base64url")), decipher.final()]).toString("utf8");
+      if (!tokenValid(token) || this.#tokenHash(token) !== share.tokenHash) throw new Error("Capability integrity mismatch");
+      return token;
+    } catch {
+      throw new ShareServiceError("denied");
+    }
+  }
+
   async createShare(input: { readonly resourceId: string; readonly mode: ShareMode; readonly expiresAt?: Date; readonly password?: string; readonly maxDownloads?: number; readonly allowedCidr?: string }, now = new Date()): Promise<{ readonly token: string; readonly url: string; readonly share: PublicShare }> {
     if (!this.#options.enabled) throw new ShareServiceError("denied");
     const resource = await this.#files.getResource(input.resourceId);
@@ -134,11 +161,13 @@ export class ShareService {
     const expiresAt = input.expiresAt;
     if (expiresAt !== undefined && (expiresAt <= now || expiresAt.getTime() - now.getTime() > this.#options.maxExpiryMs)) throw new Error("Share expiry is invalid");
     if (input.maxDownloads !== undefined && (!Number.isSafeInteger(input.maxDownloads) || input.maxDownloads < 1 || input.maxDownloads > 1_000_000)) throw new Error("Share download limit is invalid");
+    const id = uuidv7();
     const token = randomBytes(32).toString("base64url");
     const publicOrigin = await this.#options.resolvePublicOrigin?.() ?? this.#options.publicOrigin;
     const record = await this.#repository.createShare({
-      id: uuidv7(),
+      id,
       tokenHash: this.#tokenHash(token),
+      tokenCiphertext: this.#encryptCapability(id, token),
       resourceId: resource.id,
       resourceType: resource.type,
       mode: input.mode,
@@ -157,6 +186,26 @@ export class ShareService {
     if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 500) throw new Error("Share page is invalid");
     const records = await this.#repository.listShares(offset, limit);
     return Promise.all(records.map(async (record) => publicValue(record, await this.#files.getResource(record.resourceId), record.passwordHash !== undefined)));
+  }
+
+  async getShareCapability(id: string, now = new Date()): Promise<{ readonly url: string; readonly replaced: boolean }> {
+    let record = await this.#repository.getShareById(id);
+    if (record === undefined) throw new ShareServiceError("not_found");
+    if (record.state !== "active" || (record.expiresAt !== undefined && record.expiresAt <= now) || (record.maxDownloads !== undefined && record.downloadCount >= record.maxDownloads)) throw new ShareServiceError("denied");
+    let replaced = false;
+    let token: string;
+    if (record.tokenCiphertext === undefined) {
+      token = randomBytes(32).toString("base64url");
+      const rotation = await this.#repository.rotateShareCapability(id, { tokenHash: this.#tokenHash(token), tokenCiphertext: this.#encryptCapability(id, token) }, now);
+      record = rotation.share;
+      replaced = rotation.rotated;
+      if (!rotation.rotated) token = this.#decryptCapability(record);
+    } else {
+      token = this.#decryptCapability(record);
+    }
+    const publicOrigin = await this.#options.resolvePublicOrigin?.() ?? this.#options.publicOrigin;
+    await this.#auditOwner(replaced ? "share.capability_replaced" : "share.capability_retrieved", record.id, { resourceId: record.resourceId });
+    return { url: new URL(`/s/${token}`, publicOrigin).toString(), replaced };
   }
 
   async updateShare(id: string, input: { readonly mode?: ShareMode; readonly expiresAt?: Date | null; readonly password?: string | null; readonly maxDownloads?: number | null; readonly allowedCidr?: string | null }, now = new Date()): Promise<PublicShare> {

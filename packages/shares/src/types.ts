@@ -7,6 +7,7 @@ export type ShareState = "active" | "revoked" | "expired" | "exhausted";
 export interface ShareRecord {
   readonly id: string;
   readonly tokenHash: string;
+  readonly tokenCiphertext?: string;
   readonly resourceId: string;
   readonly resourceType: "file" | "folder";
   readonly mode: ShareMode;
@@ -87,6 +88,7 @@ export interface ShareRepository {
   getShareById(id: string): Promise<ShareRecord | undefined>;
   getShareByTokenHash(tokenHash: string): Promise<ShareRecord | undefined>;
   listShares(offset: number, limit: number): Promise<readonly ShareRecord[]>;
+  rotateShareCapability(id: string, input: { readonly tokenHash: string; readonly tokenCiphertext: string }, now: Date): Promise<{ readonly share: ShareRecord; readonly rotated: boolean }>;
   updateShare(id: string, input: { readonly mode?: ShareMode; readonly expiresAt?: Date | null; readonly passwordHash?: string | null; readonly maxDownloads?: number | null; readonly allowedCidr?: string | null }, now: Date): Promise<ShareRecord>;
   revokeShare(id: string, now: Date): Promise<ShareRecord>;
   sourceAllowed(sourceIp: string, cidr: string): Promise<boolean>;

@@ -89,7 +89,9 @@ POST/GET split remains an internal API detail.
 
 - capability token: 32 random bytes encoded as base64url (256 bits);
 - default expiry: 7 days; maximum configurable expiry: 365 days;
-- password: optional, 12–128 UTF-8 characters; Argon2id, 19 MiB, two passes;
+- password: optional, no strength or minimum-length rule (an empty field means
+  Off); non-empty values have only the 128-character/256-byte transport bound
+  and are protected with Argon2id, 19 MiB, two passes;
 - share session: 30-minute absolute TTL;
 - password failures: 5 per hashed source per 15 minutes;
 - one `Range: bytes=start-end` only; invalid/multiple/unsatisfiable ranges are

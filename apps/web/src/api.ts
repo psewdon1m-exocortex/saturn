@@ -232,6 +232,7 @@ export const api = {
   createShare: (input: { readonly resourceId: string; readonly mode: ShareInfo["mode"]; readonly expiresAt?: string; readonly password?: string; readonly maxDownloads?: number }) => request<{ readonly token: string; readonly url: string; readonly share: ShareInfo }>("/shares", {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input),
   }),
+  shareCapability: (id: string) => request<{ readonly url: string; readonly replaced: boolean }>(`/shares/${encodeURIComponent(id)}/capability`, { method: "POST" }),
   revokeShare: (id: string) => request<ShareInfo>(`/shares/${encodeURIComponent(id)}`, { method: "DELETE" }),
   classifyResource: (id: string, classification: NonNullable<Resource["securityClassification"]>) => request<Resource>(`/resources/${encodeURIComponent(id)}/classification`, {
     method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ classification }),
