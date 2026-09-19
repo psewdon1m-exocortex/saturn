@@ -79,7 +79,7 @@ export class UpdaterController {
       finally { archive.fill(0); }
     }
     if (!["updater", "neptune", "gryphon"].includes(component)) throw new BadRequestException("Unknown component");
-    const input = z.object({ version: z.string().regex(/^\d+\.\d+\.\d+$/), request_id: z.string().uuid() }).strict().parse(body);
+    const input = z.object({ version: z.string().regex(/^\d+\.\d+\.\d+$/), request_id: z.uuid() }).strict().parse(body);
     return updater(`/v2/components/${component}/updates`, { ...input, head_id: headId() }, 45_000);
   }
 

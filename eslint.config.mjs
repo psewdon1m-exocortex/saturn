@@ -37,4 +37,8 @@ export default tseslint.config(
       "@typescript-eslint/require-await": "off"
     },
   },
+  {
+    files: ["apps/web/src/update-overlay.js"],
+    extends: [tseslint.configs.disableTypeChecked],
+  },
 );
