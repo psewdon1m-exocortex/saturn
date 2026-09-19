@@ -15,6 +15,7 @@ import {
   VOLT_RESOURCE_ID,
   ROOT_RESOURCE_ID,
   SYNC_RESOURCE_ID,
+  type BackupRunInfo,
   type BackupServiceInfo,
   type AuditEventInfo,
   type ArchiveJobInfo,
@@ -2220,6 +2221,14 @@ function NeptunePipelineRow({ service, agent, release, pending, reauthed, onSche
   const [archiveHours, setArchiveHours] = useState(agent?.desired.archiveIntervalHours ?? 24);
   const [mirrorEnabled, setMirrorEnabled] = useState(agent?.desired.mirrorEnabled ?? false);
   const [mirrorMinutes, setMirrorMinutes] = useState(agent?.desired.mirrorIntervalMinutes ?? 5);
+  const [runs, setRuns] = useState<readonly BackupRunInfo[]>([]);
+  useEffect(() => {
+    let live = true;
+    const load = () => { void api.backupRuns(service.id, 5).then((value) => { if (live) setRuns(value); }).catch(() => undefined); };
+    load();
+    const timer = window.setInterval(load, 30_000);
+    return () => { live = false; window.clearInterval(timer); };
+  }, [service.id]);
   useEffect(() => {
     setArchiveEnabled(agent?.desired.archiveEnabled ?? false);
     setArchiveHours(agent?.desired.archiveIntervalHours ?? 24);
@@ -2227,7 +2236,7 @@ function NeptunePipelineRow({ service, agent, release, pending, reauthed, onSche
     setMirrorMinutes(agent?.desired.mirrorIntervalMinutes ?? 5);
   }, [agent?.desired.revision]);
   const lastSeenAt = agent?.observed.lastSeenAt;
-  const online = lastSeenAt !== undefined && Date.now() - new Date(lastSeenAt).getTime() < 45_000;
+  const online = agent?.observed.online ?? (lastSeenAt !== undefined && Date.now() - new Date(lastSeenAt).getTime() < 45_000);
   const applied = agent !== undefined && agent.observed.appliedRevision >= agent.desired.revision;
   const archiveActive = agent?.observed.archive["active"] === true;
   const mirrorActive = agent?.observed.mirror["active"] === true;
@@ -2237,21 +2246,25 @@ function NeptunePipelineRow({ service, agent, release, pending, reauthed, onSche
     ? `online · Neptune ${agent?.observed.version ?? "unknown"}`
     : lastSeenAt === undefined ? "waiting for first check-in" : `offline · last seen ${new Date(lastSeenAt).toLocaleString()}`;
   const disabled = pending || service.state !== "active";
+  const archiveLastAttempt = typeof agent?.observed.archive["lastAttemptAt"] === "string" ? agent.observed.archive["lastAttemptAt"] : undefined;
+  const archiveLastSuccess = typeof agent?.observed.archive["lastSuccessAt"] === "string" ? agent.observed.archive["lastSuccessAt"] : service.usage.lastCompletedAt;
+  const archiveNextRun = typeof agent?.observed.archive["nextRunAt"] === "string" ? agent.observed.archive["nextRunAt"] : undefined;
   const save = (next?: { readonly archiveEnabled?: boolean; readonly mirrorEnabled?: boolean }) => onSchedule(service,
     next?.archiveEnabled ?? archiveEnabled, archiveHours, next?.mirrorEnabled ?? mirrorEnabled, mirrorMinutes);
   return <article className="fleet-agent">
-    <div className="fleet-agent__summary"><strong>{service.name}</strong><span>{service.namespaceSlug}/{service.deploymentId} · {service.state} · {formatBytes(service.usage.storedBytes)}/{formatBytes(service.storedQuotaBytes)} stored</span><span>{heartbeat} · {applied ? "schedule applied" : "schedule pending"}{versionPending ? ` · update ${agent.desired.version} pending` : ""}</span>{agent?.observed.latestError === undefined ? null : <span className="danger-text">{agent.observed.latestError}</span>}</div>
+    <div className="fleet-agent__summary"><strong>{service.name}</strong><span>{service.namespaceSlug}/{service.deploymentId} · {service.state} · {formatBytes(service.usage.storedBytes)}/{formatBytes(service.storedQuotaBytes)} stored</span><span>{heartbeat} · {applied ? "schedule applied" : "schedule pending"}{versionPending ? ` · update ${agent.desired.version} pending` : ""}</span><span>{archiveLastSuccess === undefined ? "no successful ZIP reported" : `last ZIP ${new Date(archiveLastSuccess).toLocaleString()}`}{archiveNextRun === undefined ? "" : ` · next ${new Date(archiveNextRun).toLocaleString()}`}{archiveLastAttempt === undefined || archiveLastAttempt === archiveLastSuccess ? "" : ` · last attempt ${new Date(archiveLastAttempt).toLocaleString()}`}</span>{agent?.observed.latestError === undefined ? null : <span className="danger-text">{agent.observed.latestError}</span>}</div>
     <div className="fleet-agent__schedule">
       <label><input type="checkbox" checked={archiveEnabled} disabled={disabled} onChange={(event) => { setArchiveEnabled(event.target.checked); void save({ archiveEnabled: event.target.checked }); }} />Automatic ZIP</label>
       <label>Every, hours<input type="number" min={1} max={8760} value={archiveHours} disabled={disabled} onChange={(event) => setArchiveHours(Number(event.target.value))} onBlur={() => void save()} /></label>
-      <button className="button" type="button" disabled={disabled || !online || archiveActive} onClick={() => void onCommand(service, "archive.run")}>Run ZIP now</button>
+      <button className="button" type="button" disabled={disabled || archiveActive} onClick={() => void onCommand(service, "archive.run")}>{online ? "Run ZIP now" : "Queue ZIP run"}</button>
       {service.mirrorRoot === undefined ? null : <>
         <label><input type="checkbox" checked={mirrorEnabled} disabled={disabled} onChange={(event) => { setMirrorEnabled(event.target.checked); void save({ mirrorEnabled: event.target.checked }); }} />Automatic /{service.mirrorRoot} mirror</label>
         <label>Every, minutes<input type="number" min={1} max={10080} value={mirrorMinutes} disabled={disabled} onChange={(event) => setMirrorMinutes(Number(event.target.value))} onBlur={() => void save()} /></label>
-        <button className="button" type="button" disabled={disabled || !online || mirrorActive} onClick={() => void onCommand(service, "mirror.run")}>Run mirror now</button>
+        <button className="button" type="button" disabled={disabled || mirrorActive} onClick={() => void onCommand(service, "mirror.run")}>{online ? "Run mirror now" : "Queue mirror run"}</button>
       </>}
     </div>
     <div className="inline-actions"><button className="button" type="button" disabled={pending || !online} onClick={() => void onCheckUpdate(service)}>Check update</button>{updateVersion === undefined ? release === undefined ? null : <span className="setting-meta">Up to date</span> : <button className="button button--primary" type="button" disabled={pending || !online || versionPending} onClick={() => void onInstallUpdate(service, updateVersion)}>Update to {updateVersion}</button>}<button className="button" type="button" disabled={pending || !reauthed || service.state !== "active"} onClick={() => void onSetup(service.id)}>Setup code</button><button className="button" type="button" disabled={pending || !reauthed || service.state !== "active"} onClick={() => void onRotate(service.id)}>Rotate archive token</button><button className="button button--danger" type="button" disabled={pending || !reauthed || service.state !== "active"} onClick={() => void onRevoke(service.id)}>Revoke</button></div>
+    <details className="fleet-agent__runs"><summary>Recent ZIP runs ({runs.length})</summary>{runs.length === 0 ? <p className="empty-state">No runs recorded.</p> : <div className="compact-list">{runs.map((run) => <div className="compact-row" key={run.id}><span>{run.state} · {new Date(run.updatedAt).toLocaleString()} · {formatBytes(run.expectedSize)}</span><span>{run.receipt?.logicalPath ?? run.failureCode ?? run.filename}</span></div>)}</div>}</details>
   </article>;
 }
 

@@ -194,6 +194,111 @@ export class FileService {
     }
   }
 
+  /**
+   * Publishes an immutable object that was committed directly by another trusted
+   * storage pipeline. The bytes are never copied; only the normal Saturn catalog
+   * hierarchy and initial file version are created.
+   */
+  async adoptExistingFile(input: {
+    readonly rootId: string;
+    readonly storagePath: string;
+    readonly sizeBytes: number;
+    readonly sha256: string;
+    readonly mimeType: string;
+    readonly auditActor?: { readonly type: string; readonly id: string };
+  }): Promise<Resource> {
+    const root = await this.getResource(input.rootId);
+    if (root.type !== "folder" || root.status !== "active") throw new Error("Catalog adoption root is not active");
+    const sha256 = input.sha256.toLowerCase();
+    if (!Number.isSafeInteger(input.sizeBytes) || input.sizeBytes < 0 || !/^[a-f0-9]{64}$/.test(sha256)) {
+      throw new Error("Catalog adoption metadata is invalid");
+    }
+    const prefix = root.storagePath === "" ? "" : `${root.storagePath}/`;
+    if (!input.storagePath.startsWith(prefix) || input.storagePath === root.storagePath) {
+      throw new Error("Catalog adoption path is outside its root");
+    }
+    const relative = input.storagePath.slice(prefix.length).split("/");
+    if (relative.length < 1 || relative.some((segment) => normalizeStorageName(segment) !== segment)) {
+      throw new Error("Catalog adoption path is invalid");
+    }
+    const filename = relative.at(-1);
+    if (filename === undefined) throw new Error("Catalog adoption filename is missing");
+    const attributes = await this.#storage.stat(input.storagePath);
+    if (attributes.type !== "file" || attributes.size !== input.sizeBytes) {
+      throw new Error("Catalog adoption object differs from the committed backup");
+    }
+
+    let parent = root;
+    let currentPath = root.storagePath;
+    for (const segment of relative.slice(0, -1)) {
+      currentPath = joinStoragePath(currentPath, segment);
+      let child = await this.#repository.getChild(parent.id, segment);
+      if (child === undefined) {
+        const directory = await this.#storage.stat(currentPath);
+        if (directory.type !== "directory") throw new Error("Catalog adoption parent is not a directory");
+        try {
+          child = await this.#repository.createFolder({ id: uuidv7(), parentId: parent.id, name: segment, storagePath: currentPath });
+        } catch (error) {
+          child = await this.#repository.getChild(parent.id, segment);
+          if (child === undefined) throw error;
+        }
+      }
+      if (child.type !== "folder" || child.status !== "active" || child.storagePath !== currentPath) {
+        throw new Error("Catalog adoption hierarchy conflicts with an existing resource");
+      }
+      parent = child;
+    }
+
+    const existing = await this.#repository.getResourceAtPath(input.storagePath);
+    if (existing !== undefined) {
+      if (existing.type !== "file" || existing.status !== "active" || existing.parentId !== parent.id
+        || existing.name !== filename || existing.sizeBytes !== input.sizeBytes || existing.sha256 !== sha256) {
+        throw new Error("Existing catalog resource differs from the committed backup");
+      }
+      return existing;
+    }
+    const resource = await this.#repository.adoptExistingFile({
+      resourceId: uuidv7(),
+      versionId: uuidv7(),
+      parentId: parent.id,
+      filename,
+      storagePath: input.storagePath,
+      sizeBytes: input.sizeBytes,
+      sha256,
+      mimeType: input.mimeType,
+    });
+    await this.#writeAudit("backup.catalog.published", `backup-catalog:${input.storagePath}`, resource.id, {
+      storagePath: input.storagePath,
+      sizeBytes: input.sizeBytes,
+      sha256,
+    }, input.auditActor);
+    return resource;
+  }
+
+  async purgeAdoptedFile(input: {
+    readonly rootId: string;
+    readonly storagePath: string;
+    readonly sha256: string;
+    readonly auditActor?: { readonly type: string; readonly id: string };
+  }): Promise<void> {
+    const root = await this.getResource(input.rootId);
+    const prefix = root.storagePath === "" ? "" : `${root.storagePath}/`;
+    if (root.type !== "folder" || !input.storagePath.startsWith(prefix) || !/^[a-f0-9]{64}$/.test(input.sha256)) {
+      throw new Error("Catalog purge target is invalid");
+    }
+    const selected = await this.#repository.getResourceAtPath(input.storagePath);
+    if (selected !== undefined && (selected.type !== "file" || selected.sha256 !== input.sha256)) {
+      throw new Error("Catalog purge target differs from the backup artifact");
+    }
+    if (await this.#storage.exists(input.storagePath)) await this.#storage.delete(input.storagePath);
+    const removed = await this.#repository.removeAdoptedFile(input.storagePath, input.sha256);
+    if (removed !== undefined) await this.#writeAudit("backup.catalog.purged", `backup-purge:${input.storagePath}`, removed.id, {
+      storagePath: input.storagePath,
+      sizeBytes: removed.sizeBytes,
+      sha256: input.sha256,
+    }, input.auditActor);
+  }
+
   async setSecurityClassification(resourceId: string, classification: SecurityClassification): Promise<Resource> {
     if (!["public", "internal", "confidential", "secret"].includes(classification)) throw new Error("Security classification is invalid");
     const current = await this.getResource(resourceId);
@@ -523,6 +628,7 @@ export class FileService {
     const completed = await this.#completedMutation("move", input.idempotencyKey, resourceId);
     if (completed !== undefined) return completed;
     if (source.id === ROOT_RESOURCE_ID || source.status !== "active") throw new Error("Resource cannot be moved");
+    await this.#assertNotManagedBackup(source);
     const targetParent = await this.getResource(input.parentId);
     if (targetParent.type !== "folder" || targetParent.status !== "active") throw new Error("Move destination is not active");
     const name = normalizeStorageName(input.name ?? source.name);
@@ -575,6 +681,7 @@ export class FileService {
     const completed = await this.#completedMutation("copy", input.idempotencyKey, resourceId);
     if (completed !== undefined) return completed;
     if (source.id === ROOT_RESOURCE_ID || source.status !== "active") throw new Error("Resource cannot be copied");
+    await this.#assertNotManagedBackup(source);
     const targetParent = await this.getResource(input.parentId);
     if (targetParent.type !== "folder" || targetParent.status !== "active") throw new Error("Copy destination is not active");
     const name = normalizeStorageName(input.name ?? source.name);
@@ -647,6 +754,7 @@ export class FileService {
     const completed = await this.#completedMutation("trash", input.idempotencyKey, resourceId);
     if (completed !== undefined) return completed;
     if (source.id === ROOT_RESOURCE_ID || CANONICAL_ROOT_RESOURCE_ID_SET.has(source.id) || source.status !== "active") throw new Error("Resource cannot be trashed");
+    await this.#assertNotManagedBackup(source);
     const tree = await this.#repository.listTree(source.storagePath);
     const configuredRetentionDays = await this.#repository.getTrashRetentionDays();
     const retentionMs = Number.isSafeInteger(configuredRetentionDays) && configuredRetentionDays >= 1 && configuredRetentionDays <= 365
@@ -950,6 +1058,13 @@ export class FileService {
       return await action();
     } finally {
       await this.#repository.releaseLocks(operation.id);
+    }
+  }
+
+  async #assertNotManagedBackup(resource: Resource): Promise<void> {
+    const backupRoot = await this.#repository.getResource(BACKUPS_RESOURCE_ID);
+    if (backupRoot !== undefined && (resource.id === backupRoot.id || resource.storagePath.startsWith(`${backupRoot.storagePath}/`))) {
+      throw new Error("Managed backup artifacts are immutable; use the backup retention policy");
     }
   }
 

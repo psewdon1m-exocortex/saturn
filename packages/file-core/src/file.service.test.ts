@@ -22,6 +22,7 @@ import {
   type UploadStatus,
 } from "./models.js";
 import type {
+  AdoptExistingFileRecord,
   CommitUploadRecord,
   CommitOverwriteRecord,
   CommitVersionRestoreRecord,
@@ -78,6 +79,9 @@ class MemoryRepository implements FileRepository {
   }
 
   async getResource(id: string) { return this.resources.get(id); }
+  async getResourceAtPath(storagePath: string) {
+    return [...this.resources.values()].find((item) => item.storagePath === storagePath);
+  }
   async getChild(parentId: string, name: string) {
     return [...this.resources.values()].find((item) => item.parentId === parentId && item.name.toLowerCase() === name.toLowerCase() && item.status === "active");
   }
@@ -101,6 +105,48 @@ class MemoryRepository implements FileRepository {
     this.resources.set(resource.id, resource);
     this.#adjustAncestorSizes(record.parentId, 0);
     return resource;
+  }
+  async adoptExistingFile(record: AdoptExistingFileRecord) {
+    const existing = await this.getResourceAtPath(record.storagePath);
+    if (existing !== undefined) return existing;
+    const now = new Date();
+    const adopted: Resource = {
+      id: record.resourceId,
+      type: "file",
+      parentId: record.parentId,
+      name: record.filename,
+      storagePath: record.storagePath,
+      mimeType: record.mimeType,
+      sizeBytes: record.sizeBytes,
+      sha256: record.sha256,
+      currentVersionId: record.versionId,
+      status: "active",
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.resources.set(adopted.id, adopted);
+    this.versions.set(record.versionId, {
+      id: record.versionId,
+      resourceId: adopted.id,
+      storagePath: record.storagePath,
+      sha256: record.sha256,
+      sizeBytes: record.sizeBytes,
+      mimeType: record.mimeType,
+      reason: "initial",
+      state: "active",
+      createdAt: now,
+    });
+    this.#adjustAncestorSizes(record.parentId, record.sizeBytes);
+    return adopted;
+  }
+  async removeAdoptedFile(storagePath: string, expectedSha256: string) {
+    const selected = await this.getResourceAtPath(storagePath);
+    if (selected === undefined) return undefined;
+    if (selected.sha256 !== expectedSha256) throw new Error("checksum mismatch");
+    this.resources.delete(selected.id);
+    for (const [id, version] of this.versions) if (version.resourceId === selected.id) this.versions.delete(id);
+    if (selected.parentId !== undefined) this.#adjustAncestorSizes(selected.parentId, -selected.sizeBytes);
+    return selected;
   }
   async setSecurityClassification(id: string, classification: SecurityClassification) {
     const current = this.resources.get(id);
@@ -748,7 +794,7 @@ describe("FileService upload state machine", () => {
     try {
       await storage.initialize();
       await service.initializeStorage();
-      const folder = await service.createFolder(BACKUPS_RESOURCE_ID, "Project");
+      const folder = await service.createFolder(SYNC_RESOURCE_ID, "Project");
       const nested = await service.createFolder(folder.id, "Nested");
       const firstUpload = await service.createUpload({
         parentId: nested.id,
@@ -895,6 +941,46 @@ describe("FileService upload state machine", () => {
       expect(await storage.exists(retry.tempPath)).toBe(false);
       await service.appendUpload(retry.id, 0, 3, Readable.from("abc"));
       expect((await service.completeUpload(retry.id)).resource.sizeBytes).toBe(3);
+    } finally {
+      await storage.close();
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("adopts a committed backup object without copying its bytes and is idempotent", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "vault-file-adopt-"));
+    const storage = new LocalStorageAdapter(root);
+    const repository = new MemoryRepository();
+    const service = new FileService(repository, storage);
+    const payload = Buffer.from("recovery-zip");
+    const storagePath = "backups/chronos/vps-1/2026/09/19/archive.zip";
+    try {
+      await storage.initialize();
+      await service.initializeStorage();
+      for (const directory of ["backups/chronos", "backups/chronos/vps-1", "backups/chronos/vps-1/2026", "backups/chronos/vps-1/2026/09", "backups/chronos/vps-1/2026/09/19"])
+        await storage.mkdir(directory);
+      await storage.write(storagePath, Readable.from(payload), { offset: 0, create: true, exclusive: true, truncate: true });
+      const input = {
+        rootId: BACKUPS_RESOURCE_ID,
+        storagePath,
+        sizeBytes: payload.length,
+        sha256: createHash("sha256").update(payload).digest("hex"),
+        mimeType: "application/zip",
+      } as const;
+
+      const first = await service.adoptExistingFile(input);
+      const second = await service.adoptExistingFile(input);
+
+      expect(second.id).toBe(first.id);
+      expect((await service.resolveFolderPath(["chronos", "vps-1", "2026", "09", "19"], BACKUPS_RESOURCE_ID)).at(-1)?.type).toBe("folder");
+      if (first.parentId === undefined) throw new Error("Adopted backup has no parent");
+      expect((await service.listChildren(first.parentId)).map((item) => item.name)).toContain("archive.zip");
+      expect(await fs.readFile(path.join(root, storagePath))).toEqual(payload);
+      await expect(service.trashResource(first.id, { idempotencyKey: "managed-backup-trash" })).rejects.toThrow(/immutable/);
+      await service.purgeAdoptedFile({ rootId: BACKUPS_RESOURCE_ID, storagePath, sha256: input.sha256 });
+      await service.purgeAdoptedFile({ rootId: BACKUPS_RESOURCE_ID, storagePath, sha256: input.sha256 });
+      expect(await storage.exists(storagePath)).toBe(false);
+      expect(await repository.getResourceAtPath(storagePath)).toBeUndefined();
     } finally {
       await storage.close();
       await fs.rm(root, { recursive: true, force: true });

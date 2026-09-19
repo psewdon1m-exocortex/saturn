@@ -77,6 +77,7 @@ import { StorageConnectionService } from "./storage-connection.service.js";
 import { SyncClientController } from "./sync-client.controller.js";
 import { NeptuneAgentController, NeptuneFleetOwnerController } from "./neptune-fleet.controller.js";
 import { NeptuneFleetService } from "./neptune-fleet.service.js";
+import { BackupMaintenanceService } from "./backup-maintenance.service.js";
 
 const config = loadEnvironment();
 
@@ -219,6 +220,26 @@ const config = loadEnvironment();
           },
         },
         backupRootPath: async () => (await files.getResource(BACKUPS_RESOURCE_ID)).storagePath,
+        catalog: {
+          publish: async (run) => {
+            await files.adoptExistingFile({
+              rootId: BACKUPS_RESOURCE_ID,
+              storagePath: run.finalPath,
+              sizeBytes: run.expectedSize,
+              sha256: run.expectedSha256,
+              mimeType: run.encrypted ? "application/octet-stream" : "application/zip",
+              auditActor: { type: "service_token", id: run.serviceId },
+            });
+          },
+          purge: async (run) => {
+            await files.purgeAdoptedFile({
+              rootId: BACKUPS_RESOURCE_ID,
+              storagePath: run.finalPath,
+              sha256: run.expectedSha256,
+              auditActor: { type: "system", id: "backup-retention" },
+            });
+          },
+        },
         audit,
       }),
       inject: [BACKUP_INGEST_REPOSITORY, STORAGE_ADAPTER, AUDIT_SERVICE, FILE_SERVICE],
@@ -301,6 +322,7 @@ const config = loadEnvironment();
     },
     RecoveryWorkflowService,
     NeptuneFleetService,
+    BackupMaintenanceService,
     { provide: APP_INTERCEPTOR, useClass: MaintenanceBarrierInterceptor },
     RuntimeLifecycleService,
   ],

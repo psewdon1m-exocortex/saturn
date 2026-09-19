@@ -2,6 +2,7 @@ import type { Sql, TransactionSql } from "postgres";
 import type { Database } from "@saturn/database";
 import type { FileOperation, FileVersion, Resource, ResourceStatus, ResourceType, RetentionClass, SecurityClassification, UploadSession, UploadStatus } from "./models.js";
 import type {
+  AdoptExistingFileRecord,
   CommitOverwriteRecord,
   CommitUploadRecord,
   CommitVersionRestoreRecord,
@@ -167,6 +168,13 @@ export class PostgresFileRepository implements FileRepository {
     return Promise.resolve(sql<UploadRow[]>`
       SELECT * FROM upload_sessions WHERE id = ${id} LIMIT 1
     `).then((rows) => rows[0] === undefined ? undefined : upload(rows[0]));
+  }
+
+  getResourceAtPath(storagePath: string): Promise<Resource | undefined> {
+    return this.#database.withSql(async (sql) => {
+      const rows = await sql<ResourceRow[]>`SELECT * FROM resources WHERE storage_path = ${storagePath} LIMIT 1`;
+      return rows[0] === undefined ? undefined : resource(rows[0]);
+    });
   }
 
   getResource(id: string): Promise<Resource | undefined> {
@@ -375,6 +383,54 @@ export class PostgresFileRepository implements FileRepository {
       const committedResource = await this.#resourceQuery(sql, record.resourceId);
       if (uploadRows[0] === undefined || committedResource === undefined) throw new Error("Upload commit did not return state");
       return { upload: upload(uploadRows[0]), resource: committedResource };
+    });
+  }
+
+  adoptExistingFile(record: AdoptExistingFileRecord): Promise<Resource> {
+    return this.#database.transaction(async (sql) => {
+      const existingRows = await sql<ResourceRow[]>`SELECT * FROM resources WHERE storage_path = ${record.storagePath} LIMIT 1 FOR UPDATE`;
+      const existing = existingRows[0];
+      if (existing !== undefined) {
+        if (existing.type !== "file" || existing.status !== "active" || Number(existing.size_bytes) !== record.sizeBytes
+          || existing.sha256 !== record.sha256 || existing.parent_id !== record.parentId) {
+          throw new Error("Existing catalog resource differs from the backup artifact");
+        }
+        return resource(existing);
+      }
+      await sql`
+        INSERT INTO resources (
+          id, type, parent_id, name, storage_path, mime_type, size_bytes, sha256, status
+        ) VALUES (
+          ${record.resourceId}, 'file', ${record.parentId}, ${record.filename}, ${record.storagePath},
+          ${record.mimeType}, ${record.sizeBytes}, ${record.sha256}, 'active'
+        )
+      `;
+      await sql`
+        INSERT INTO file_versions (id, resource_id, storage_path, sha256, size_bytes, mime_type, reason)
+        VALUES (${record.versionId}, ${record.resourceId}, ${record.storagePath}, ${record.sha256},
+          ${record.sizeBytes}, ${record.mimeType}, 'initial')
+      `;
+      await sql`UPDATE resources SET current_version_id = ${record.versionId}, updated_at = now() WHERE id = ${record.resourceId}`;
+      await this.#adjustAncestorSizes(sql, record.parentId, record.sizeBytes);
+      const committed = await this.#resourceQuery(sql, record.resourceId);
+      if (committed === undefined) throw new Error("Adopted backup resource was not found after commit");
+      return committed;
+    });
+  }
+
+  removeAdoptedFile(storagePath: string, expectedSha256: string): Promise<Resource | undefined> {
+    return this.#database.transaction(async (sql) => {
+      const rows = await sql<ResourceRow[]>`SELECT * FROM resources WHERE storage_path = ${storagePath} LIMIT 1 FOR UPDATE`;
+      const selected = rows[0];
+      if (selected === undefined) return undefined;
+      if (selected.type !== "file" || selected.status !== "active" || selected.sha256 !== expectedSha256 || selected.parent_id === null) {
+        throw new Error("Catalog resource is not the expected backup artifact");
+      }
+      await sql`UPDATE resources SET current_version_id = NULL WHERE id = ${selected.id}`;
+      await sql`DELETE FROM file_versions WHERE resource_id = ${selected.id}`;
+      await sql`DELETE FROM resources WHERE id = ${selected.id}`;
+      await this.#adjustAncestorSizes(sql, selected.parent_id, -Number(selected.size_bytes));
+      return resource(selected);
     });
   }
 

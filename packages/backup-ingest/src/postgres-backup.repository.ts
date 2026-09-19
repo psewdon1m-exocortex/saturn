@@ -163,4 +163,9 @@ export class PostgresBackupRepository implements BackupRepository {
     if (rows[0] === undefined) throw new Error("Backup mirror identity is unavailable");
     return service(rows[0]);
   }); }
+  purgeRun(serviceId: string, runId: string): Promise<void> { return this.database.transaction(async (sql) => {
+    await sql`DELETE FROM service_backup_restore_tests WHERE run_id = ${runId} AND service_id = ${serviceId}`;
+    const rows = await sql<{ id: string }[]>`DELETE FROM service_backup_runs WHERE id = ${runId} AND service_id = ${serviceId} AND state = 'complete' RETURNING id`;
+    if (rows[0] === undefined) throw new Error("Completed backup run was not found for retention purge");
+  }); }
 }

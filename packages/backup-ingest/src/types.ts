@@ -179,6 +179,7 @@ export interface BackupRepository {
   createEnrollment(value: BackupEnrollmentRecord): Promise<void>;
   consumeEnrollment(codeHash: string, now: Date): Promise<BackupServiceRecord | undefined>;
   attachMirrorDevice(serviceId: string, deviceId: string, now: Date): Promise<BackupServiceRecord>;
+  purgeRun(serviceId: string, runId: string): Promise<void>;
 }
 
 export interface BackupStorage {
@@ -190,4 +191,9 @@ export interface BackupStorage {
   rename(source: string, destination: string): Promise<void>;
   delete(path: string): Promise<void>;
   exists(path: string): Promise<boolean>;
+}
+
+export interface BackupCatalog {
+  publish(run: BackupRunRecord): Promise<void>;
+  purge(run: BackupRunRecord): Promise<void>;
 }

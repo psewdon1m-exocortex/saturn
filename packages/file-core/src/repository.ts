@@ -27,6 +27,17 @@ export interface CommitUploadRecord {
   readonly mimeType: string;
 }
 
+export interface AdoptExistingFileRecord {
+  readonly resourceId: string;
+  readonly versionId: string;
+  readonly parentId: string;
+  readonly filename: string;
+  readonly storagePath: string;
+  readonly sizeBytes: number;
+  readonly sha256: string;
+  readonly mimeType: string;
+}
+
 export interface UploadLimits {
   readonly bufferMaxBytes: number;
   readonly maximumFileBytes: number;
@@ -34,6 +45,7 @@ export interface UploadLimits {
 
 export interface FileRepository {
   getResource(id: string): Promise<Resource | undefined>;
+  getResourceAtPath(storagePath: string): Promise<Resource | undefined>;
   getChild(parentId: string, name: string): Promise<Resource | undefined>;
   listChildren(parentId: string, offset: number, limit: number): Promise<readonly Resource[]>;
   listTrash(offset: number, limit: number): Promise<readonly Resource[]>;
@@ -48,6 +60,8 @@ export interface FileRepository {
   updateUploadProgress(id: string, expectedOffset: number, newOffset: number): Promise<UploadSession>;
   setUploadState(id: string, state: UploadStatus, fields?: { readonly actualSha256?: string; readonly errorCode?: string }): Promise<UploadSession>;
   commitUpload(record: CommitUploadRecord): Promise<CompleteUploadRecordResult>;
+  adoptExistingFile(record: AdoptExistingFileRecord): Promise<Resource>;
+  removeAdoptedFile(storagePath: string, expectedSha256: string): Promise<Resource | undefined>;
   commitOverwrite(record: CommitOverwriteRecord): Promise<CompleteUploadRecordResult>;
   getVersion(resourceId: string, versionId: string): Promise<FileVersion | undefined>;
   listVersions(resourceId: string, offset: number, limit: number): Promise<readonly FileVersion[]>;

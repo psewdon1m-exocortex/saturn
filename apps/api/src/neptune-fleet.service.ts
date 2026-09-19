@@ -51,6 +51,7 @@ interface CommandRow {
 }
 
 function publicAgent(row: AgentRow) {
+  const online = row.last_seen_at !== null && Date.now() - row.last_seen_at.getTime() < 45_000;
   return {
     serviceId: row.service_id,
     desired: {
@@ -66,6 +67,7 @@ function publicAgent(row: AgentRow) {
       ...(row.project_id === null ? {} : { projectId: row.project_id }),
       ...(row.agent_version === null ? {} : { version: row.agent_version }),
       appliedRevision: Number(row.applied_revision),
+      online,
       archive: row.archive_status,
       mirror: row.mirror_status,
       ...(row.latest_error === null ? {} : { latestError: row.latest_error }),

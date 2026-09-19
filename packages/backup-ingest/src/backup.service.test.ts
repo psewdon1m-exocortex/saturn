@@ -35,11 +35,12 @@ class MemoryRepository implements BackupRepository {
   async createEnrollment(value: BackupEnrollmentRecord) { for (const [key, current] of this.enrollments) if (current.serviceId === value.serviceId && current.consumedAt === undefined) this.enrollments.set(key, { ...current, consumedAt: value.createdAt }); this.enrollments.set(value.codeHash, value); }
   async consumeEnrollment(codeHash: string, now: Date) { const value = this.enrollments.get(codeHash); if (value === undefined || value.consumedAt !== undefined || value.expiresAt <= now) return undefined; this.enrollments.set(codeHash, { ...value, consumedAt: now }); return this.services.get(value.serviceId); }
   async attachMirrorDevice(serviceId: string, deviceId: string, now: Date) { const current = this.services.get(serviceId); if (!current) throw new Error("not found"); const value = { ...current, mirrorDeviceId: deviceId, updatedAt: now }; this.services.set(serviceId, value); return value; }
+  async purgeRun(serviceId: string, runId: string) { const current = await this.getRun(serviceId, runId); if (!current || current.state !== "complete") throw new Error("not found"); this.runs.delete(runId); }
 }
 
 const options = { enabled: true, trustClientCertificateHeader: true, tokenRotationGraceMs: 1000, uploadChunkMaxBytes: 1024, incompleteTtlMs: 60_000, defaults: { requireEncryption: true, maxBackupBytes: 4096, dailyQuotaBytes: 8192, storedQuotaBytes: 16384, maxConcurrentRuns: 1, freshnessSlaMs: 86_400_000, retention: { daily: 7, weekly: 4, monthly: 12, yearly: 3 } } } as const;
-let root: string; let repository: MemoryRepository; let service: BackupIngestService;
-beforeEach(async () => { root = await fs.mkdtemp(path.join(os.tmpdir(), "vault-backup-test-")); const storage = new LocalStorageAdapter(root); await storage.initialize(); repository = new MemoryRepository(); service = new BackupIngestService({ repository, storage, pepper: "p".repeat(64), options }); });
+let root: string; let repository: MemoryRepository; let service: BackupIngestService; let published: BackupRunRecord[]; let purged: BackupRunRecord[];
+beforeEach(async () => { root = await fs.mkdtemp(path.join(os.tmpdir(), "vault-backup-test-")); const storage = new LocalStorageAdapter(root); await storage.initialize(); repository = new MemoryRepository(); published = []; purged = []; service = new BackupIngestService({ repository, storage, pepper: "p".repeat(64), options, catalog: { publish: async (run) => { published.push(run); }, purge: async (run) => { purged.push(run); } } }); });
 afterEach(async () => fs.rm(root, { recursive: true, force: true }));
 
 describe("BackupIngestService", () => {
@@ -83,6 +84,9 @@ describe("BackupIngestService", () => {
     await expect(service.append(context, "service-a", run.id, 0, 1, Readable.from("x"))).rejects.toBeInstanceOf(BackupServiceError);
     await service.append(context, "service-a", run.id, 8, payload.length - 8, Readable.from(payload.subarray(8))); const completed = await service.complete(context, "service-a", run.id);
     expect(completed).toMatchObject({ state: "complete", receipt: { sha256: digest, sizeBytes: payload.length, serviceSlug: "service-a" } });
+    expect(published).toHaveLength(1);
+    expect(published[0]).toMatchObject({ id: run.id, state: "complete" });
+    expect(published[0]?.finalPath).toContain("backups/service-a/");
   });
   it("does not authorize a token or run under a neighboring service slug", async () => {
     const a = await service.createService({ slug: "service-a", name: "A" }); const b = await service.createService({ slug: "service-b", name: "B" }); const contextA = await service.authenticate(`Bearer ${a.token}`); const contextB = await service.authenticate(`Bearer ${b.token}`);
@@ -105,5 +109,18 @@ describe("BackupIngestService", () => {
   it("selects deterministic GFS retention candidates", () => {
     const base = Array.from({ length: 12 }, (_, index) => ({ id: String(index), state: "complete", committedAt: new Date(Date.UTC(2026, 7, 26 - index)) } as BackupRunRecord));
     const candidates = retentionCandidates(base, { daily: 2, weekly: 1, monthly: 1, yearly: 1 }); expect(candidates.length).toBeGreaterThan(0); expect(candidates.map((item) => item.id)).not.toContain("0");
+  });
+  it("executes retention against storage catalog and releases stored quota", async () => {
+    const payload = Buffer.from("expired-backup"); const digest = createHash("sha256").update(payload).digest("hex");
+    const created = await service.createService({ slug: "service-a", name: "A", retention: { daily: 0, weekly: 0, monthly: 0, yearly: 0 } });
+    const context = await service.authenticate(`Bearer ${created.token}`);
+    const run = await service.createRun(context, "service-a", { filename: "backup.zip", createdAt: new Date("2026-09-01T00:00:00Z"), backupType: "full", expectedSize: payload.length, sha256: digest, sourceVersion: "1", encrypted: true, idempotencyKey: "retention-run" });
+    await service.append(context, "service-a", run.id, 0, payload.length, Readable.from(payload));
+    await service.complete(context, "service-a", run.id);
+
+    await expect(service.applyRetention()).resolves.toEqual({ candidates: 1, purged: 1, failed: 0 });
+    expect(purged.map((item) => item.id)).toEqual([run.id]);
+    expect(repository.runs.has(run.id)).toBe(false);
+    expect((await service.listServices())[0]?.usage.storedBytes).toBe(0);
   });
 });

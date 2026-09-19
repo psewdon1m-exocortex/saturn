@@ -1,4 +1,4 @@
-import type { ArchiveJobInfo, AuditEventInfo, BackupServiceInfo, DeviceInfo, DropSessionInfo, DropUploadStatus, FileVersion, GryphonBot, GryphonChallenge, GryphonStatus, KernelStatus, NeptuneAgentInfo, NeptuneAvailability, NeptuneReleaseCheck, NeptuneStatus, OperatorOverview, OwnerPreferences, RecoveryRestoreCandidate, RecoveryRestoreResult, RecoveryStatus, Resource, ShareChild, ShareInfo, StorageConnectionInput, StorageConnectionStatus, UpdateStatus } from "./types.js";
+import type { ArchiveJobInfo, AuditEventInfo, BackupRunInfo, BackupServiceInfo, DeviceInfo, DropSessionInfo, DropUploadStatus, FileVersion, GryphonBot, GryphonChallenge, GryphonStatus, KernelStatus, NeptuneAgentInfo, NeptuneAvailability, NeptuneReleaseCheck, NeptuneStatus, OperatorOverview, OwnerPreferences, RecoveryRestoreCandidate, RecoveryRestoreResult, RecoveryStatus, Resource, ShareChild, ShareInfo, StorageConnectionInput, StorageConnectionStatus, UpdateStatus } from "./types.js";
 
 export class ApiError extends Error {
   readonly status: number;
@@ -242,6 +242,7 @@ export const api = {
   }),
   revokeDevice: (id: string) => request<DeviceInfo>(`/devices/${encodeURIComponent(id)}`, { method: "DELETE" }),
   backupServices: () => request<readonly BackupServiceInfo[]>("/backup-services?limit=200"),
+  backupRuns: (serviceId: string, limit = 10) => request<readonly BackupRunInfo[]>(`/backup-services/${encodeURIComponent(serviceId)}/runs?limit=${String(limit)}`),
   createBackupEnrollment: (input: { readonly namespaceSlug: string; readonly deploymentId: string; readonly name: string; readonly requireEncryption: boolean; readonly maxConcurrentRuns: number; readonly mirrorRoot?: "volt" | "mastermind" }) => request<{ readonly code: string; readonly expiresAt: string; readonly service: BackupServiceInfo }>("/backup-services/enrollments", {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input),
   }),

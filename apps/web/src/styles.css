@@ -765,6 +765,11 @@ button.share-status--active:active { transform: scale(.985); }
 .fleet-agent__schedule label { display: grid; gap: 6px; }
 .fleet-agent__schedule label:has(input[type="checkbox"]) { display: flex; align-items: center; align-self: center; }
 .fleet-agent > .inline-actions { align-content: center; justify-content: flex-end; }
+.fleet-agent__runs { grid-column: 1 / -1; border-top: 1px solid var(--line-inner); padding-top: 10px; }
+.fleet-agent__runs summary { cursor: pointer; color: var(--white-80); }
+.fleet-agent__runs .compact-list { margin-top: 10px; }
+.compact-row { display: grid; grid-template-columns: minmax(260px, .6fr) minmax(0, 1.4fr); gap: 14px; padding: 8px 10px; border-bottom: 1px solid var(--line-inner); }
+.compact-row:last-child { border-bottom: 0; }
 .universal-card {
   position: relative; min-width: 0; min-height: 166px; border: 1px solid var(--line-outer); background: var(--black);
   transition: color 160ms ease, border-color 160ms ease, background-color 160ms ease, transform 160ms ease;

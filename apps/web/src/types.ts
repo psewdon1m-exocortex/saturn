@@ -134,6 +134,23 @@ export interface BackupServiceInfo {
   readonly updatedAt: string;
 }
 
+export interface BackupRunInfo {
+  readonly id: string;
+  readonly serviceId: string;
+  readonly filename: string;
+  readonly createdAt: string;
+  readonly backupType: string;
+  readonly expectedSize: number;
+  readonly sha256: string;
+  readonly sourceVersion: string;
+  readonly encrypted: boolean;
+  readonly state: "pending" | "uploading" | "appending" | "verifying" | "complete" | "failed";
+  readonly receivedSize: number;
+  readonly receipt?: { readonly logicalPath: string; readonly committedAt: string; readonly sizeBytes: number; readonly sha256: string };
+  readonly failureCode?: string;
+  readonly updatedAt: string;
+}
+
 export interface OperatorOverview {
   readonly sampledAt: string;
   readonly cpu: { readonly state: "available"; readonly percent: number; readonly logicalCores: number } | { readonly state: "unavailable"; readonly reason?: string };
@@ -275,6 +292,7 @@ export interface NeptuneAgentInfo {
     readonly projectId?: string;
     readonly version?: string;
     readonly appliedRevision: number;
+    readonly online?: boolean;
     readonly archive: Record<string, unknown>;
     readonly mirror: Record<string, unknown>;
     readonly latestError?: string;
