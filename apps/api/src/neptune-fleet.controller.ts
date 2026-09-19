@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Headers, Inject, Param, Post, Put, UseFilters, UseGuards } from "@nestjs/common";
+import { Body, Controller, Get, Headers, Inject, NotFoundException, Param, Post, Put, UseFilters, UseGuards } from "@nestjs/common";
 import { z } from "zod";
 import { BackupApiExceptionFilter } from "./backup-api-exception.filter.js";
 import { NeptuneFleetService, type NeptuneFleetCheckIn } from "./neptune-fleet.service.js";
@@ -53,6 +53,33 @@ export class NeptuneFleetOwnerController {
 
   @Get() list() { return this.fleet.list(); }
   @Get(":serviceId") get(@Param("serviceId") serviceId: string) { return this.fleet.get(serviceId); }
+
+  @Post(":serviceId/update/flow/check")
+  async flowCheck(@Param("serviceId") serviceId: string) {
+    const release = await this.checkUpdate(serviceId);
+    return { ...release, component: "neptune", updater_label: "Remote host · version not reported", protocol: 2, backup_required: false };
+  }
+
+  @Get(":serviceId/update/flow/jobs")
+  jobs(@Param("serviceId") serviceId: string) { return this.fleet.updateJobs(serviceId); }
+
+  @Get(":serviceId/update/flow/jobs/:jobId")
+  async job(@Param("serviceId") serviceId: string, @Param("jobId") jobId: string) {
+    const result = (await this.fleet.updateJobs(serviceId)).jobs.find(job => job.id === jobId);
+    if (!result) throw new NotFoundException("Remote Neptune update not found");
+    return result;
+  }
+
+  @Post(":serviceId/update/flow/install/neptune")
+  async install(@Param("serviceId") serviceId: string, @Body() body: unknown) {
+    const input = z.object({ version: z.string().regex(/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/), request_id: z.uuid() }).strict().parse(body);
+    const existing = (await this.fleet.updateJobs(serviceId)).jobs.find(job => job.id === input.request_id);
+    if (existing) { if (existing.version !== input.version) throw new Error("Request ID belongs to another version"); return existing; }
+    const checked = await this.checkUpdate(serviceId);
+    if (checked.update_available !== true || checked.available_version !== input.version) throw new Error("Requested Neptune version is not the current upgrade candidate");
+    await this.fleet.enqueue(serviceId, "agent.update", { version: input.version }, input.request_id);
+    return this.job(serviceId, input.request_id);
+  }
 
   @Post(":serviceId/update/check")
   async checkUpdate(@Param("serviceId") serviceId: string) {

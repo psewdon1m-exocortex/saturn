@@ -40,7 +40,7 @@ interface AgentRow {
   readonly updated_at: Date;
 }
 
-interface CommandRow {
+export interface CommandRow {
   readonly id: string;
   readonly kind: NeptuneCommandKind;
   readonly payload: Record<string, unknown>;
@@ -48,6 +48,18 @@ interface CommandRow {
   readonly error: string | null;
   readonly created_at: Date;
   readonly completed_at: Date | null;
+}
+
+export function updateCommandJob(command: CommandRow) {
+  const expired = command.state === "pending" && Date.now() - new Date(command.created_at).getTime() >= 7 * 86_400_000;
+  // checkIn accepts success only with the requested version. Do not make a
+  // completed historical job active again when the agent later upgrades further.
+  const verified = command.state === "succeeded";
+  const state = expired || command.state === "failed" ? "FAILED" : verified ? "COMPLETED" : "WAITING_FOR_AGENT";
+  return { id: command.id, request_id: command.id, service: "neptune-update", version: command.payload.version,
+    state, created_at: new Date(command.created_at).toISOString(), rollback_available: false,
+    message: expired ? "Remote command expired; the agent did not complete the update." : command.error ?? (verified ? `Agent confirmed installation of Neptune ${String(command.payload.version)}.` : "Waiting for the remote agent to install and report the selected version. No percentage is reported by this protocol."),
+    progress: { phase: state, mode: state === "WAITING_FOR_AGENT" ? "indeterminate" : "complete" } };
 }
 
 function publicAgent(row: AgentRow) {
@@ -144,14 +156,31 @@ export class NeptuneFleetService {
     return publicAgent(row);
   }
 
-  async enqueue(serviceId: string, kind: NeptuneCommandKind, payload: Record<string, unknown> = {}) {
-    const id = randomUUID();
+  async updateJobs(serviceId: string) {
+    await this.get(serviceId);
+    const rows = await this.database.withSql(sql => sql<CommandRow[]>`
+      SELECT id, kind, payload, state, error, created_at, completed_at FROM neptune_agent_commands
+      WHERE service_id = ${serviceId} AND kind = 'agent.update' ORDER BY created_at DESC LIMIT 100
+    `);
+    return { jobs: rows.map(updateCommandJob) };
+  }
+
+  async enqueue(serviceId: string, kind: NeptuneCommandKind, payload: Record<string, unknown> = {}, id: string = randomUUID()) {
     await this.database.transaction(async (sql) => {
       const services = await sql<{ mirror_root: string | null }[]>`
         SELECT mirror_root FROM backup_services WHERE id = ${serviceId} AND state = 'active' FOR UPDATE
       `;
       const selected = services[0];
       if (selected === undefined) throw new Error("Neptune identity not found or not active");
+      const previous = await sql<{ service_id: string; kind: string; payload: Record<string, unknown> }[]>`SELECT service_id, kind, payload FROM neptune_agent_commands WHERE id = ${id}`;
+      if (previous[0] !== undefined) {
+        if (previous[0].service_id !== serviceId || previous[0].kind !== kind || previous[0].payload.version !== payload.version) throw new Error("Command request ID belongs to another operation");
+        return;
+      }
+      if (kind === "agent.update") {
+        const active = await sql<{ id: string }[]>`SELECT id FROM neptune_agent_commands WHERE service_id = ${serviceId} AND kind = 'agent.update' AND state = 'pending' AND created_at > now() - interval '7 days'`;
+        if (active.length) throw new Error("A remote Neptune update is already pending");
+      }
       if (kind === "mirror.run" && selected.mirror_root === null)
         throw new Error("Neptune identity has no mirror pipeline");
       await sql`
@@ -182,6 +211,7 @@ export class NeptuneFleetService {
         await sql`
           UPDATE neptune_agent_commands SET state = ${completed.state}, error = ${completed.error ?? null}, completed_at = now()
           WHERE id = ${completed.id} AND service_id = ${serviceId} AND state = 'pending'
+            AND (${completed.state} <> 'succeeded' OR kind <> 'agent.update' OR payload->>'version' = ${input.version})
         `;
       }
       await sql`

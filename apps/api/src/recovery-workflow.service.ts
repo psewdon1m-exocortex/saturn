@@ -444,6 +444,14 @@ export class RecoveryWorkflowService implements OnModuleInit, OnApplicationShutd
   }
 
   async #cleanupInterruptedUploads(): Promise<void> {
+    const snapshots = await fs.readdir(this.#config.recovery.archiveDirectory, { withFileTypes: true }).catch(() => []);
+    for (const entry of snapshots) {
+      // Only generated download snapshots belong to this lifecycle; retained
+      // remote backups and operator-provided files are outside this directory rule.
+      if (entry.isFile() && /^saturn-snapshot-\d{4}-\d{2}-\d{2}T[\d.-]+Z-[0-9a-f-]{36}\.zip$/.test(entry.name)) {
+        await fs.rm(path.join(this.#config.recovery.archiveDirectory, entry.name), { force: true });
+      }
+    }
     const entries = await fs.readdir(this.#config.recovery.spoolDirectory).catch(() => [] as string[]);
     await Promise.all(entries
       .filter((name) => /^web-(restore|validation)-[0-9a-f-]+\.(zip|json)$/.test(name) || /^web-validation-[0-9a-f-]+$/.test(name))

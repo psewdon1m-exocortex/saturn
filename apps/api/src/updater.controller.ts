@@ -1,5 +1,8 @@
-import { createHash, randomUUID } from "node:crypto";
-import { BadRequestException, Body, Controller, Get, Inject, Param, Post, UseFilters, UseGuards } from "@nestjs/common";
+import { createHash } from "node:crypto";
+import fs from "node:fs/promises";
+import { BadRequestException, Body, Controller, Get, Headers, Inject, Param, Post, Res, UseFilters, UseGuards } from "@nestjs/common";
+import type { FastifyReply } from "fastify";
+import { backupReceipt, savedBackup, readUpdateBytes } from "./update-backup.js";
 import type { SaturnConfig } from "@saturn/config";
 import type { Database } from "@saturn/database";
 import { z } from "zod";
@@ -40,23 +43,52 @@ export class UpdaterController {
   rollback(@Param("id") id: string) { return updater(`/v1/jobs/${jobId(id)}/rollback`, {}); }
 
   @Post("install")
-  async install(@Body() body: unknown) {
-    const input = versionSchema.parse(body);
-    const checked = await this.check();
-    if (checked.update_available !== true || checked.available_version !== input.version) throw new BadRequestException("Release is no longer the current update candidate");
-    const snapshot = await this.recovery.createSnapshot();
-    const chunks: Buffer[] = []; let bytes = 0;
-    try {
-      for await (const part of snapshot.stream) {
-        const chunk: unknown = part;
-        if (!Buffer.isBuffer(chunk)) throw new Error("Invalid backup stream");
-        bytes += chunk.length; if (bytes > 128 * 1024 * 1024) throw new Error("Update snapshot exceeds the 128 MB local Updater limit"); chunks.push(chunk);
-      }
-    } finally { snapshot.stream.destroy(); }
-    const archive = Buffer.concat(chunks);
-    return updater("/v1/updates", { request_id: randomUUID(), head_id: headId(), service: "saturn", version: input.version,
-      backup: { filename: snapshot.filename, sha256: createHash("sha256").update(archive).digest("hex"), data_base64: archive.toString("base64") } }, 90_000);
-  }
+  install() { throw new BadRequestException("Use the update dialog to save the mandatory pre-update ZIP before installation"); }
   @Post("updater/install")
   selfUpdate() { return updater("/v1/lifecycle/updater-self-update", { head_id: headId() }); }
+
+  @Post("flow/check")
+  async flowCheck(@Body() body: unknown) {
+    const { component } = z.object({ component: z.enum(["saturn", "updater", "gryphon", "neptune"]) }).strict().parse(body);
+    const health = await agent("GET", "/v1/health");
+    if (health.update_protocol !== 2) throw new BadRequestException("Updater 0.5.0 or later is required for the saved-copy update protocol");
+    return updater("/v2/check", { head_id: headId(), component }, 45_000);
+  }
+
+  @Post("flow/backup")
+  async flowBackup(@Body() body: unknown, @Res() reply: FastifyReply) {
+    const { version } = versionSchema.parse(body);
+    const candidate = await this.flowCheck({ component: "saturn" });
+    if (candidate.update_available !== true || candidate.available_version !== version) throw new BadRequestException("Release changed; check again");
+    const snapshot = await this.recovery.createSnapshot();
+    let archive: Buffer;
+    try { archive = await readUpdateBytes(snapshot.stream); } finally { snapshot.stream.destroy(); await fs.rm(snapshot.created.archivePath, { force: true }); }
+    const receipt = backupReceipt(archive, snapshot.filename, "saturn", headId(), version, updaterToken());
+    reply.header("Content-Type", "application/zip").header("Content-Length", archive.length)
+      .header("Cache-Control", "no-store").header("X-Update-Receipt", receipt)
+      .header("Content-Disposition", `attachment; filename="${snapshot.filename}"`).send(archive);
+  }
+
+  @Post("flow/install/:component")
+  async flowInstall(@Param("component") component: string, @Body() body: unknown,
+    @Headers("x-update-receipt") receipt = "", @Headers("x-update-saved") saved = "") {
+    if (component === "saturn") {
+      if (saved !== "1") throw new BadRequestException("Save the ZIP on your computer before installing");
+      const archive = await readUpdateBytes(body);
+      try { return await updater("/v2/updates", savedBackup(archive, receipt, updaterToken(), "saturn", headId()), 90_000); }
+      finally { archive.fill(0); }
+    }
+    if (!["updater", "neptune", "gryphon"].includes(component)) throw new BadRequestException("Unknown component");
+    const input = z.object({ version: z.string().regex(/^\d+\.\d+\.\d+$/), request_id: z.string().uuid() }).strict().parse(body);
+    return updater(`/v2/components/${component}/updates`, { ...input, head_id: headId() }, 45_000);
+  }
+
+  @Get("flow/jobs") flowJobs() { return agent("GET", `/v1/jobs?head_id=${encodeURIComponent(headId())}`); }
+  @Get("flow/jobs/:id") flowJob(@Param("id") id: string) { return this.job(id); }
+  @Post("flow/jobs/:id/rollback")
+  async flowRollback(@Param("id") id: string, @Body() body: unknown) {
+    const archive = await readUpdateBytes(body);
+    try { return await updater(`/v2/jobs/${jobId(id)}/rollback`, { filename: "backup.zip", sha256: createHash("sha256").update(archive).digest("hex"), data_base64: archive.toString("base64") }, 90_000); }
+    finally { archive.fill(0); }
+  }
 }

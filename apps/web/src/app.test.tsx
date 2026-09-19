@@ -6,7 +6,10 @@ import { DROP_POINT_RESOURCE_ID, SYNC_RESOURCE_ID } from "./types.js";
 const pdfJsMock = vi.hoisted(() => ({ getDocument: vi.fn() }));
 vi.mock("pdfjs-dist", () => ({ GlobalWorkerOptions: { workerSrc: "" }, getDocument: pdfJsMock.getDocument }));
 
-afterEach(() => { cleanup(); document.documentElement.style.setProperty("--accent", "#00a8ff"); window.localStorage.clear(); window.sessionStorage.clear(); Reflect.deleteProperty(window.navigator, "clipboard"); vi.restoreAllMocks(); vi.unstubAllGlobals(); window.history.replaceState({}, "", "/"); });
+HTMLDialogElement.prototype.showModal = function () {this.setAttribute("open", "");};
+HTMLDialogElement.prototype.close = function () {this.removeAttribute("open");this.dispatchEvent(new Event("close"));};
+
+afterEach(() => { document.querySelectorAll<HTMLDialogElement>("dialog.exo-update").forEach(d => d.close()); cleanup(); document.documentElement.style.setProperty("--accent", "#00a8ff"); window.localStorage.clear(); window.sessionStorage.clear(); Reflect.deleteProperty(window.navigator, "clipboard"); vi.restoreAllMocks(); vi.unstubAllGlobals(); window.history.replaceState({}, "", "/"); });
 
 function requestUrl(input: RequestInfo | URL): string {
   if (typeof input === "string") return input;
@@ -862,8 +865,10 @@ describe("owner Saturn UI", () => {
       if (url.endsWith("/operator/gryphon/bots")) return json({ schema: "exocortex.gryphon.service-bots.v1", serviceId: "saturn", bots: [{ id: "bot-1", alias: "main", username: "saturn_bot", state: "ready", selected: gryphonConnected }] });
       if (url.endsWith("/operator/gryphon/connection") && init?.method === "PUT") { gryphonConnected = true; return json({ connected: true }); }
       if (url.endsWith("/operator/gryphon/connection") && init?.method === "DELETE") { gryphonConnected = false; return json({ disconnected: true }); }
-      if (url.endsWith("/operator/gryphon/update/check")) return json({ installed_version: "1.2.3", available_version: "1.2.4", update_available: true });
-      if (url.endsWith("/operator/gryphon/update/install")) return json({ updated: true, version: "1.2.4" });
+      if (url.endsWith("/operator/updates/flow/check")) return json({ installed_version: "1.2.3", available_version: "1.2.4", update_available: true, updater_version: "0.4.10" });
+      if (url.endsWith("/operator/updates/flow/jobs")) return json({jobs: []});
+      if (url.endsWith("/operator/updates/flow/install/gryphon")) return json({ id: "helper-test", service: "gryphon-update", state: "COMPLETED", version: "1.2.4" });
+      if (url.endsWith("/operator/updates/flow/jobs/helper-test")) return json({ id: "helper-test", state: "COMPLETED" });
       if (url.includes("/activity")) return json([]);
       if (url.includes("/devices")) return json([]);
       if (url.includes("/backup-services")) return json([]);
@@ -887,15 +892,17 @@ describe("owner Saturn UI", () => {
     const gryphonCheck = screen.getByRole("button", { name: "Check Gryphon for updates" });
     await waitFor(() => expect(gryphonCheck).toHaveProperty("disabled", false));
     fireEvent.click(gryphonCheck);
-    fireEvent.click(await screen.findByRole("button", { name: "Install Gryphon 1.2.4" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Install 1.2.4" }));
     await waitFor(() => {
-      const request = fetchMock.mock.calls.find((call) => requestUrl(call[0]).endsWith("/operator/gryphon/update/install"));
-      expect(jsonRequestBody(request?.[1])).toEqual({ version: "1.2.4" });
+      const request = fetchMock.mock.calls.find((call) => requestUrl(call[0]).endsWith("/operator/updates/flow/install/gryphon"));
+      expect(jsonRequestBody(request?.[1])).toMatchObject({ version: "1.2.4" });
+      expect(screen.queryByText("Create backup and install")).toBeNull();
     });
     await waitFor(() => {
       const request = fetchMock.mock.calls.find((call) => requestUrl(call[0]).endsWith("/auth/preferences") && call[1]?.method !== "PUT");
       expect(request).toBeTruthy();
     });
+    document.querySelector<HTMLDialogElement>("dialog.exo-update")?.close();
     const accentField = screen.getByLabelText("Accent color");
     fireEvent.change(accentField, { target: { value: "#111111" } });
     expect(accentField).toHaveProperty("value", "#111111");
@@ -947,7 +954,9 @@ describe("owner Saturn UI", () => {
   it("discovers an available Saturn release inside the update dialog and exposes installation", async () => {
     window.history.replaceState({}, "", "/settings");
     const now = new Date().toISOString();
-    let installedVersion = "0.1.13";
+    const installedVersion = "0.1.13";
+    HTMLDialogElement.prototype.showModal = function () {this.setAttribute("open", "");};
+    HTMLDialogElement.prototype.close = function () {this.removeAttribute("open");this.dispatchEvent(new Event("close"));};
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       void init;
       const url = requestUrl(input);
@@ -955,9 +964,8 @@ describe("owner Saturn UI", () => {
       if (url.endsWith("/auth/session")) return json({ state: "authenticated" });
       if (url.endsWith("/auth/preferences")) return json(preferences({ updatedAt: now }));
       if (url.endsWith("/auth/reauthenticate")) return json({ state: "authenticated" }, 201);
-      if (url.endsWith("/operator/updates/check")) return json({ installed_version: "0.1.13", available_version: "0.1.14", update_available: true });
-      if (url.endsWith("/operator/updates/install")) return json({ id: "update-job-1", state: "REQUESTED" }, 201);
-      if (url.endsWith("/operator/updates/jobs/update-job-1")) { installedVersion = "0.1.14"; return json({ id: "update-job-1", state: "COMPLETED", rollback_available: true }); }
+      if (url.endsWith("/operator/updates/flow/check")) return json({ installed_version: "0.1.13", available_version: "0.1.14", update_available: true, updater_version: "0.4.10", component: "saturn" });
+      if (url.endsWith("/operator/updates/flow/jobs")) return json({ jobs: [] });
       if (url.endsWith("/operator/updates")) return json({ installedVersion, updater: { state: "ready", version: "0.4.1" }, registry: { state: "ready" }, discoveryEnabled: true });
       if (url.endsWith("/operator/kernel")) return json({ configured: true, reachability: "ready", revision: 1 });
       if (url.endsWith("/operator/recovery")) return json({ exportEnabled: true, restoreEnabled: true, busy: false, maxArchiveBytes: 128 * 1024 * 1024, maxChunkBytes: 8 * 1024 * 1024 });
@@ -970,20 +978,16 @@ describe("owner Saturn UI", () => {
     render(<App />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Check for updates" }));
-    const dialog = within(await screen.findByRole("dialog", { name: "Check for updates" }));
-    expect(dialog.queryByRole("button", { name: "Discover signed Saturn release" })).toBeNull();
-    expect(await dialog.findByText("Available: 0.1.14")).toBeTruthy();
-    const install = dialog.getByRole("button", { name: "Back up and install Saturn 0.1.14" });
-    expect(install).toHaveProperty("disabled", false);
-    fireEvent.click(install);
-    await waitFor(() => {
-      const request = fetchMock.mock.calls.find((call) => requestUrl(call[0]).endsWith("/operator/updates/install"));
-      expect(jsonRequestBody(request?.[1])).toEqual({ version: "0.1.14" });
-    });
-    expect(await dialog.findByText("COMPLETED", {}, { timeout: 3_000 })).toBeTruthy();
-    await waitFor(() => expect(dialog.queryByRole("button", { name: "Back up and install Saturn 0.1.14" })).toBeNull());
-    expect(await dialog.findByText("v0.1.14")).toBeTruthy();
-    expect(fetchMock.mock.calls.filter((call) => requestUrl(call[0]).endsWith("/operator/updates/install"))).toHaveLength(1);
+    const dialog = within(await screen.findByRole("dialog", { name: "Updates" }));
+    expect(await dialog.findByText("Saturn 0.1.14 is available.")).toBeTruthy();
+    fireEvent.click(dialog.getByRole("button", { name: "Check again" }));
+    await waitFor(() => expect(fetchMock.mock.calls.filter(call => requestUrl(call[0]).endsWith("/flow/check"))).toHaveLength(2));
+    fireEvent.click(dialog.getByRole("button", { name: "Install 0.1.14" }));
+    const warning = within(await screen.findByRole("dialog", { name: "Install SATURN update" }));
+    expect(warning.getByRole("button", { name: "Create backup and install" })).toBeTruthy();
+    expect(fetchMock.mock.calls.some(call => requestUrl(call[0]).includes("/install"))).toBe(false);
+    fireEvent.click(warning.getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("dialog", { name: "Install SATURN update" })).toBeNull();
   });
 
   it("keeps storage credentials write-only and requires a fresh connection test", async () => {

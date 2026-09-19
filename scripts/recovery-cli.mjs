@@ -6,7 +6,7 @@ import { createRequire } from "node:module";
 
 const vaultRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const [command, archiveArgument, confirmation] = process.argv.slice(2);
-const validCommands = new Set(["backup", "validate", "restore-clean", "restore-replace"]);
+const validCommands = new Set(["backup", "validate", "restore-clean", "restore-replace", "restore-rollback"]);
 if (command === undefined || !validCommands.has(command)) {
   throw new Error("Usage: recovery-cli.mjs backup | validate <archive> | restore-clean <archive> | restore-replace <archive> --confirm-replace");
 }
@@ -46,6 +46,9 @@ if (command === "validate") {
 }
 
 const database = new databaseModule.Database(config.databaseUrl, { max: 3 });
+// Recovery queries must not acquire a shared lock from inside the exclusive
+// maintenance operation. Use a separate connection solely for the barrier.
+const barrierDatabase = new databaseModule.Database(config.databaseUrl, { max: 1, maintenanceBarrier: true });
 const storage = new storageModule.RuntimeStorageManager(config.storage, config.storageRuntimeConfigDirectory);
 await storage.initialize();
 try {
@@ -90,7 +93,7 @@ try {
     process.stdout.write(`${JSON.stringify({ state: "complete", backupId: created.manifest.backupId, ...published })}\n`);
   } else {
     if (archiveArgument === undefined) throw new Error(`${command} requires an archive path`);
-    if (command === "restore-replace" && confirmation !== "--confirm-replace") {
+    if ((command === "restore-replace" || command === "restore-rollback") && confirmation !== "--confirm-replace") {
       throw new Error("Replacement restore requires --confirm-replace");
     }
     await fs.mkdir(config.recovery.archiveDirectory, { recursive: true, mode: 0o700 });
@@ -101,10 +104,11 @@ try {
       mode,
       configuration: await storageModule.createStorageRecoveryParticipant(config, storage),
       ...(mode === "clean" ? {} : { snapshotOutputPath, snapshotInput: safeInputs }),
-    }, () => databaseModule.migrate(config.databaseUrl, safeInputs.migrationsDirectory), action => database.withExclusiveMaintenance(action));
+    }, () => command === "restore-rollback" ? Promise.resolve() : databaseModule.migrate(config.databaseUrl, safeInputs.migrationsDirectory), action => barrierDatabase.withExclusiveMaintenance(action));
     process.stdout.write(`${JSON.stringify({ state: "complete", ...result })}\n`);
   }
 } finally {
   await storage?.close().catch(() => undefined);
   await database.close().catch(() => undefined);
+  await barrierDatabase.close().catch(() => undefined);
 }

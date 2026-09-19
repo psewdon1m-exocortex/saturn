@@ -38,6 +38,7 @@ export class HealthService {
     return {
       status: "ok",
       service: "api",
+      version: process.env.VAULT_RELEASE_VERSION ?? "0.0.0",
       timestamp: new Date().toISOString(),
       checks: { process: { state: "pass" } },
     };
@@ -63,6 +64,6 @@ export class HealthService {
     const checks: Record<string, HealthCheckResult> = { database, storage, worker };
 
     const status = Object.values(checks).some((check) => check.state === "fail") ? "degraded" : "ok";
-    return { status, service: "api", timestamp: new Date().toISOString(), checks };
+    return { status, service: "api", version: process.env.VAULT_RELEASE_VERSION ?? "0.0.0", timestamp: new Date().toISOString(), checks };
   }
 }

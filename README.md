@@ -67,7 +67,7 @@ Production releases are created only by tags matching
 versioned OCI repositories are `saturn-app` and `saturn-web`, and its
 installation bundle is `saturn-0.1.16.zip`. Legacy unscoped tags such as
 `v0.0.1` run verification only and cannot publish a Saturn release. Publish
-the pinned `updater-v0.4.9` dependency before the Saturn tag. The existing
+the pinned `updater-v0.5.0` dependency before the Saturn tag. The existing
 `saturn-v0.1.0` through `saturn-v0.1.15` releases remain immutable.
 
 ## Production installation
@@ -192,3 +192,10 @@ After linking, `/drop` creates a one-time Drop Point code immediately;
 `/drop_status` and `/drop_revoke` inspect or revoke access.
 
 The current six-service deployment, trust, recovery and acceptance contract is documented in [Deployment readiness](DEPLOYMENT_READINESS.md).
+
+## Unified updates (protocol 2)
+
+See [Update protocol, saved ZIP and first migration](docs/UPDATE-PROTOCOL.md).
+The UI uses Updater **0.5.0**, an exact selected version, the standard ZIP saved
+on the operator PC, and durable status/progress. Helper updates use the same
+dialog without a backup. No update ZIP is retained on the application host.

@@ -10,6 +10,7 @@ export interface HealthCheckResult {
 }
 
 export interface HealthResponse {
+  readonly version?: string;
   readonly status: "ok" | "degraded";
   readonly service: ServiceRole;
   readonly timestamp: string;

@@ -1,3 +1,4 @@
+import { openSaturnUpdates, openRemoteNeptuneUpdates } from "./update-flow.js";
 import { LocalAgentActions } from "./local-agent-actions.js";
 import { HelperRecoveryPanel } from "./helper-recovery-panel.js";
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type CSSProperties, type DragEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode, type SyntheticEvent } from "react";
@@ -15,8 +16,8 @@ import {
   VOLT_RESOURCE_ID,
   ROOT_RESOURCE_ID,
   SYNC_RESOURCE_ID,
-  type BackupRunInfo,
   type BackupServiceInfo,
+  type BackupRunInfo,
   type AuditEventInfo,
   type ArchiveJobInfo,
   type DeviceInfo,
@@ -30,7 +31,6 @@ import {
   type RecoveryStatus,
   type RecoveryRestoreCandidate,
   type RecoveryRestoreResult,
-  type NeptuneReleaseCheck,
   type NeptuneAgentInfo,
   type NeptuneAvailability,
   type Resource,
@@ -2203,16 +2203,14 @@ function StatusRow({ label, state, detail }: { readonly label: string; readonly 
   return <div className="status-row"><span>{label}</span><span className={`semantic-status semantic-status--${state}`}>{detail ?? (state === "ready" ? "Service Reachability" : state === "busy" ? "Busy" : "Unavailable")}<i aria-hidden="true" /></span></div>;
 }
 
-function NeptunePipelineRow({ service, agent, release, pending, reauthed, onSchedule, onCommand, onCheckUpdate, onInstallUpdate, onSetup, onRotate, onRevoke }: {
+function NeptunePipelineRow({ service, agent, pending, reauthed, onSchedule, onCommand, onCheckUpdate, onSetup, onRotate, onRevoke }: {
   readonly service: BackupServiceInfo;
   readonly agent?: NeptuneAgentInfo | undefined;
-  readonly release?: NeptuneReleaseCheck | undefined;
   readonly pending: boolean;
   readonly reauthed: boolean;
   readonly onSchedule: (service: BackupServiceInfo, archiveEnabled: boolean, archiveIntervalHours: number, mirrorEnabled: boolean, mirrorIntervalMinutes: number) => Promise<void>;
   readonly onCommand: (service: BackupServiceInfo, kind: "archive.run" | "mirror.run") => Promise<void>;
-  readonly onCheckUpdate: (service: BackupServiceInfo) => Promise<void>;
-  readonly onInstallUpdate: (service: BackupServiceInfo, version: string) => Promise<void>;
+  readonly onCheckUpdate: (service: BackupServiceInfo) => void;
   readonly onSetup: (id: string) => Promise<void>;
   readonly onRotate: (id: string) => Promise<void>;
   readonly onRevoke: (id: string) => Promise<void>;
@@ -2241,7 +2239,6 @@ function NeptunePipelineRow({ service, agent, release, pending, reauthed, onSche
   const archiveActive = agent?.observed.archive["active"] === true;
   const mirrorActive = agent?.observed.mirror["active"] === true;
   const versionPending = agent?.desired.version !== undefined && agent.desired.version !== agent.observed.version;
-  const updateVersion = release?.update_available === true && release.available_version !== agent?.observed.version ? release.available_version : undefined;
   const heartbeat = online
     ? `online · Neptune ${agent?.observed.version ?? "unknown"}`
     : lastSeenAt === undefined ? "waiting for first check-in" : `offline · last seen ${new Date(lastSeenAt).toLocaleString()}`;
@@ -2263,7 +2260,7 @@ function NeptunePipelineRow({ service, agent, release, pending, reauthed, onSche
         <button className="button" type="button" disabled={disabled || mirrorActive} onClick={() => void onCommand(service, "mirror.run")}>{online ? "Run mirror now" : "Queue mirror run"}</button>
       </>}
     </div>
-    <div className="inline-actions"><button className="button" type="button" disabled={pending || !online} onClick={() => void onCheckUpdate(service)}>Check update</button>{updateVersion === undefined ? release === undefined ? null : <span className="setting-meta">Up to date</span> : <button className="button button--primary" type="button" disabled={pending || !online || versionPending} onClick={() => void onInstallUpdate(service, updateVersion)}>Update to {updateVersion}</button>}<button className="button" type="button" disabled={pending || !reauthed || service.state !== "active"} onClick={() => void onSetup(service.id)}>Setup code</button><button className="button" type="button" disabled={pending || !reauthed || service.state !== "active"} onClick={() => void onRotate(service.id)}>Rotate archive token</button><button className="button button--danger" type="button" disabled={pending || !reauthed || service.state !== "active"} onClick={() => void onRevoke(service.id)}>Revoke</button></div>
+    <div className="inline-actions"><button className="button" type="button" disabled={pending || !online} onClick={() => onCheckUpdate(service)}>Check update</button><button className="button" type="button" disabled={pending || !reauthed || service.state !== "active"} onClick={() => void onSetup(service.id)}>Setup code</button><button className="button" type="button" disabled={pending || !reauthed || service.state !== "active"} onClick={() => void onRotate(service.id)}>Rotate archive token</button><button className="button button--danger" type="button" disabled={pending || !reauthed || service.state !== "active"} onClick={() => void onRevoke(service.id)}>Revoke</button></div>
     <details className="fleet-agent__runs"><summary>Recent ZIP runs ({runs.length})</summary>{runs.length === 0 ? <p className="empty-state">No runs recorded.</p> : <div className="compact-list">{runs.map((run) => <div className="compact-row" key={run.id}><span>{run.state} · {new Date(run.updatedAt).toLocaleString()} · {formatBytes(run.expectedSize)}</span><span>{run.receipt?.logicalPath ?? run.failureCode ?? run.filename}</span></div>)}</div>}</details>
   </article>;
 }
@@ -2273,7 +2270,6 @@ function SynchronizationView({ addNotice }: { readonly addNotice: (kind: Notice[
   const [accessKey, setAccessKey] = useState("");
   const [reauthed, setReauthed] = useState(false);
   const [agents, setAgents] = useState<readonly NeptuneAgentInfo[]>([]);
-  const [agentReleases, setAgentReleases] = useState<Readonly<Record<string, NeptuneReleaseCheck>>>({});
   const [services, setServices] = useState<readonly BackupServiceInfo[]>([]);
   const [devices, setDevices] = useState<readonly DeviceInfo[]>([]);
   const [pipeline, setPipeline] = useState<"archive" | "volt" | "mastermind">("archive");
@@ -2381,30 +2377,13 @@ function SynchronizationView({ addNotice }: { readonly addNotice: (kind: Notice[
     catch { addNotice("error", "Remote Neptune command could not be queued."); }
     finally { setPending(false); }
   };
-  const checkAgentUpdate = async (service: BackupServiceInfo) => {
-    setPending(true);
-    try {
-      const release = await api.checkNeptuneAgentUpdate(service.id);
-      setAgentReleases((current) => ({ ...current, [service.id]: release }));
-      addNotice("info", release.update_available ? `Neptune ${release.available_version ?? "update"} is available for ${service.name}.` : `${service.name} is up to date.`);
-    } catch { addNotice("error", "Neptune release availability could not be checked."); }
-    finally { setPending(false); }
-  };
-  const installAgentUpdate = async (service: BackupServiceInfo, version: string) => {
-    setPending(true);
-    try {
-      await api.commandNeptuneAgent(service.id, { kind: "agent.update", version });
-      addNotice("success", `Neptune ${version} update queued for ${service.name}.`);
-      await loadAgents();
-    } catch { addNotice("error", "Neptune update could not be queued."); }
-    finally { setPending(false); }
-  };
+  const checkAgentUpdate = (service: BackupServiceInfo) => { openRemoteNeptuneUpdates(service.id); };
 
   const archiveServices = services.filter((service) => service.mirrorRoot === undefined);
   const mirrorServices = services.filter((service) => service.mirrorRoot !== undefined);
   const linkedMirrorDevices = new Set(mirrorServices.flatMap((service) => service.mirrorDeviceId === undefined ? [] : [service.mirrorDeviceId]));
   const windowsDevices = devices.filter((device) => device.scopeIds.length === 1 && device.scopeIds[0] === SYNC_RESOURCE_ID && !linkedMirrorDevices.has(device.id));
-  const identityList = (items: readonly BackupServiceInfo[]) => <div className="compact-list fleet-list">{items.length === 0 ? <p className="empty-state">No identities configured.</p> : items.map((service) => <NeptunePipelineRow key={service.id} service={service} agent={agents.find((agent) => agent.serviceId === service.id)} release={agentReleases[service.id]} pending={pending} reauthed={reauthed} onSchedule={saveAgentSchedule} onCommand={commandAgent} onCheckUpdate={checkAgentUpdate} onInstallUpdate={installAgentUpdate} onSetup={createEnrollment} onRotate={rotateService} onRevoke={revokeService} />)}</div>;
+  const identityList = (items: readonly BackupServiceInfo[]) => <div className="compact-list fleet-list">{items.length === 0 ? <p className="empty-state">No identities configured.</p> : items.map((service) => <NeptunePipelineRow key={service.id} service={service} agent={agents.find((agent) => agent.serviceId === service.id)} pending={pending} reauthed={reauthed} onSchedule={saveAgentSchedule} onCommand={commandAgent} onCheckUpdate={checkAgentUpdate} onSetup={createEnrollment} onRotate={rotateService} onRevoke={revokeService} />)}</div>;
 
   return <section className="workspace synchronization" aria-labelledby="synchronization-title">
     <PageHeader title="synchronization" id="synchronization-title" />
@@ -2445,7 +2424,6 @@ function SettingsView({ preferences, setPreferences, addNotice, onAnonymous }: {
   const [gryphonBots, setGryphonBots] = useState<readonly GryphonBot[]>([]);
   const [gryphonBotId, setGryphonBotId] = useState("");
   const [gryphonConnectionDialog, setGryphonConnectionDialog] = useState(false);
-  const [gryphonRelease, setGryphonRelease] = useState<NeptuneReleaseCheck | undefined>();
   const [gryphonChallenge, setGryphonChallenge] = useState<GryphonChallenge | undefined>();
   const [restoreDialog, setRestoreDialog] = useState(false);
   const [restoreCandidate, setRestoreCandidate] = useState<RecoveryRestoreCandidate | undefined>();
@@ -2456,7 +2434,6 @@ function SettingsView({ preferences, setPreferences, addNotice, onAnonymous }: {
   const [restoreError, setRestoreError] = useState("");
   const restoreInput = useRef<HTMLInputElement>(null);
   const [updates, setUpdates] = useState<UpdateStatus | undefined>();
-  const [updateDialog, setUpdateDialog] = useState(false);
   const [events, setEvents] = useState<readonly AuditEventInfo[]>([]);
   const [draggingCard, setDraggingCard] = useState<SettingsCardName | undefined>();
   const [dropCard, setDropCard] = useState<SettingsCardName | undefined>();
@@ -2695,20 +2672,6 @@ function SettingsView({ preferences, setPreferences, addNotice, onAnonymous }: {
     catch { addNotice("error", "Saturn function could not be unlinked."); }
     finally { setPending(false); }
   };
-  const checkGryphonUpdate = async () => {
-    setPending(true);
-    try { const result = await api.checkGryphonUpdate(); setGryphonRelease(result); addNotice("success", result.update_available ? `Gryphon ${result.available_version ?? "update"} is available.` : "Gryphon is up to date."); }
-    catch { addNotice("error", "Gryphon release check failed."); }
-    finally { setPending(false); }
-  };
-  const installGryphonUpdate = async () => {
-    const version = gryphonRelease?.available_version;
-    if (version === undefined) return;
-    setPending(true);
-    try { await api.installGryphonUpdate(version); setGryphonRelease(undefined); await loadGryphon(); addNotice("success", `Gryphon ${version} installed.`); }
-    catch { addNotice("error", "Gryphon update failed and the previous release was retained."); }
-    finally { setPending(false); }
-  };
   const openRestore = () => {
     setRestoreDialog(true); setRestoreCandidate(undefined); setRestoreResult(undefined); setRestoreStage("idle"); setRestoreProgress(0); setRestoreConfirmed(false); setRestoreError("");
   };
@@ -2775,13 +2738,13 @@ function SettingsView({ preferences, setPreferences, addNotice, onAnonymous }: {
       <HelperRecoveryPanel enabled={updates?.updater.state === "ready"} />
       <section className="settings-group"><h3>System snapshot</h3><p>Logical snapshots contain authoritative state and personalization, but no plaintext passwords or service tokens.</p><button className="button settings-action" type="button" disabled={pending || !recovery?.exportEnabled} title={recovery?.reason} onClick={() => void createRecoverySnapshot()}>{pending ? "Creating snapshot…" : "Create and download snapshot"}</button></section>
       <section className="settings-group"><h3>Restore snapshot</h3><p>Restore validates the complete archive before replacement and rolls back if post-restore health fails.</p><button className="button settings-action" type="button" disabled={pending || !recovery?.restoreEnabled} title={recovery?.reason} onClick={openRestore}>Browse local snapshot archive</button></section>
-      <section className="settings-group"><h3>Automatic pipelines</h3><p>Schedules, remote runs and Neptune fleet status are managed only from Synchronization.</p><StatusRow label="Local Neptune agent:" state={neptune?.linked ? "ready" : "unavailable"} detail={neptune?.linked ? "Linked to Saturn" : neptune?.installed ? "Detected · not linked" : "Not installed"} />{!neptune?.linked ? <button className="button settings-action" type="button" disabled={pending || updates?.updater.state !== "ready"} onClick={() => setNeptuneDialog(true)}>Initialize Neptune</button> : null}</section>
+      <section className="settings-group"><h3>Automatic pipelines</h3><button className="button settings-action" type="button" onClick={() => openSaturnUpdates("neptune")}>Check Neptune for updates</button><p>Schedules, remote runs and Neptune fleet status are managed only from Synchronization.</p><StatusRow label="Local Neptune agent:" state={neptune?.linked ? "ready" : "unavailable"} detail={neptune?.linked ? "Linked to Saturn" : neptune?.installed ? "Detected · not linked" : "Not installed"} />{!neptune?.linked ? <button className="button settings-action" type="button" disabled={pending || updates?.updater.state !== "ready"} onClick={() => setNeptuneDialog(true)}>Initialize Neptune</button> : null}</section>
     </div>,
     gryphon: <div className="settings-groups bot-connection-groups">
       <section className="settings-group"><h3>Gryphon bot binding</h3><p>Gryphon owns the Telegram connection, service receives only service-scoped commands.</p><StatusRow label="Local Gryphon agent:" state={gryphon === undefined ? "unavailable" : "ready"} detail={gryphon === undefined ? "Service Unavailable" : "Service Reachability"} />{gryphon?.connected === true && gryphon.bot !== null ? <p className="bot-connection-selected">Connected bot: <strong>{gryphon.bot.username === undefined ? gryphon.bot.alias : `@${gryphon.bot.username}`}</strong></p> : null}{gryphon?.connected === true && gryphon.binding === null ? <button className="button button--primary settings-action bot-connection-action" type="button" disabled={pending} onClick={() => void issueGryphonLink()}>{pending ? "Creating…" : "Initialize bot"}</button> : null}<button className="button settings-action bot-connection-action" type="button" disabled={pending || gryphon === undefined} onClick={() => void (gryphon?.connected === true ? disconnectGryphon() : openGryphonConnection())}>{pending ? "Working…" : gryphon?.connected === true ? "Unlink Saturn function" : "Link Saturn function"}</button>{gryphon?.binding !== null && gryphon?.binding !== undefined ? <p className="bot-connection-selected">Telegram account linked.</p> : null}</section>
-      <section className="settings-group"><h3>Gryphon version</h3>{gryphon === undefined ? <LocalAgentActions kind="gryphon" onComplete={loadGryphon} enabled={updates?.updater.state === "ready"} /> : null}<p>Current installed version: <strong>{gryphon?.version ?? "unavailable"}</strong>{gryphonRelease?.available_version === undefined ? "" : ` · latest ${gryphonRelease.available_version}`}</p><button className="button settings-action" type="button" disabled={pending || gryphon === undefined} onClick={() => void checkGryphonUpdate()}>Check Gryphon for updates</button>{gryphonRelease?.update_available === true && gryphonRelease.available_version !== undefined ? <button className="button button--primary settings-action" type="button" disabled={pending} onClick={() => void installGryphonUpdate()}>Install Gryphon {gryphonRelease.available_version}</button> : null}</section>
+      <section className="settings-group"><h3>Gryphon version</h3>{gryphon === undefined ? <LocalAgentActions kind="gryphon" onComplete={loadGryphon} enabled={updates?.updater.state === "ready"} /> : null}<p>Current installed version: <strong>{gryphon?.version ?? "unavailable"}</strong></p><button className="button settings-action" type="button" disabled={pending || gryphon === undefined} onClick={() => openSaturnUpdates("gryphon")}>Check Gryphon for updates</button></section>
     </div>,
-    updates: <div className="settings-groups updates-content"><section className="settings-group update-pipeline-group"><h3>Update pipeline</h3><p>Release discovery comes from Kernel Register; replacement and rollback are performed by the local Updater.</p><p>Current installed version: <strong className="accent-text">v{updates?.installedVersion ?? "unknown"}</strong></p><div className="settings-status-stack"><StatusRow label="Local Updater agent:" state={updates === undefined ? "busy" : updates.updater.state} detail={updates === undefined ? "Checking" : updates.updater.state === "ready" ? "Service Reachability" : updates.updater.reason ?? "Service Unavailable"} /><StatusRow label="Kernel Register:" state={updates === undefined ? "busy" : updates.registry.state} detail={updates === undefined ? "Checking" : updates.registry.state === "ready" ? "Service Reachability" : updates.registry.reason ?? "Service Unavailable"} /></div><button className="button settings-action update-check-action" type="button" disabled={pending} onClick={() => { setUpdateDialog(true); void loadUpdates(); }}>Check for updates</button></section><section className="settings-group updater-version-group"><h3>Updater version</h3><LocalAgentActions kind="updater" onComplete={loadUpdates} enabled={updates?.updater.state === "ready"} /><p>Current installed version: {updates?.updater.version ?? "unavailable"}</p><button className="button settings-action" type="button" disabled={pending} onClick={() => void loadUpdates().then(() => addNotice("info", "Updater version status refreshed."))}>Check Updater for updates</button></section></div>,
+    updates: <div className="settings-groups updates-content"><section className="settings-group update-pipeline-group"><h3>Update pipeline</h3><p>Release discovery comes from Kernel Register; replacement and rollback are performed by the local Updater.</p><p>Current installed version: <strong className="accent-text">v{updates?.installedVersion ?? "unknown"}</strong></p><div className="settings-status-stack"><StatusRow label="Local Updater agent:" state={updates === undefined ? "busy" : updates.updater.state} detail={updates === undefined ? "Checking" : updates.updater.state === "ready" ? "Service Reachability" : updates.updater.reason ?? "Service Unavailable"} /><StatusRow label="Kernel Register:" state={updates === undefined ? "busy" : updates.registry.state} detail={updates === undefined ? "Checking" : updates.registry.state === "ready" ? "Service Reachability" : updates.registry.reason ?? "Service Unavailable"} /></div><button className="button settings-action update-check-action" type="button" disabled={pending} onClick={() => openSaturnUpdates()}>Check for updates</button></section><section className="settings-group updater-version-group"><h3>Updater version</h3><p>Current installed version: {updates?.updater.version ?? "unavailable"}</p><button className="button settings-action" type="button" disabled={pending} onClick={() => openSaturnUpdates("updater")}>Check Updater for updates</button></section></div>,
     logs: <div className="settings-groups"><section className="settings-group logs-group"><div className="logs-actions"><p>Compact ordered audit stream. The browser keeps at most 200 visible events.</p><a className="button" href="/api/v1/activity/export?limit=10000" download>Download archived logs</a></div><div className="log-table" role="log" aria-live="polite"><div className="log-row log-row--head"><span>TYPE</span><span>BODY</span><span>TIME</span></div>{events.length === 0 ? <p className="empty-state">No retained events are available.</p> : events.map((item) => <div className="log-row" key={item.id}><strong className={item.outcome === "success" ? "log-type--success" : "log-type--failure"}>/{item.outcome.toUpperCase()}</strong><span title={item.correlationId}>{item.action}{item.resourceId === undefined ? "" : ` · ${item.resourceId}`}</span><time dateTime={item.occurredAt}>{new Date(item.occurredAt).toLocaleString("ru-RU")}</time></div>)}</div><button className="button settings-action" type="button" disabled={events.length === 0} onClick={() => { const before = events.at(-1)?.sequence; if (before !== undefined) void api.activity(before, 100).then((older) => setEvents((current) => [...current, ...older].slice(0, 200))); }}>Load older</button></section></div>,
   };
 
@@ -2827,7 +2790,6 @@ function SettingsView({ preferences, setPreferences, addNotice, onAnonymous }: {
         {restoreStage === "complete" && restoreResult !== undefined ? <><p className="restore-success" role="status">Restore complete. Database invariants passed in {restoreResult.measuredRtoMs} ms.</p><dl className="restore-metadata">{Object.entries(restoreResult.verification).map(([name, count]) => <div key={name}><dt>{name}</dt><dd>{count}</dd></div>)}</dl><p className="muted">Owner browser sessions are deliberately absent from snapshots. Sign in again to continue against the restored state.</p><div className="dialog__actions"><button className="button button--primary" type="button" onClick={onAnonymous}>Return to login</button></div></> : null}
       </div>
     </Dialog> : null}
-    {updateDialog ? <Dialog title="Check for updates" description="The check is read-only. An explicit Install action creates a recovery snapshot before replacement." onClose={() => setUpdateDialog(false)}><div className="update-discovery"><p>Installed: <strong className="accent-text">v{updates?.installedVersion ?? "unknown"}</strong></p><StatusRow label="Local updater agent" state={updates?.updater.state ?? "unavailable"} detail={updates?.updater.reason} /><StatusRow label="Approved registry" state={updates?.registry.state ?? "unavailable"} detail={updates?.registry.reason} />{updates?.discoveryEnabled ? <LocalAgentActions kind="saturn" autoDiscover discoveryEnabled enabled onComplete={loadUpdates} /> : <p className="muted">Discovery is unavailable until both trusted dependencies are configured. No update has been started.</p>}</div></Dialog> : null}
     {revokeDialog ? <ConfirmDialog title="Revoke all owner sessions" description="Every browser session is invalidated server-side. Files and storage credentials are unchanged." confirmLabel="Revoke sessions" danger pending={pending} onConfirm={() => void revoke()} onClose={() => setRevokeDialog(false)} /> : null}
   </section>;
 }
