@@ -62,6 +62,16 @@ interface BackupUploadTaskRow {
   readonly updated_at: Date;
 }
 
+interface DropUploadTaskRow {
+  readonly id: string;
+  readonly filename: string;
+  readonly expected_size: string;
+  readonly received_size: string;
+  readonly state: "reserved" | "uploading" | "buffered" | "transferring" | "verifying";
+  readonly created_at: Date;
+  readonly updated_at: Date;
+}
+
 function databaseInteger(value: string): number {
   const parsed = Number(value);
   return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : 0;
@@ -169,19 +179,38 @@ export class OperatorController {
   async overview() {
     const sampledAt = Date.now();
     const localDevelopmentStorage = isLocalDevelopmentStorage(this.#config, this.#storage);
-    const [uploadRows, backupRows, storageRows, disk, storageCapacity, storageHealth, archiveJobs] = await Promise.all([
+    const [uploadRows, dropRows, backupRows, storageRows, disk, storageCapacity, storageHealth, archiveJobs] = await Promise.all([
       this.#database.withSql((sql) => sql<UploadTaskRow[]>`
         SELECT id::text, filename, expected_size::text, received_size::text, status, created_at, updated_at
         FROM upload_sessions
         WHERE status IN ('created', 'uploading', 'verifying', 'committing', 'failed_retryable')
           AND expires_at > now()
-          AND (status NOT IN ('verifying', 'committing') OR updated_at >= now() - interval '15 minutes')
+          AND NOT EXISTS (
+            SELECT 1 FROM drop_uploads
+            WHERE drop_uploads.upload_id = upload_sessions.id
+              AND drop_uploads.state IN ('reserved', 'uploading', 'buffered', 'transferring', 'verifying')
+          )
         ORDER BY
           CASE status
             WHEN 'uploading' THEN 0
             WHEN 'verifying' THEN 1
             WHEN 'committing' THEN 2
             WHEN 'created' THEN 3
+            ELSE 4
+          END,
+          updated_at DESC
+        LIMIT 32
+      `),
+      this.#database.withSql((sql) => sql<DropUploadTaskRow[]>`
+        SELECT id::text, filename, expected_size::text, received_size::text, state, created_at, updated_at
+        FROM drop_uploads
+        WHERE state IN ('reserved', 'uploading', 'buffered', 'transferring', 'verifying')
+        ORDER BY
+          CASE state
+            WHEN 'transferring' THEN 0
+            WHEN 'verifying' THEN 1
+            WHEN 'uploading' THEN 2
+            WHEN 'buffered' THEN 3
             ELSE 4
           END,
           updated_at DESC
@@ -230,6 +259,21 @@ export class OperatorController {
       expectedBytes: databaseInteger(row.expected_size),
       receivedBytes: databaseInteger(row.received_size),
       status: row.status,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    })), ...dropRows.map((row): UploadTaskSample => ({
+      id: `drop:${row.id}`,
+      filename: row.filename,
+      expectedBytes: databaseInteger(row.expected_size),
+      receivedBytes: ["buffered", "transferring", "verifying"].includes(row.state)
+        ? databaseInteger(row.expected_size)
+        : databaseInteger(row.received_size),
+      status: row.state === "reserved" || row.state === "buffered"
+        ? "created"
+        : row.state === "verifying"
+          ? "verifying"
+          : "uploading",
+      controllable: false,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     })), ...backupRows.map((row): UploadTaskSample => ({

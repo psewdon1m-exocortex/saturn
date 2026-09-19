@@ -234,9 +234,16 @@ function skippedDirectoryMessage(directoryCount: number): string {
   return `${String(directoryCount)} ${directoryCount === 1 ? "folder was" : "folders were"} skipped. Open ${directoryCount === 1 ? "it" : "them"} and select the files inside.`;
 }
 
-function formatDropCountdown(expiresAt: string | undefined, now: number): string {
-  if (expiresAt === undefined) return "—";
-  const remainingSeconds = Math.max(0, Math.ceil((new Date(expiresAt).getTime() - now) / 1_000));
+function dropSessionRemainingMs(session: DropSessionInfo): number {
+  if (Number.isFinite(session.remainingMs) && (session.remainingMs ?? -1) >= 0) return session.remainingMs ?? 0;
+  const expiresAt = new Date(session.expiresAt).getTime();
+  const serverNow = session.serverNow === undefined ? Date.now() : new Date(session.serverNow).getTime();
+  return Math.max(0, expiresAt - serverNow);
+}
+
+function formatDropCountdown(remainingMs: number | undefined): string {
+  if (remainingMs === undefined) return "—";
+  const remainingSeconds = Math.max(0, Math.ceil(remainingMs / 1_000));
   const minutes = Math.floor(remainingSeconds / 60);
   const seconds = remainingSeconds % 60;
   return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
@@ -417,13 +424,27 @@ function MarkdownPreview({ resource }: { readonly resource: Resource }) {
   return <article className="quick-preview__markdown" dangerouslySetInnerHTML={{ __html: html }} />;
 }
 
+function VideoPreview({ resource }: { readonly resource: Resource }) {
+  const [error, setError] = useState(false);
+  if (error) return <div className="quick-preview__media-error" role="alert"><p>This video codec is not supported by this browser.</p><a href={downloadUrl(resource.id)}>Download file</a></div>;
+  return <video
+    src={downloadUrl(resource.id, true)}
+    controls
+    autoPlay
+    muted
+    playsInline
+    preload="metadata"
+    onError={() => setError(true)}
+  />;
+}
+
 function QuickPreview({ resource, onClose }: { readonly resource: Resource; readonly onClose: () => void }) {
   const kind = resourceKind(resource);
   return <div className="quick-preview" role="dialog" aria-modal="true" aria-label={`Preview ${resource.name}`} onMouseDown={(event) => { if (event.currentTarget === event.target) onClose(); }}>
     <header><strong>{resource.name}</strong><span>{formatBytes(resource.sizeBytes)}</span><a href={downloadUrl(resource.id)}>Download</a><button type="button" onClick={onClose} aria-label="Close preview">×</button></header>
     <div className={`quick-preview__content quick-preview__content--${kind}`}>
       {kind === "image" ? <img src={downloadUrl(resource.id, true)} alt={resource.name} />
-        : kind === "video" ? <video src={downloadUrl(resource.id, true)} controls autoPlay />
+        : kind === "video" ? <VideoPreview resource={resource} />
           : kind === "audio" ? <div className="quick-preview__audio"><FileKindIcon kind="audio" /><audio src={downloadUrl(resource.id, true)} controls autoPlay /></div>
             : kind === "pdf" ? <PdfPreview resource={resource} />
               : kind === "markdown" ? <MarkdownPreview resource={resource} />
@@ -707,9 +728,23 @@ function DropView({ health }: { readonly health: GatewayState }) {
   const [message, setMessage] = useState("");
   const [jobs, setJobs] = useState<Array<{ readonly id: string; readonly name: string; readonly progress: number; readonly state: DropUploadStatus["state"] }>>([]);
   const [draggingFiles, setDraggingFiles] = useState(false);
-  const [now, setNow] = useState(() => Date.now());
+  const [countdownDeadline, setCountdownDeadline] = useState<number | undefined>();
+  const [now, setNow] = useState(() => performance.now());
   const input = useRef<HTMLInputElement>(null);
   const dragDepth = useRef(0);
+  const activateSession = useCallback((value: DropSessionInfo) => {
+    const localNow = performance.now();
+    setSession(value);
+    setCountdownDeadline(localNow + dropSessionRemainingMs(value));
+    setNow(localNow);
+    setState("active");
+  }, []);
+  const applyUploads = useCallback((uploads: readonly DropUploadStatus[]) => setJobs((current) => uploads.map((upload) => ({
+    id: upload.id,
+    name: upload.filename ?? current.find((job) => job.id === upload.id)?.name ?? "Upload",
+    progress: upload.expectedSize === 0 ? 1 : upload.receivedSize / upload.expectedSize,
+    state: upload.state,
+  }))), []);
 
   useEffect(() => {
     const expectedChannelId = expectedDropChannelId();
@@ -719,30 +754,56 @@ function DropView({ health }: { readonly health: GatewayState }) {
         return;
       }
       rememberDropChannel(value.channelId);
-      setSession(value); setState("active");
+      activateSession(value);
       const uploads = await dropApi.uploads().catch(() => []);
-      setJobs(uploads.map((upload) => ({ id: upload.id, name: upload.filename ?? "Upload", progress: upload.expectedSize === 0 ? 1 : upload.receivedSize / upload.expectedSize, state: upload.state })));
-    }).catch(() => { setJobs([]); setSession(undefined); if (expectedChannelId !== undefined) setMessage("This Drop session has expired. Enter a code to continue."); setState("redeem"); });
-  }, []);
+      applyUploads(uploads);
+    }).catch(() => { setJobs([]); setSession(undefined); setCountdownDeadline(undefined); if (expectedChannelId !== undefined) setMessage("This Drop session has expired. Enter a code to continue."); setState("redeem"); });
+  }, [activateSession, applyUploads]);
   useEffect(() => {
     if (state !== "active") return;
-    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
+    const timer = window.setInterval(() => setNow(performance.now()), 1_000);
     return () => window.clearInterval(timer);
   }, [state]);
-  const expired = session !== undefined && new Date(session.expiresAt).getTime() <= now;
+  const remainingMs = countdownDeadline === undefined ? undefined : Math.max(0, countdownDeadline - now);
+  const expired = session !== undefined && remainingMs === 0;
   const dropBlocked = pending || expired || session?.buffer?.state === "refusing";
   useEffect(() => {
     if (state !== "active" || expired) return;
-    const applyUploads = (uploads: readonly DropUploadStatus[]) => setJobs((current) => uploads.map((upload) => ({ id: upload.id, name: upload.filename ?? current.find((job) => job.id === upload.id)?.name ?? "Upload", progress: upload.expectedSize === 0 ? 1 : upload.receivedSize / upload.expectedSize, state: upload.state })));
     const unsubscribe = dropApi.subscribeUploads(applyUploads);
     if (unsubscribe !== undefined) return unsubscribe;
     const poll = window.setInterval(() => { void dropApi.uploads().then(applyUploads).catch(() => undefined); }, 1_500);
     return () => window.clearInterval(poll);
-  }, [state, expired]);
+  }, [state, expired, applyUploads]);
+  const continuationKey = jobs
+    .filter((job) => !["stored", "completed", "failed", "cancelled"].includes(job.state))
+    .map((job) => job.id)
+    .sort()
+    .join("|");
+  useEffect(() => {
+    if (state !== "active" || !expired || continuationKey === "") return;
+    const ids = continuationKey.split("|");
+    let stopped = false;
+    const refresh = async () => {
+      const results = await Promise.all(ids.map((id) => dropApi.status(id).catch(() => undefined)));
+      if (stopped) return;
+      setJobs((current) => current.map((job) => {
+        const upload = results.find((candidate) => candidate?.id === job.id);
+        return upload === undefined ? job : {
+          ...job,
+          name: upload.filename ?? job.name,
+          progress: upload.expectedSize === 0 ? 1 : upload.receivedSize / upload.expectedSize,
+          state: upload.state,
+        };
+      }));
+    };
+    void refresh();
+    const poll = window.setInterval(() => { void refresh(); }, 1_500);
+    return () => { stopped = true; window.clearInterval(poll); };
+  }, [state, expired, continuationKey]);
 
   const redeem = async (event: SyntheticEvent<HTMLFormElement>) => {
     event.preventDefault(); if (!code || pending) return; setPending(true); setMessage("");
-    try { const value = await dropApi.redeem(code); rememberDropChannel(value.channelId); setCode(""); setSession(value); setState("active"); }
+    try { const value = await dropApi.redeem(code); rememberDropChannel(value.channelId); setCode(""); activateSession(value); }
     catch (error) { setCode(""); setMessage(error instanceof ApiError && error.status === 429 ? "Too many attempts. Wait before trying again." : "The Drop code was not accepted."); }
     finally { setPending(false); }
   };
@@ -757,7 +818,7 @@ function DropView({ health }: { readonly health: GatewayState }) {
         const result = await uploadDropFile(file, (progress) => setJobs((current) => current.map((job) => job.id === localId ? { ...job, progress } : job)));
         setJobs((current) => current.map((job) => job.id === localId ? { id: result.id, name: file.name, progress: 1, state: result.state } : job));
       } catch (error) {
-        if (error instanceof ApiError && error.status === 401) { setState("redeem"); setSession(undefined); }
+        if (error instanceof ApiError && error.status === 401) { setState("redeem"); setSession(undefined); setCountdownDeadline(undefined); }
         setJobs((current) => current.map((job) => job.id === localId ? { ...job, state: "failed" } : job));
         setMessage("An upload stopped before entering the verified buffer. No partial file is visible in Drop Point.");
       }
@@ -801,7 +862,7 @@ function DropView({ health }: { readonly health: GatewayState }) {
         <h1 id="drop-title" className="drop-public-title">saturn drop point</h1>
         <section className="drop-opened-panel" aria-labelledby="drop-title">
           <div className="drop-public-notice"><strong>Upload only Gateway</strong><p>This page cannot list Saturn contents. Files uploaded through this Drop code appear here on every connected device.</p></div>
-          <div className={`drop-session-status ${expired ? "drop-session-status--expired" : ""}`}><span>Drop code status:</span><strong>{formatDropCountdown(session?.expiresAt, now)}</strong></div>
+          <div className={`drop-session-status ${expired ? "drop-session-status--expired" : ""}`}><span>Drop code status:</span><strong>{formatDropCountdown(remainingMs)}</strong></div>
           <DropReachability state={health} />
           <div className={`drop-upload-stage ${jobs.length > 0 ? "drop-upload-stage--with-jobs" : ""}`}>
             <button className="drop-target" type="button" disabled={dropBlocked} onClick={() => input.current?.click()}>
@@ -1968,7 +2029,7 @@ function TransferTasksBody({ overview, controllingTaskId, onControl }: {
   readonly onControl: (task: OperatorOverview["transfers"]["tasks"][number], action: "pause" | "resume" | "cancel") => void;
 }) {
   const transfers = overview?.transfers;
-  const tasks = transfers?.tasks ?? [];
+  const tasks = transfers?.tasks.filter((task) => task.state !== "completed" && task.state !== "cancelled") ?? [];
   return <div className="transfer-panel">
     <div className="transfer-flow" aria-label="Aggregate transfer flow">
       <div><span>Upload flow</span><strong>{formatRate(transfers?.uploadBytesPerSecond)}</strong></div>

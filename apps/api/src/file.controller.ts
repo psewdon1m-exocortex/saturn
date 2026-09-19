@@ -59,7 +59,7 @@ function integerHeader(value: string | undefined, name: string): number {
   return parsed;
 }
 
-function parseRange(value: string | undefined, size: number): { readonly offset: number; readonly length?: number; readonly partial: boolean } {
+export function parseRange(value: string | undefined, size: number): { readonly offset: number; readonly length?: number; readonly partial: boolean } {
   if (value === undefined) return { offset: 0, partial: false };
   const match = /^bytes=(\d*)-(\d*)$/.exec(value);
   if (match === null || (match[1] === "" && match[2] === "") || size === 0) throw new Error("Range is invalid");

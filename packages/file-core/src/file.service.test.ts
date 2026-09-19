@@ -663,6 +663,7 @@ describe("FileService upload state machine", () => {
       await service.appendUpload(upload.id, 0, 5, Readable.from(payload.subarray(0, 5)));
       await expect(service.appendUpload(upload.id, 4, 1, Readable.from("x"))).rejects.toThrow(/offset mismatch/);
       await service.appendUpload(upload.id, 5, payload.length - 5, Readable.from(payload.subarray(5)));
+      await repository.setUploadState(upload.id, "verifying");
       const completed = await service.completeUpload(upload.id);
       expect(completed.resource.sha256).toBe(sha256);
       expect(completed.resource.storagePath).toBe("sync/Documents/note.txt");

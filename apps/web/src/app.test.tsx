@@ -220,7 +220,7 @@ describe("owner Saturn UI", () => {
     await waitFor(() => expect(within(controls).getByRole("button", { name: "Cancel" })).toHaveProperty("disabled", false));
     fireEvent.click(within(controls).getByRole("button", { name: "Cancel" }));
     await waitFor(() => expect(actions).toEqual(["pause", "resume", "cancel"]));
-    await waitFor(() => expect(screen.getByText("Cancelled")).toBeTruthy());
+    await waitFor(() => expect(screen.queryByLabelText("Controls for archive.bin")).toBeNull());
   });
 
   it("reattaches the original file and resumes a paused upload after refresh", async () => {
@@ -646,6 +646,7 @@ describe("owner Saturn UI", () => {
     const folderId = "01900000-0000-7000-8000-000000000090";
     const pdf = { id: "01900000-0000-7000-8000-000000000093", parentId: folderId, type: "file", name: "manual.pdf", storagePath: "projects/manual.pdf", sizeBytes: 4096, mimeType: "application/pdf", status: "active", createdAt: now, updatedAt: now } as const;
     const markdown = { id: "01900000-0000-7000-8000-000000000094", parentId: folderId, type: "file", name: "notes.md", storagePath: "projects/notes.md", sizeBytes: 2048, mimeType: "text/markdown", status: "active", createdAt: now, updatedAt: now } as const;
+    const video = { id: "01900000-0000-7000-8000-000000000095", parentId: folderId, type: "file", name: "clip.mp4", storagePath: "projects/clip.mp4", sizeBytes: 8192, mimeType: "video/mp4", status: "active", createdAt: now, updatedAt: now } as const;
     const getPage = vi.fn(async () => ({
       getViewport: ({ scale }: { readonly scale: number }) => ({ width: 600 * scale, height: 800 * scale }),
       render: () => ({ promise: Promise.resolve(), cancel: vi.fn() }),
@@ -665,7 +666,7 @@ describe("owner Saturn UI", () => {
         { id: rootId, type: "folder", name: "root", storagePath: "", sizeBytes: 6144, status: "active", createdAt: now, updatedAt: now },
         { id: folderId, parentId: rootId, type: "folder", name: "projects", storagePath: "projects", sizeBytes: 6144, status: "active", createdAt: now, updatedAt: now },
       ]);
-      if (url.includes(`/folders/${folderId}/children`)) return json([pdf, markdown]);
+      if (url.includes(`/folders/${folderId}/children`)) return json([pdf, markdown, video]);
       if (url.endsWith(`/files/${markdown.id}/preview`)) return new Response(`# First heading\n\n${"A long paragraph. ".repeat(200)}\n\n## Last heading`, { headers: { "content-type": "text/markdown" } });
       if (url.includes("/shares?") || url.includes("/archives/jobs?")) return json([]);
       return json({});
@@ -689,6 +690,19 @@ describe("owner Saturn UI", () => {
     expect(within(preview).getByRole("heading", { name: "First heading" })).toBeTruthy();
     expect(within(preview).getByRole("heading", { name: "Last heading" })).toBeTruthy();
     expect(preview.querySelector(".quick-preview__content--markdown > article")).toBeTruthy();
+    fireEvent.keyDown(window, { code: "Space", key: " " });
+
+    fireEvent.click(screen.getByRole("button", { name: "clip.mp4" }));
+    fireEvent.keyDown(window, { code: "Space", key: " " });
+    const videoPreview = await screen.findByRole("dialog", { name: "Preview clip.mp4" });
+    const player = videoPreview.querySelector("video");
+    expect(player).toHaveProperty("autoplay", true);
+    expect(player).toHaveProperty("muted", true);
+    expect(player).toHaveProperty("playsInline", true);
+    expect(player?.getAttribute("preload")).toBe("metadata");
+    if (player === null) throw new Error("Video player is missing");
+    fireEvent.error(player);
+    expect((await within(videoPreview).findByRole("alert")).textContent).toContain("codec is not supported");
   });
 
   it("renders the Shared template with access status, sorts its table columns, and expands policy details", async () => {
@@ -1216,6 +1230,50 @@ describe("public Drop UI", () => {
     ]));
     expect(await screen.findByText("from-other-device.bin")).toBeTruthy();
     expect(screen.getByText("from-other-device.bin").closest(".drop-job")?.querySelector("progress")).toHaveProperty("value", 0.4);
+  });
+
+  it("uses the server countdown and continues a known upload status after the Drop window closes", async () => {
+    window.history.replaceState({}, "", "/drop");
+    const expiresAt = new Date(Date.now() + 30 * 60_000).toISOString();
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = requestUrl(input);
+      if (url === "/api/v1/public/reachability") return json({ status: "ready" });
+      if (url.endsWith("/drop/session")) return json({
+        state: "upload_only",
+        channelId: "channel-expired",
+        expiresAt,
+        serverNow: new Date().toISOString(),
+        remainingMs: 0,
+        maxFiles: 20,
+        maxBytes: 1024,
+      });
+      if (url.endsWith("/drop/uploads")) return json([{
+        id: "known-upload",
+        filename: "large-video.mp4",
+        state: "verifying",
+        expectedSize: 400,
+        receivedSize: 400,
+        expiresAt,
+        completed: false,
+      }]);
+      if (url.endsWith("/drop/uploads/known-upload/status")) return json({
+        id: "known-upload",
+        filename: "large-video.mp4",
+        state: "stored",
+        expectedSize: 400,
+        receivedSize: 400,
+        expiresAt,
+        completed: true,
+      });
+      return json({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "saturn drop point" })).toBeTruthy();
+    expect(screen.getByText("Drop code status:").parentElement?.textContent).toContain("00:00");
+    expect(await screen.findByText("stored", { selector: ".drop-job strong" })).toBeTruthy();
+    expect(fetchMock.mock.calls.some((call) => requestUrl(call[0]).endsWith("/drop/uploads/known-upload/status"))).toBe(true);
   });
 
   it("does not adopt another Drop channel from a cookie shared by a different tab", async () => {

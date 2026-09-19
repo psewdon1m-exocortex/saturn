@@ -51,6 +51,8 @@ export interface DropSessionInfo {
   readonly state: "upload_only";
   readonly channelId: string;
   readonly expiresAt: string;
+  readonly serverNow?: string;
+  readonly remainingMs?: number;
   readonly maxFiles: number;
   readonly maxBytes: number;
   readonly maxFileBytes?: number;

@@ -458,9 +458,12 @@ export class FileService {
       if (upload.status === "active" && upload.resourceId !== undefined) {
         return { upload, resource: await this.getResource(upload.resourceId) };
       }
-      if (!["created", "uploading", "failed_retryable"].includes(upload.status)) throw new Error("Upload cannot be completed in its current state");
+      // A worker can stop after persisting `verifying` but before it commits the
+      // resource. Re-running verification is idempotent and lets the Drop drain
+      // recover that upload instead of leaving it permanently stuck.
+      if (!["created", "uploading", "verifying", "failed_retryable"].includes(upload.status)) throw new Error("Upload cannot be completed in its current state");
       if (upload.receivedSize !== upload.expectedSize) throw new Error("Upload is incomplete");
-      await this.#repository.setUploadState(id, "verifying");
+      if (upload.status !== "verifying") await this.#repository.setUploadState(id, "verifying");
       if (upload.expectedSize === 0 && !(await this.#storage.exists(upload.tempPath))) {
         await this.#storage.write(upload.tempPath, Readable.from(Buffer.alloc(0)), {
           offset: 0,

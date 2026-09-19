@@ -19,6 +19,7 @@ export interface UploadTaskSample {
   readonly expectedBytes: number;
   readonly receivedBytes: number;
   readonly status: "created" | "uploading" | "verifying" | "committing" | "failed_retryable";
+  readonly controllable?: boolean;
   readonly createdAt: Date;
   readonly updatedAt: Date;
 }
@@ -228,7 +229,7 @@ export class TransferMonitorService {
             : row.status === "failed_retryable"
               ? "waiting_retry"
               : row.status;
-      const mutable = ["created", "uploading", "failed_retryable"].includes(row.status);
+      const mutable = row.controllable !== false && ["created", "uploading", "failed_retryable"].includes(row.status);
       return {
         id: row.id,
         direction: "upload",

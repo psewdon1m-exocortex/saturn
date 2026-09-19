@@ -39,6 +39,23 @@ describe("TransferMonitorService", () => {
     expect(second.tasks.find((task) => task.id === "retry")).toMatchObject({ state: "waiting_retry", queuePosition: 2 });
   });
 
+  it("keeps externally managed Drop pipeline rows read-only", () => {
+    const monitor = new TransferMonitorService();
+    const now = new Date("2026-09-19T12:00:00.000Z");
+    const snapshot = monitor.snapshot([{
+      id: "drop:upload",
+      filename: "large-video.mp4",
+      expectedBytes: 400,
+      receivedBytes: 400,
+      status: "verifying",
+      controllable: false,
+      createdAt: now,
+      updatedAt: now,
+    }], now.getTime());
+
+    expect(snapshot.tasks[0]).toMatchObject({ state: "verifying", canPause: false, canResume: false, canCancel: false });
+  });
+
   it("pauses, resumes and cancels a persisted upload at request boundaries", async () => {
     const monitor = new TransferMonitorService();
     const now = new Date("2026-09-04T10:00:00.000Z");

@@ -230,7 +230,7 @@ export class PostgresDropRepository implements DropRepository {
         JOIN drop_uploads u ON u.channel_id = s.channel_id
         WHERE s.token_hash = ${tokenHash} AND s.user_agent_hash = ${userAgentHash}
           AND s.state IN ('active', 'expired') AND u.id = ${uploadId}
-          AND u.state = 'uploading' AND u.continuation_until > ${now}
+          AND u.continuation_until > ${now}
         LIMIT 1
       `;
       return rows[0] === undefined ? undefined : session(rows[0]);

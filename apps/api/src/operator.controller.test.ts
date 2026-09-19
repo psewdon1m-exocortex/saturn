@@ -19,6 +19,7 @@ describe("OperatorController overview", () => {
     const withSql = vi.fn()
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([])
       .mockResolvedValueOnce([{ used_bytes: "4096", file_count: "2", directory_count: "6" }]);
     const controller = new OperatorController(
       { withSql } as unknown as Database,
@@ -50,6 +51,7 @@ describe("OperatorController overview", () => {
     const withSql = vi.fn()
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([])
       .mockResolvedValueOnce([{ used_bytes: "20552089", file_count: "7", directory_count: "6" }]);
     const statFs = vi.fn().mockResolvedValue({ totalBytes: 1_000_081_453_056, availableBytes: 104_079_671_296 });
     const controller = new OperatorController(
@@ -76,6 +78,46 @@ describe("OperatorController overview", () => {
     expect(result.storageReachability).toEqual({ state: "unavailable", reason: "storage_unavailable" });
     if (result.storage.capacity.state !== "unavailable") throw new Error("Local DEV capacity was unexpectedly exposed");
     expect(result.storage.capacity.reason).toContain("Local DEV SFTP");
+  });
+
+  it("includes the public Drop buffer pipeline without exposing controls", async () => {
+    const now = new Date("2026-09-19T12:00:00.000Z");
+    const withSql = vi.fn()
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([{
+        id: "01900000-0000-7000-8000-000000000001",
+        filename: "large-video.mp4",
+        expected_size: String(420 * 1024 * 1024),
+        received_size: String(420 * 1024 * 1024),
+        state: "verifying",
+        created_at: now,
+        updated_at: now,
+      }])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([{ used_bytes: "0", file_count: "0", directory_count: "6" }]);
+    const controller = new OperatorController(
+      { withSql } as unknown as Database,
+      { environment: "development" } as SaturnConfig,
+      { write: vi.fn() } as unknown as AuditService,
+      new TransferMonitorService(),
+      {
+        current: vi.fn().mockReturnValue({ config: { host: "storage.example" } }),
+        statFs: vi.fn().mockResolvedValue({ totalBytes: 16_384, availableBytes: 8_192 }),
+      } as unknown as RuntimeStorageManager,
+      { check: vi.fn().mockResolvedValue({ state: "pass", latencyMs: 4 }) },
+    );
+
+    const result = await controller.overview();
+    expect(result.transfers).toMatchObject({ activeCount: 1, queuedCount: 0 });
+    expect(result.transfers.tasks[0]).toMatchObject({
+      id: "drop:01900000-0000-7000-8000-000000000001",
+      filename: "large-video.mp4",
+      state: "verifying",
+      percent: 100,
+      canPause: false,
+      canResume: false,
+      canCancel: false,
+    });
   });
 
   it("reports Kernel ready through the authenticated Register contract", async () => {

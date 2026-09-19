@@ -1,7 +1,7 @@
 import { Readable } from "node:stream";
 import { Body, Controller, Delete, Get, Headers, HttpCode, HttpException, HttpStatus, Inject, type MessageEvent, Param, Patch, Post, Req, Res, Sse, UnauthorizedException, UseFilters, UseGuards } from "@nestjs/common";
 import type { SaturnConfig } from "@saturn/config";
-import { DropServiceError, type DropService } from "@saturn/drop";
+import { DropServiceError, type DropService, type DropSession } from "@saturn/drop";
 import { fastifyCookie } from "@fastify/cookie";
 import type { FastifyReply, FastifyRequest } from "fastify";
 import { from, interval, type Observable, timer } from "rxjs";
@@ -57,6 +57,25 @@ export class DropController {
     ]);
   }
 
+  async #sessionPayload(session: DropSession, includeCapacity = false) {
+    const serverNow = new Date();
+    return {
+      state: "upload_only" as const,
+      channelId: session.channelId,
+      expiresAt: session.expiresAt,
+      serverNow,
+      remainingMs: Math.max(0, session.expiresAt.getTime() - serverNow.getTime()),
+      maxFiles: session.maxFiles,
+      maxBytes: session.maxBytes,
+      maxFileBytes: (await this.drop.uploadLimits()).maximumFileBytes,
+      ...(includeCapacity ? {
+        reservedFiles: session.reservedFiles,
+        reservedBytes: session.reservedBytes,
+        buffer: await this.drop.bufferCapacity(),
+      } : {}),
+    };
+  }
+
   @Post("codes")
   @UseGuards(OwnerTokenGuard)
   issueCode() {
@@ -70,17 +89,7 @@ export class DropController {
     const challenge = await this.drop.issueDropCode(now);
     const created = await this.drop.redeem(challenge.code, `owner:${request.ip}`, request.headers["user-agent"] ?? "", now);
     this.#setCookies(reply, created);
-    return {
-      state: "upload_only",
-      channelId: created.session.channelId,
-      expiresAt: created.session.expiresAt,
-      maxFiles: created.session.maxFiles,
-      maxBytes: created.session.maxBytes,
-      maxFileBytes: (await this.drop.uploadLimits()).maximumFileBytes,
-      reservedFiles: created.session.reservedFiles,
-      reservedBytes: created.session.reservedBytes,
-      buffer: await this.drop.bufferCapacity(),
-    };
+    return this.#sessionPayload(created.session, true);
   }
 
   @Get("buffer")
@@ -106,7 +115,7 @@ export class DropController {
     try {
       const created = await this.drop.redeem(redeemSchema.parse(body).code, request.ip, request.headers["user-agent"] ?? "");
       this.#setCookies(reply, created);
-      return { state: "upload_only", channelId: created.session.channelId, expiresAt: created.session.expiresAt, maxFiles: created.session.maxFiles, maxBytes: created.session.maxBytes, maxFileBytes: (await this.drop.uploadLimits()).maximumFileBytes };
+      return await this.#sessionPayload(created.session);
     } catch (error) {
       if (error instanceof DropServiceError && error.code === "rate_limited") {
         throw new HttpException({ code: "drop_unavailable" }, HttpStatus.TOO_MANY_REQUESTS);
@@ -147,17 +156,7 @@ export class DropController {
   async session(@Req() request: AuthenticatedDropRequest) {
     const session = request[DROP_SESSION];
     if (session === undefined) throw new UnauthorizedException();
-    return {
-      state: "upload_only",
-      channelId: session.channelId,
-      expiresAt: session.expiresAt,
-      maxFiles: session.maxFiles,
-      maxBytes: session.maxBytes,
-      maxFileBytes: (await this.drop.uploadLimits()).maximumFileBytes,
-      reservedFiles: session.reservedFiles,
-      reservedBytes: session.reservedBytes,
-      buffer: await this.drop.bufferCapacity(),
-    };
+    return this.#sessionPayload(session, true);
   }
 
   @Get("uploads")
