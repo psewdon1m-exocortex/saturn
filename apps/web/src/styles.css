@@ -7,7 +7,7 @@
   --black: #000000;
   --surface-hover: #111111;
   --white: #ffffff;
-  --white-80: rgba(255, 255, 255, .8);
+  --white-80: #cccccc;
   --accent: #00a8ff;
   --success: #62ff8c;
   --danger: #f83d3d;
@@ -747,7 +747,7 @@ button.share-status--active:active { transform: scale(.985); }
   column-gap: 0;
   row-gap: 30px;
 }
-.card-grid--settings { grid-template-columns: minmax(0, 1fr); gap: 27px; }
+.card-grid--settings { grid-template-columns: minmax(0, 1fr); gap: 30px; }
 .synchronization { padding-bottom: 40px; }
 .synchronization .page-title { font-size: clamp(46px, 6vw, 80px); line-height: .95; text-transform: lowercase; }
 .synchronization-intro { margin: 0 30px; padding: 18px 20px; border: 1px solid var(--line-inner); display: grid; grid-template-columns: minmax(0, 1fr) minmax(320px, .7fr); gap: 24px; align-items: end; }
@@ -784,15 +784,15 @@ button.share-status--active:active { transform: scale(.985); }
 .universal-card--titled .universal-card__head { border-bottom: 1px solid var(--line-inner); }
 .universal-card__ordinal { color: var(--white-80); font-size: 13px; font-variant-numeric: tabular-nums; }
 .universal-card__head h2 { margin: 0; color: var(--accent); font-size: 24px; line-height: 1; overflow: hidden; text-overflow: ellipsis; }
-.card-handle { position: relative; width: 32px; height: 32px; padding: 0; border: 0; background: transparent; color: var(--white); cursor: grab; }
+.card-handle { position: relative; width: 40px; height: 40px; padding: 0; border: 0; background: transparent; color: #d9d9d9; cursor: grab; }
 .card-handle:active { cursor: grabbing; }
 .card-handle span { position: absolute; inset: 0; display: block; }
-.card-handle i { position: absolute; width: 4px; height: 4px; border-radius: 50%; background: currentColor; }
-.card-handle i:nth-child(1) { top: 6px; right: 16px; }
-.card-handle i:nth-child(2) { top: 6px; right: 8px; }
-.card-handle i:nth-child(3) { top: 14px; right: 16px; }
-.card-handle i:nth-child(4) { top: 14px; right: 8px; }
-.card-handle:hover { color: var(--accent); background: var(--surface-hover); }
+.card-handle i { position: absolute; width: 3px; height: 3px; border-radius: 50%; background: currentColor; }
+.card-handle i:nth-child(1) { top: 7px; right: 14px; }
+.card-handle i:nth-child(2) { top: 7px; right: 8px; }
+.card-handle i:nth-child(3) { top: 13px; right: 14px; }
+.card-handle i:nth-child(4) { top: 13px; right: 8px; }
+.card-handle:hover, .card-handle:focus-visible { color: var(--white); background: transparent; }
 .universal-card__body { min-height: 110px; padding: 24px 38px 30px; }
 .universal-card--metric { min-height: 166px; }
 .universal-card--metric .universal-card__head { position: absolute; inset: 0; z-index: 1; min-height: 0; padding: 0; display: block; pointer-events: none; }
@@ -841,11 +841,11 @@ button.share-status--active:active { transform: scale(.985); }
 .settings .page-title { font-size: 80px; line-height: .95; letter-spacing: 0; text-transform: lowercase; }
 .settings-card--appearance { min-height: 401px; }
 .settings-card--security { min-height: 418px; }
-.settings-card--backup { min-height: 782px; }
-.settings-card--gryphon { min-height: 483px; }
-.settings-card--updates { min-height: 566px; }
-.settings-card--logs { min-height: 399px; }
-.settings-card .universal-card__body { padding: 24px 38px 30px; }
+.settings-card--backup { min-height: 0; }
+.settings-card--gryphon { min-height: 0; }
+.settings-card--updates { min-height: 0; }
+.settings-card--logs { min-height: 0; }
+.settings-card .universal-card__body { min-height: 0; padding: 24px 38px 30px; }
 .settings-groups { display: grid; gap: 40px; }
 .settings-card--appearance .settings-groups { gap: 55px; }
 .settings-group { border: 0; padding: 0; margin: 0; min-width: 0; }
@@ -887,7 +887,7 @@ button.share-status--active:active { transform: scale(.985); }
 .trash-retention-form { margin-top: 18px; grid-template-columns: minmax(220px, 326px) auto; }
 .kernel-url-form { margin-top: 10px; display: grid; grid-template-columns: minmax(220px, 326px) minmax(260px, 1fr); align-items: center; gap: 20px; }
 .kernel-url-form > input { width: 100%; height: 40px; }
-.status-row { min-height: 40px; border: 1px solid var(--line-inner); padding: 8px 14px; display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.status-row { min-height: 40px; border: 1px solid var(--line-inner); padding: 8px 16px; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .semantic-status { display: inline-flex; align-items: center; justify-content: flex-end; gap: 14px; text-align: right; overflow-wrap: anywhere; }
 .settings-status-stack { margin: 34px 0 36px; display: grid; gap: 13px; }
 .settings-card--updates .settings-status-stack { margin: 24px 0 35px; gap: 12px; }
@@ -1270,15 +1270,15 @@ button.share-browser__name:active:not(:disabled) { transform: scale(.985); trans
   .workspace__head { min-height: 112px; padding: 56px 18px 14px; }
   .page-title { font-size: clamp(42px, 13vw, 62px); }
   .settings .workspace__head { height: 112px; min-height: 112px; padding: 48px 18px 14px; }
-  .settings .page-title { font-size: clamp(42px, 13vw, 62px); }
+  .settings .page-title { font-size: clamp(48px, 13vw, 62px); }
   .breadcrumbs, .collection-toolbar, .selection-bar { padding-left: 18px; padding-right: 18px; }
   .collection-toolbar { grid-template-columns: minmax(140px, 1fr) auto; }
   .collection-actions { grid-column: 1 / -1; justify-content: flex-end; }
   .file-row { min-width: 560px; grid-template-columns: 34px minmax(210px, 1fr) 130px 90px; padding-left: 18px; padding-right: 18px; }
   .file-row > :last-child { display: none; }
   .card-grid, .documentation-content { padding: 18px; gap: 14px; }
-  .card-grid--settings { gap: 18px; }
-  .settings-card .universal-card__body { padding: 20px 18px 24px; }
+  .card-grid--settings { gap: 20px; padding: 20px; }
+  .settings-card .universal-card__body { padding: 20px 20px 24px; }
   .settings-card--appearance, .settings-card--security, .settings-card--backup, .settings-card--gryphon, .settings-card--updates, .settings-card--logs { min-height: 0; }
   .settings-groups, .settings-card--appearance .settings-groups { gap: 34px; }
   .card-grid--dashboard { row-gap: 14px; }
@@ -1374,7 +1374,8 @@ button.share-browser__name:active:not(:disabled) { transform: scale(.985); trans
   .trash-owner-row__summary { padding-left: 10px; padding-right: 10px; }
   .trash-owner-row__details dl { grid-template-columns: 1fr; }
   .card-grid, .documentation-content { padding: 12px; }
-  .settings-card .universal-card__body { padding-left: 12px; padding-right: 12px; }
+  .card-grid--settings { padding-left: 16px; padding-right: 16px; }
+  .settings-card .universal-card__body { padding-left: 16px; padding-right: 16px; }
   .dashboard-card--tasks .universal-card__body { padding-left: 12px; padding-right: 12px; }
   .color-control { grid-template-columns: 40px minmax(0, 1fr); gap: 10px; }
   .color-control .button { grid-column: 1 / -1; }
@@ -1461,17 +1462,29 @@ button.share-browser__name:active:not(:disabled) { transform: scale(.985); trans
 }
 
 
-/* Operational Settings cards: shared reference geometry (Part 01, section 10.9). */
-:is(.setting-card,.universal-card,[data-card]):has(:is(.backup-content,.updates-content,.logs-content,.exo-backup-policy,.exo-service-logs,.exo-wyvern-connection,.bot-connection-groups)) {
-  border-radius: 0; border-color: #fff; min-height: 0; height: auto; background: #000; color: #fff; font: 14px/22px Consolas,"Liberation Mono",monospace;
-}
-:is(.setting-card,.universal-card,[data-card]):has(:is(.backup-content,.updates-content,.logs-content,.exo-backup-policy,.exo-service-logs,.exo-wyvern-connection,.bot-connection-groups)) h2 {
-  font: 700 24px/29px Consolas,"Liberation Mono",monospace; color: var(--accent,#00a8ff);
-}
-:is(.backup-content,.updates-content,.logs-content,.bot-connection-groups,[data-card="backup"],[data-card="updates"],[data-card="wyvern"]) h3 {
-  font: 700 20px/24px Consolas,"Liberation Mono",monospace;
-}
-:is(.backup-content,.updates-content,.bot-connection-groups) :is(.settings-group,.setting-group) + :is(.settings-group,.setting-group) { margin-top: 0; border-top: 0; }
 
-:is(.backup-content,.bot-connection-groups) > .settings-group { padding-top: 0; }
-:is(.backup-content,.bot-connection-groups) { gap: 40px; }
+/* Part 01 §10.5: one foundation for every Settings card. */
+:root :is(.settings-section,.setting-card,.settings-card,.settings-stack .universal-card,.grid:has(> [data-card="appearance"]) > [data-card]) { border-radius:0; border-color:#fff; background:#000; color:#fff; font:14px/22px Consolas,"Liberation Mono",monospace; transform:none; min-width:0; }
+:root :is(.settings-section,.setting-card,.settings-card,.settings-stack .universal-card,.grid:has(> [data-card="appearance"]) > [data-card]):is(:hover,:focus-within) { transform:none; background:#000; }
+:root :is(.settings-section,.setting-card,.settings-card,.settings-stack .universal-card,.grid:has(> [data-card="appearance"]) > [data-card]) > :is(header,.card-header) { display:grid; grid-template-columns:25px minmax(0,1fr) 44px; gap:0; align-items:center; padding:0 8px 0 13px; height:auto; min-height:55px; border-bottom:1px solid #ccc; }
+:root :is(.settings-section,.setting-card,.settings-card,.settings-stack .universal-card,.grid:has(> [data-card="appearance"]) > [data-card]) > :is(header,.card-header) > span:first-child { font:400 14px/22px Consolas,"Liberation Mono",monospace; color:#ccc; }
+:root :is(.settings-section,.setting-card,.settings-card,.settings-stack .universal-card,.grid:has(> [data-card="appearance"]) > [data-card]) > :is(header,.card-header) h2 { min-width:0; white-space:normal; overflow:visible; overflow-wrap:anywhere; text-overflow:clip; }
+:root :is(.settings-section,.setting-card,.settings-card,.settings-stack .universal-card,.grid:has(> [data-card="appearance"]) > [data-card]) h2 { font:700 24px/29px Consolas,"Liberation Mono",monospace; color:var(--accent,#00a8ff); margin-block:0; }
+:root :is(.settings-section,.setting-card,.settings-card,.settings-stack .universal-card,.grid:has(> [data-card="appearance"]) > [data-card]) h3 { font:700 20px/24px Consolas,"Liberation Mono",monospace; }
+:root :is(.settings-section,.setting-card,.settings-card,.settings-stack .universal-card,.grid:has(> [data-card="appearance"]) > [data-card]) :is(button,input,select) { font-family:Consolas,"Liberation Mono",monospace; font-size:14px; line-height:22px; }
+:root :is(.settings-section,.setting-card,.settings-card,.settings-stack .universal-card,.grid:has(> [data-card="appearance"]) > [data-card]) button:not(.drag,.drag-handle,.drag-mark,.drag-dots,.card-handle,.card-handle-button) { border-color:#ccc; color:#ccc; font-weight:400; padding:8px 18px; }
+:root :is(.settings-section,.setting-card,.settings-card,.settings-stack .universal-card,.grid:has(> [data-card="appearance"]) > [data-card]) button:not(.drag,.drag-handle,.drag-mark,.drag-dots,.card-handle,.card-handle-button):enabled:is(:hover,:focus-visible) { color:var(--accent,#00a8ff); border-color:var(--accent,#00a8ff); background:#111; transform:scale(var(--exo-scale-x,1),var(--exo-scale-y,1)); }
+:root :is(.settings-section,.setting-card,.settings-card,.settings-stack .universal-card,.grid:has(> [data-card="appearance"]) > [data-card]) :is(button,input,select,a):focus-visible { outline:1px solid var(--accent,#00a8ff); outline-offset:3px; }
+:root :is(.settings-section,.setting-card,.settings-card,.settings-stack .universal-card,.grid:has(> [data-card="appearance"]) > [data-card]) button:enabled:active { transform:scale(.985); transition-duration:60ms; }
+:root :is(.settings-section,.setting-card,.settings-card,.settings-stack .universal-card,.grid:has(> [data-card="appearance"]) > [data-card]) :is(.drag,.drag-handle,.drag-mark,.drag-dots,.card-handle,.card-handle-button) { min-width:40px; min-height:40px; }
+:root :is(.settings-section,.setting-card,.settings-card,.settings-stack .universal-card,.grid:has(> [data-card="appearance"]) > [data-card]) :is(.settings-group,.setting-group,.group) > h3 { margin:0 0 8px; }
+:root :is(.settings-section,.setting-card,.settings-card,.settings-stack .universal-card,.grid:has(> [data-card="appearance"]) > [data-card]) :is(.settings-group,.setting-group,.group) > p { line-height:22px; }
+:root :is(.settings-section,.setting-card,.settings-card,.settings-stack .universal-card,.grid:has(> [data-card="appearance"]) > [data-card]) :is(.backup-content,.updates-content,.bot-connection-groups) { display:grid; gap:44px; }
+:root :is(.settings-section,.setting-card,.settings-card,.settings-stack .universal-card,.grid:has(> [data-card="appearance"]) > [data-card]) :is(.backup-content,.updates-content,.bot-connection-groups) > :is(.settings-group,.setting-group) { margin-top:0; padding-top:0; border-top:0; }
+@media(pointer:coarse) { :root :is(.settings-section,.setting-card,.settings-card,.settings-stack .universal-card,.grid:has(> [data-card="appearance"]) > [data-card]) :is(button,.drag,.drag-handle,.drag-mark,.drag-dots,.card-handle,.card-handle-button) { min-height:44px; min-width:44px; } }
+@media(prefers-reduced-motion:reduce) { :root :is(.settings-section,.setting-card,.settings-card,.settings-stack .universal-card,.grid:has(> [data-card="appearance"]) > [data-card]) button:enabled:is(:hover,:focus-visible,:active) { transform:none; } }
+
+/* Shared responsive display role, including narrow Settings views. */
+:root :is(.page-header h1,.page-title h1,.settings .page-title) { font-size:clamp(48px,4.2vw,80px); line-height:.95; letter-spacing:0; }
+
+@media(min-width:721px) { .settings-card .universal-card__body { padding-top:28px; padding-left:38px; padding-right:32px; } }

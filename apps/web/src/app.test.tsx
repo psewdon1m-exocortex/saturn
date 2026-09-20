@@ -479,7 +479,7 @@ describe("owner Saturn UI", () => {
 
     const navigation = await screen.findByRole("navigation", { name: "Primary" });
     await waitFor(() => expect(navigation.querySelector("button")?.getAttribute("aria-label")).toBe("Drop Point"));
-    expect(screen.getByRole("button", { name: "Drop Point" }).textContent).toContain("04");
+    expect(screen.getByRole("button", { name: "Drop Point" }).textContent).toContain("01");
     fireEvent.keyDown(screen.getByRole("button", { name: "Drop Point" }), { key: "ArrowDown", altKey: true });
 
     await waitFor(() => {
@@ -488,6 +488,7 @@ describe("owner Saturn UI", () => {
       expect(jsonRequestBody(request?.[1]).navigationOrder).toEqual(["dashboard", "inbox", "files", "shared", "synchronization", "trash", "settings"]);
     });
     expect(navigation.querySelector("button")?.getAttribute("aria-label")).toBe("Dashboard");
+    expect(screen.getByRole("button", { name: "Drop Point" }).textContent).toContain("02");
   });
 
   it("persists all dashboard card positions and recomputes their ordinals", async () => {

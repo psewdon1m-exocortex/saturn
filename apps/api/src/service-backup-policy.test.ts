@@ -7,10 +7,10 @@ import { loadEnvironment } from "@saturn/config";
 import type { AuditService } from "@saturn/audit";
 import type { RuntimeStorageManager } from "@saturn/storage";
 import { RecoveryWorkflowService } from "./recovery-workflow.service.js";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { Database, migrate } from "@saturn/database";
 import { policyMutationSchema, ServiceBackupPolicy } from "./service-backup-policy.js";
-import { NeptuneFleetOwnerController } from "./neptune-fleet.controller.js";
+import { NeptuneAgentController, NeptuneFleetOwnerController } from "./neptune-fleet.controller.js";
 import type { NeptuneFleetService } from "./neptune-fleet.service.js";
 
 it("rejects scope injection and central schedule/run authoring", async () => {
@@ -19,6 +19,30 @@ it("rejects scope injection and central schedule/run authoring", async () => {
   const controller = new NeptuneFleetOwnerController({} as NeptuneFleetService);
   expect(() => controller.schedule()).toThrow("owning service");
   await expect(controller.command("irrelevant", { kind: "archive.run" })).rejects.toThrow("owning service");
+});
+
+it("binds every agent policy operation to the authenticated producer", async () => {
+  const serviceId = randomUUID();
+  const requestId = randomUUID();
+  const policy = {
+    read: vi.fn().mockResolvedValue({ schema: "exocortex.backup.policy.v1", revision: 4 }),
+    mutate: vi.fn().mockResolvedValue({ revision: 5 }),
+    run: vi.fn().mockResolvedValue({ id: requestId, state: "pending" }),
+    jobs: vi.fn().mockResolvedValue([]),
+  };
+  const fleet = { authenticate: vi.fn().mockResolvedValue(serviceId), policy } as unknown as NeptuneFleetService;
+  const controller = new NeptuneAgentController(fleet);
+  const authorization = "Bearer producer-fixture";
+  await controller.policy(authorization);
+  await controller.changePolicy(authorization, { kind: "schedule", pipeline: "archive", enabled: true,
+    intervalHours: 24, expectedRevision: 4, requestId });
+  await controller.run(authorization, { pipeline: "archive", requestId });
+  await controller.runs(authorization);
+  expect(fleet.authenticate).toHaveBeenCalledTimes(4);
+  expect(policy.read).toHaveBeenCalledWith(serviceId);
+  expect(policy.mutate).toHaveBeenCalledWith(serviceId, expect.objectContaining({ requestId }));
+  expect(policy.run).toHaveBeenCalledWith(serviceId, { pipeline: "archive", requestId });
+  expect(policy.jobs).toHaveBeenCalledWith(serviceId);
 });
 
 describe.skipIf(!process.env.POLICY_TEST_DATABASE_URL)("service-owned policy on PostgreSQL", () => {

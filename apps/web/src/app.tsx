@@ -63,14 +63,14 @@ type ContextMenuState = { readonly x: number; readonly y: number; readonly resou
 type ContextAction = "copy" | "cut" | "paste" | "download" | "folder" | "trash" | "rename" | "share" | "extract" | "compress";
 type FileKind = "folder" | "image" | "video" | "audio" | "pdf" | "markdown" | "document" | "archive" | "file";
 
-const NAV_ITEMS: Readonly<Record<PrimaryViewName, { readonly label: string; readonly ordinal: string }>> = {
-  dashboard: { label: "Dashboard", ordinal: "01" },
-  files: { label: "Storage", ordinal: "02" },
-  inbox: { label: "Drop Point", ordinal: "04" },
-  shared: { label: "Shared", ordinal: "05" },
-  synchronization: { label: "Synchronization", ordinal: "06" },
-  trash: { label: "Trash", ordinal: "07" },
-  settings: { label: "Settings", ordinal: "08" },
+const NAV_ITEMS: Readonly<Record<PrimaryViewName, { readonly label: string }>> = {
+  dashboard: { label: "Dashboard" },
+  files: { label: "Storage" },
+  inbox: { label: "Drop Point" },
+  shared: { label: "Shared" },
+  synchronization: { label: "Synchronization" },
+  trash: { label: "Trash" },
+  settings: { label: "Settings" },
 };
 const DEFAULT_NAVIGATION_ORDER: readonly PrimaryViewName[] = ["dashboard", "files", "inbox", "shared", "synchronization", "trash", "settings"];
 const DEFAULT_DASHBOARD_ORDER: readonly DashboardCardName[] = ["cpu", "ram", "disk", "uptime", "storage", "drop", "reachability", "tasks"];
@@ -3033,7 +3033,7 @@ function AuthenticatedApp({ health, onAnonymous }: { readonly health: GatewayHea
               onDragOver={(event: DragEvent<HTMLButtonElement>) => { if (dragging === undefined || dragging === id) return; event.preventDefault(); const box = event.currentTarget.getBoundingClientRect(); setDropTarget({ id, edge: event.clientY < box.top + box.height / 2 ? "before" : "after" }); }}
               onDrop={(event: DragEvent<HTMLButtonElement>) => { event.preventDefault(); if (dragging !== undefined && dropTarget !== undefined) reorderNavigation(dragging, dropTarget.id, dropTarget.edge); setDragging(undefined); setDropTarget(undefined); }}
               onDragEnd={() => { setDragging(undefined); setDropTarget(undefined); }}
-            ><span className="nav-item__label">{item.label}</span><span className="nav-item__ordinal" aria-hidden="true">{item.ordinal}</span></button>;
+            ><span className="nav-item__label">{item.label}</span><span className="nav-item__ordinal" aria-hidden="true">{String(preferences.navigationOrder.indexOf(id) + 1).padStart(2, "0")}</span></button>;
           })}
         </nav>
         <p className="sr-only" aria-live="polite">{navigationAnnouncement}</p>
