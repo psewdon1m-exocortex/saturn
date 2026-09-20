@@ -104,6 +104,9 @@ export class SftpConnectionPool {
         algorithms: { serverHostKey: ["ssh-ed25519", "rsa-sha2-512", "rsa-sha2-256", "ssh-rsa"] },
       });
     });
+    // SFTP request/response traffic otherwise pays delayed-ACK latency for
+    // small final packets, even on the same host.
+    client.setNoDelay(true);
     const sftp = await withTimeout<SFTPWrapper>("SFTP channel", this.#storage.operationTimeoutMs, (finish) => {
       client.sftp((error, channel) => finish(error ?? undefined, channel));
     });

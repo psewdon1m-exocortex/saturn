@@ -129,6 +129,18 @@ export class Database {
   async close(): Promise<void> {
     await this.#sql.end({ timeout: 5 });
   }
+
+  async reconcileInactiveFileLocks(): Promise<void> {
+    // API mutations, DAV requests and Worker jobs hold the shared maintenance
+    // barrier for their entire filesystem operation. Exclusive ownership proves
+    // no writer is still using a lease left behind by an interrupted process.
+    // All API/Worker components must run the same coordinated release.
+    await this.withExclusiveTransaction(async (sql) => {
+      await sql`DELETE FROM operation_locks`;
+      await sql`UPDATE upload_sessions SET status = 'failed_retryable', updated_at = now()
+        WHERE status = 'verifying'`;
+    });
+  }
 }
 
 export { migrate, rollback } from "./migrate.js";

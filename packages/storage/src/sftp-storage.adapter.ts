@@ -1,6 +1,6 @@
 import path from "node:path";
 import { once } from "node:events";
-import type { Readable } from "node:stream";
+import { Transform, type Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import type { Stats } from "ssh2";
 import type { SaturnConfig } from "@saturn/config";
@@ -104,6 +104,7 @@ export class SftpStorageAdapter implements StorageAdapter {
     const end = options.length === undefined ? undefined : offset + options.length - 1;
     const stream = lease.sftp.createReadStream(this.#remote(storagePath), {
       start: offset,
+      highWaterMark: 256 * 1024,
       ...(end === undefined ? {} : { end }),
     });
     let released = false;
@@ -125,7 +126,28 @@ export class SftpStorageAdapter implements StorageAdapter {
     // Pin the remote file handle before the caller releases its metadata lock.
     try { await once(stream, "open", { signal: AbortSignal.timeout(this.#storage.operationTimeoutMs) }); resetIdleTimeout(); }
     catch (error) { stream.destroy(); release(true); throw error; }
-    return stream;
+    // Opening a handle does not prove later reads can make progress. Bound an
+    // SFTP server that continues answering SSH keepalives but stalls file reads.
+    // A Transform preserves bytes before the consumer attaches; a data listener
+    // on the raw stream here would enter flowing mode and could lose that data.
+    let timer: NodeJS.Timeout | undefined;
+    const clear = (): void => { if (timer !== undefined) clearTimeout(timer); };
+    const reset = (): void => {
+      clear();
+      timer = setTimeout(() => stream.destroy(new Error("SFTP read idle timeout")), this.#storage.operationTimeoutMs);
+    };
+    const bounded = new Transform({
+      highWaterMark: 256 * 1024,
+      transform(chunk: Buffer, _encoding, callback) { reset(); callback(null, chunk); },
+    });
+    // A caller may not yet have attached its error handler when remote I/O fails.
+    // The error remains observable to pipeline/async iteration and is not success.
+    bounded.on("error", () => undefined);
+    stream.once("end", clear);
+    stream.once("close", clear);
+    reset();
+    void pipeline(stream, bounded).catch(() => undefined).finally(clear);
+    return bounded;
   }
 
   async write(storagePath: string, source: Readable, options: StorageWriteOptions): Promise<number> {
@@ -197,7 +219,7 @@ export class SftpStorageAdapter implements StorageAdapter {
 
   async copy(source: string, destination: string): Promise<void> {
     await this.#operation(async (lease) => {
-      const reader = lease.sftp.createReadStream(this.#remote(source));
+      const reader = lease.sftp.createReadStream(this.#remote(source), { highWaterMark: 256 * 1024 });
       const writer = lease.sftp.createWriteStream(this.#remote(destination), { flags: "wx", mode: 0o600 });
       let timer: NodeJS.Timeout | undefined;
       const reset = (): void => {

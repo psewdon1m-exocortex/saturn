@@ -116,6 +116,7 @@ const runtime = buildWorker(config, database, new AdapterStorageHealthProbe(stor
   archive: async () => archiveRunner.runNext(),
   close: async () => { await storage.close(); },
 });
+await database.reconcileInactiveFileLocks();
 await runtime.startHeartbeat();
 runtime.startBackgroundJobs();
 await runtime.app.listen({ host: config.worker.host, port: config.worker.port });

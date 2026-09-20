@@ -3,6 +3,7 @@ import { Inject, Injectable } from "@nestjs/common";
 import type { BackupIngestService } from "@saturn/backup-ingest";
 import type { Database } from "@saturn/database";
 import { BACKUP_INGEST_SERVICE, DATABASE } from "./tokens.js";
+import { ServiceBackupPolicy } from "./service-backup-policy.js";
 
 export type NeptuneCommandKind = "archive.run" | "mirror.run" | "agent.update";
 
@@ -38,6 +39,7 @@ interface AgentRow {
   readonly latest_error: string | null;
   readonly last_seen_at: Date | null;
   readonly updated_at: Date;
+  readonly policy_paused: boolean;
 }
 
 export interface CommandRow {
@@ -68,6 +70,7 @@ function publicAgent(row: AgentRow) {
     serviceId: row.service_id,
     desired: {
       revision: Number(row.desired_revision),
+      paused: row.policy_paused ?? false,
       archiveEnabled: row.archive_enabled,
       archiveIntervalHours: row.archive_interval_hours,
       mirrorEnabled: row.mirror_enabled,
@@ -96,6 +99,8 @@ export class NeptuneFleetService {
     @Inject(BACKUP_INGEST_SERVICE) private readonly backups: BackupIngestService,
   ) {}
 
+  get policy() { return new ServiceBackupPolicy(this.database); }
+
   async authenticate(authorization: string | undefined): Promise<string> {
     return (await this.backups.authenticate(authorization)).service.id;
   }
@@ -104,7 +109,7 @@ export class NeptuneFleetService {
     const rows = await this.database.withSql((sql) => sql<AgentRow[]>`
       SELECT service_id, desired_revision::text, archive_enabled, archive_interval_hours,
         mirror_enabled, mirror_interval_minutes, desired_version, client_instance_id,
-        project_id, agent_version, applied_revision::text, archive_status, mirror_status,
+        project_id, agent_version, applied_revision::text, policy_paused, archive_status, mirror_status,
         latest_error, last_seen_at, updated_at
       FROM neptune_agents
       ORDER BY last_seen_at DESC NULLS LAST, updated_at DESC
@@ -146,7 +151,7 @@ export class NeptuneFleetService {
         WHERE service_id = ${serviceId}
         RETURNING service_id, desired_revision::text, archive_enabled, archive_interval_hours,
           mirror_enabled, mirror_interval_minutes, desired_version, client_instance_id,
-          project_id, agent_version, applied_revision::text, archive_status, mirror_status,
+          project_id, agent_version, applied_revision::text, policy_paused, archive_status, mirror_status,
           latest_error, last_seen_at, updated_at
       `;
       const updated = rows[0];
@@ -241,7 +246,7 @@ export class NeptuneFleetService {
           updated_at = EXCLUDED.updated_at
         RETURNING service_id, desired_revision::text, archive_enabled, archive_interval_hours,
           mirror_enabled, mirror_interval_minutes, desired_version, client_instance_id,
-          project_id, agent_version, applied_revision::text, archive_status, mirror_status,
+          project_id, agent_version, applied_revision::text, policy_paused, archive_status, mirror_status,
           latest_error, last_seen_at, updated_at
       `;
       const row = rows[0];
@@ -257,7 +262,9 @@ export class NeptuneFleetService {
     });
     return {
       schema: "saturn.neptune.control.v1",
-      desired: publicAgent(result.row).desired,
+      desired: result.row.policy_paused
+        ? { ...publicAgent(result.row).desired, archiveEnabled: false, mirrorEnabled: false }
+        : publicAgent(result.row).desired,
       commands: result.commands.map((command) => ({ id: command.id, kind: command.kind, payload: command.payload, expiresAt: new Date(new Date(command.created_at).getTime() + 7 * 86_400_000).toISOString() })),
     };
   }
@@ -272,7 +279,7 @@ export class NeptuneFleetService {
       return sql<AgentRow[]>`
         SELECT service_id, desired_revision::text, archive_enabled, archive_interval_hours,
           mirror_enabled, mirror_interval_minutes, desired_version, client_instance_id,
-          project_id, agent_version, applied_revision::text, archive_status, mirror_status,
+          project_id, agent_version, applied_revision::text, policy_paused, archive_status, mirror_status,
           latest_error, last_seen_at, updated_at
         FROM neptune_agents WHERE service_id = ${serviceId}
       `;

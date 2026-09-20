@@ -99,8 +99,8 @@ export class BackupIngestService {
     return { serviceId: selected.id, token, slug: selected.slug, namespaceSlug: selected.namespaceSlug, deploymentId: selected.deploymentId, ...(selected.mirrorRoot === undefined ? {} : { mirrorRoot: selected.mirrorRoot }) };
   }
 
-  async attachMirrorDevice(serviceId: string, deviceId: string, now = new Date()): Promise<PublicBackupService> {
-    const updated = await this.input.repository.attachMirrorDevice(serviceId, deviceId, now);
+  async attachMirrorDevice(serviceId: string, deviceId: string, now = new Date(), readerDeviceId?: string): Promise<PublicBackupService> {
+    const updated = await this.input.repository.attachMirrorDevice(serviceId, deviceId, now, readerDeviceId);
     await this.audit("backup.service.mirror.attached", serviceId, { deviceId, mirrorRoot: updated.mirrorRoot });
     return this.publicService(updated, now);
   }

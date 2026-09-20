@@ -1,17 +1,18 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
-import { Body, Controller, Get, Headers, HttpCode, Inject, Param, Post, Put, Res, UseFilters, UseGuards } from "@nestjs/common";
+import { Body, ConflictException, Controller, Get, Head, Headers, HttpCode, HttpException, Inject, Param, Post, Put, Res, UseFilters, UseGuards } from "@nestjs/common";
 import type { FastifyReply } from "fastify";
 import { z } from "zod";
 import { OwnerTokenGuard } from "./owner-token.guard.js";
 import { RecoveryWorkflowService } from "./recovery-workflow.service.js";
 import { SaturnApiExceptionFilter } from "./saturn-api-exception.filter.js";
+import { policyMutationSchema, policyRunSchema } from "./service-backup-policy.js";
 
 const scheduleSchema = z.object({ enabled: z.boolean(), interval_hours: z.number().int().min(1).max(8760) }).strict();
 const mirrorScheduleSchema = z.object({ enabled: z.boolean(), interval_minutes: z.number().int().min(1).max(10_080) }).strict();
 const installSchema = z.object({ version: z.string().regex(/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/) }).strict();
-const initializeSchema = z.object({ enrollment_code: z.string().regex(/^[A-Za-z0-9_-]{32}$/) }).strict();
+const initializeSchema = z.object({ enrollment_code: z.string().regex(/^[A-Za-z0-9_-]{32}$/), request_id: z.uuid().optional() }).strict();
 type JsonObject = Record<string, unknown>;
 
 export function required(name: string): string {
@@ -38,6 +39,7 @@ export function unixJson(socketPath: string, host: string, method: string, route
       },
     }, (response) => {
       const chunks: Buffer[] = [];
+      response.on("error", reject);
       let size = 0;
       response.on("data", (chunk: Buffer) => {
         size += chunk.length;
@@ -48,7 +50,7 @@ export function unixJson(socketPath: string, host: string, method: string, route
         let parsed: JsonObject = {};
         try { parsed = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}") as JsonObject; }
         catch { reject(new Error("Local agent returned invalid JSON")); return; }
-        if ((response.statusCode ?? 500) < 200 || (response.statusCode ?? 500) >= 300) reject(new Error(typeof parsed.error === "string" ? parsed.error : `Local agent returned HTTP ${String(response.statusCode)}`));
+        if ((response.statusCode ?? 500) < 200 || (response.statusCode ?? 500) >= 300) reject(new HttpException(typeof parsed.error === "string" ? parsed.error : `Local agent returned HTTP ${String(response.statusCode)}`, response.statusCode ?? 502));
         else resolve(parsed);
       });
     });
@@ -86,6 +88,14 @@ function neptuneHealth() {
 export class NeptuneExportController {
   constructor(@Inject(RecoveryWorkflowService) private readonly recovery: RecoveryWorkflowService) {}
 
+  @Head("backup")
+  async ready(@Headers("authorization") authorization: string | undefined, @Res() reply: FastifyReply): Promise<void> {
+    if (!safeBearer(authorization, process.env.NEPTUNE_EXPORT_TOKEN_FILE?.trim() || "")) { reply.status(401).send(); return; }
+    const status = await this.recovery.status();
+    if (!status.exportEnabled) { reply.status(503).send(); return; }
+    reply.header("X-Neptune-Ready", "1").status(204).send();
+  }
+
   @Post("backup")
   async backup(@Headers("authorization") authorization: string | undefined, @Res() reply: FastifyReply): Promise<void> {
     const tokenFile = process.env.NEPTUNE_EXPORT_TOKEN_FILE?.trim() || "";
@@ -93,6 +103,8 @@ export class NeptuneExportController {
       reply.status(401).send({ error: "Neptune authentication required" });
       return;
     }
+    const policy = await neptune("GET", "/policy");
+    if (policy.paused === true) throw new ConflictException("Restored policy awaits verification; automatic export is paused");
     const result = await this.recovery.createSnapshot();
     reply
       .header("Content-Type", "application/zip")
@@ -107,6 +119,11 @@ export class NeptuneExportController {
 @UseGuards(OwnerTokenGuard)
 @UseFilters(SaturnApiExceptionFilter)
 export class NeptuneOwnerController {
+  private lastKnown: JsonObject = {};
+  @Get("policy") policy() { return neptune("GET", "/policy"); }
+  @Put("policy") changePolicy(@Body() body: unknown) { return neptune("PUT", "/policy", policyMutationSchema.parse(body)); }
+  @Get("policy/runs") policyRuns() { return neptune("GET", "/policy/runs"); }
+  @Post("policy/runs") policyRun(@Body() body: unknown) { return neptune("POST", "/policy/runs", policyRunSchema.parse(body)); }
   @Get("initializations/:id")
   initialization(@Param("id") id: string) {
     if (!/^neptune-[0-9]+-[a-f0-9]{16}$/.test(id)) throw new Error("Invalid initialization job ID");
@@ -121,16 +138,22 @@ export class NeptuneOwnerController {
   async availability() {
     try {
       const health = await neptuneHealth();
-      try { return { installed: true, linked: true, state: "linked", ...(await this.status()) }; }
-      catch { return { installed: true, linked: false, state: "unlinked", version: typeof health.version === "string" ? health.version : null }; }
-    } catch { return { installed: false, linked: false, state: "unavailable", version: null }; }
+      try {
+        this.lastKnown = { ...(await this.status()), installed: true, linked: true, state: "linked", last_verified_at: new Date().toISOString() };
+        return this.lastKnown;
+      } catch (error) {
+        const status = error instanceof HttpException ? error.getStatus() : 503;
+        return { linked: null, ...this.lastKnown, installed: true, state: status === 404 ? "unlinked" : [401, 403].includes(status) ? "authorization_failed" : "unavailable",
+          ...(status === 404 ? { linked: false } : {}), version: health.version ?? null };
+      }
+    } catch { return { installed: null, linked: null, ...this.lastKnown, state: "unavailable" }; }
   }
 
   @Post("initialize")
   async initialize(@Body() body: unknown) {
     const input = initializeSchema.parse(body);
     return updater("/v1/components/neptune-linux/initialize", {
-      request_id: crypto.randomUUID(), head_id: process.env.UPDATER_HEAD_ID?.trim() || "saturn", project_id: "saturn",
+      request_id: input.request_id ?? crypto.randomUUID(), head_id: process.env.UPDATER_HEAD_ID?.trim() || "saturn", project_id: "saturn",
       export_url: "http://127.0.0.1:3000/api/v1/internal/neptune/backup", enrollment_code: input.enrollment_code,
     });
   }

@@ -69,7 +69,10 @@ export class GryphonOwnerController implements OnApplicationBootstrap, OnApplica
   }
 
   @Post("initialize")
-  initialize() { return updater("/v1/lifecycle/gryphon-initialization", { head_id: process.env.UPDATER_HEAD_ID?.trim() || "saturn" }); }
+  initialize(@Body() body: unknown) {
+    const input = z.object({ request_id: z.uuid() }).strict().parse(body);
+    return updater("/v1/lifecycle/gryphon-initialization", { head_id: process.env.UPDATER_HEAD_ID?.trim() || "saturn", request_id: input.request_id });
+  }
 
   private request(method: string, route: string, body?: JsonObject) {
     const tokenFile = this.config.gryphon.serviceTokenFile;
@@ -79,6 +82,8 @@ export class GryphonOwnerController implements OnApplicationBootstrap, OnApplica
   }
 
   @Get("status") async status() { return statusSchema.parse(await this.request("GET", "/v1/service")); }
+
+  @Get("management") async management() { return { url: await registeredOrigin(this.database, this.config, "gryphon", true)() }; }
 
   @Get("bots") async bots() { return botsSchema.parse(await this.request("GET", "/v1/service/bots")); }
 
@@ -97,6 +102,16 @@ export class GryphonOwnerController implements OnApplicationBootstrap, OnApplica
 
   @Post("link-challenge")
   async linkChallenge() { return challengeSchema.parse(await this.request("POST", "/v1/service/link-challenges")); }
+
+  @Delete("link-challenge")
+  cancelChallenge() { return this.request("DELETE", "/v1/service/link-challenges"); }
+
+  @Delete("binding")
+  async revokeBinding() {
+    const result = await this.request("DELETE", "/v1/service/binding");
+    if ((await this.status()).binding !== null) throw new ConflictException("Telegram binding revocation is not confirmed");
+    return result;
+  }
 
   async syncCommandCatalog() {
     return catalogSchema.parse(await this.request("PUT", "/v1/service/command-catalog", {

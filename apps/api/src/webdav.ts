@@ -122,7 +122,9 @@ async function handler(request: FastifyRequest, reply: FastifyReply, devices: De
   }
 }
 
-export function registerWebDav(instance: FastifyInstance, devices: DeviceService, config: SaturnConfig, transfers: TransferMonitorService): void {
+export function registerWebDav(instance: FastifyInstance, devices: DeviceService, config: SaturnConfig, transfers: TransferMonitorService,
+  maintenance: <T>(action: () => Promise<T>) => Promise<T> = (action) => action()): void {
   const method = ["OPTIONS", "PROPFIND", "GET", "HEAD", "PUT", "MKCOL", "MOVE", "COPY", "DELETE"] as const;
-  for (const url of ["/dav", "/dav/*"]) instance.route({ method: method as never, url, handler: (request, reply) => handler(request, reply, devices, config, transfers) });
+  for (const url of ["/dav", "/dav/*"]) instance.route({ method: method as never, url,
+    handler: (request, reply) => maintenance(() => handler(request, reply, devices, config, transfers)) });
 }

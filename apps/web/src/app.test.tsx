@@ -904,17 +904,17 @@ describe("owner Saturn UI", () => {
     render(<App />);
 
     expect(await screen.findByRole("heading", { name: "settings" })).toBeTruthy();
-    for (const title of ["Appearance", "Security", "Backup", "Bot connection", "Updates", "Logs"]) expect(screen.getByRole("heading", { name: title })).toBeTruthy();
-    const linkFunction = screen.getByRole("button", { name: "Link Saturn function" });
+    for (const title of ["Appearance", "Security", "Backup", "Gryphon Connection", "Updates", "Logs"]) expect(screen.getByRole("heading", { name: title })).toBeTruthy();
+    const linkFunction = screen.getByRole("button", { name: "Link service function" });
     await waitFor(() => expect(linkFunction).toHaveProperty("disabled", false));
     fireEvent.click(linkFunction);
-    const gryphonDialog = within(await screen.findByRole("dialog", { name: "Link Saturn function" }));
+    const gryphonDialog = within(await screen.findByRole("dialog", { name: "Link service function" }));
     fireEvent.click(gryphonDialog.getByRole("button", { name: "Link function" }));
     await waitFor(() => {
       const request = fetchMock.mock.calls.find((call) => requestUrl(call[0]).endsWith("/operator/gryphon/connection") && call[1]?.method === "PUT");
       expect(jsonRequestBody(request?.[1])).toEqual({ botId: "bot-1" });
     });
-    expect(await screen.findByRole("button", { name: "Unlink Saturn function" })).toBeTruthy();
+    expect(await screen.findByRole("button", { name: "Unlink service function" })).toBeTruthy();
     const gryphonCheck = screen.getByRole("button", { name: "Check Gryphon for updates" });
     await waitFor(() => expect(gryphonCheck).toHaveProperty("disabled", false));
     fireEvent.click(gryphonCheck);

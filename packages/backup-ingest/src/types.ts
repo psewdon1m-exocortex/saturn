@@ -17,6 +17,7 @@ export interface BackupServiceRecord {
   readonly deploymentId: string;
   readonly mirrorRoot?: "volt" | "mastermind";
   readonly mirrorDeviceId?: string;
+  readonly readerDeviceId?: string;
   readonly name: string;
   readonly tokenHash: string;
   readonly previousTokenHash?: string;
@@ -178,7 +179,7 @@ export interface BackupRepository {
   latestRestoreTest(serviceId: string): Promise<BackupRestoreTestRecord | undefined>;
   createEnrollment(value: BackupEnrollmentRecord): Promise<void>;
   consumeEnrollment(codeHash: string, now: Date): Promise<BackupServiceRecord | undefined>;
-  attachMirrorDevice(serviceId: string, deviceId: string, now: Date): Promise<BackupServiceRecord>;
+  attachMirrorDevice(serviceId: string, deviceId: string, now: Date, readerDeviceId?: string): Promise<BackupServiceRecord>;
   purgeRun(serviceId: string, runId: string): Promise<void>;
 }
 

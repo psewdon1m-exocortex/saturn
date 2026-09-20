@@ -5,6 +5,7 @@ import { DATABASE, FILE_SERVICE, STORAGE_ADAPTER } from "./tokens.js";
 
 interface CloseableDatabase {
   close(): Promise<void>;
+  reconcileInactiveFileLocks(): Promise<void>;
 }
 
 @Injectable()
@@ -16,6 +17,7 @@ export class RuntimeLifecycleService implements OnModuleInit, OnApplicationShutd
   ) {}
 
   async onModuleInit(): Promise<void> {
+    await this.database.reconcileInactiveFileLocks();
     await this.files.initializeStorage();
   }
 

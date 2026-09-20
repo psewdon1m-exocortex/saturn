@@ -1,7 +1,8 @@
-import { createHmac, randomBytes } from "node:crypto";
+import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { Readable } from "node:stream";
 import type { AuditSink } from "@saturn/audit";
-import { type FileService, type Resource } from "@saturn/file-core";
+import { ROOT_RESOURCE_ID, type FileService, type Resource } from "@saturn/file-core";
+import {logicalResourcePath, readerMetadata, readerRange} from "./resource-reader.js";
 import { v7 as uuidv7 } from "uuid";
 import {
   MASTERMIND_RESOURCE_ID,
@@ -18,6 +19,7 @@ import {
 } from "./types.js";
 
 const scopeAliases: ReadonlyMap<string, string> = new Map<string, string>([
+  ["root", ROOT_RESOURCE_ID],
   ["mastermind", MASTERMIND_RESOURCE_ID],
   ["sync", SYNC_RESOURCE_ID],
   ["volt", VOLT_RESOURCE_ID],
@@ -83,6 +85,8 @@ export class DeviceService {
     if (!this.input.options.enabled) throw new DeviceServiceError("forbidden");
     const scopeIds = [...new Set(value.scopeIds)];
     if (scopeIds.length < 1 || scopeIds.length > 3 || scopeIds.some((id) => !idAliases.has(id)) || !validRights(value.rights)) throw new Error("Device scope or rights are invalid");
+    if(scopeIds.includes(ROOT_RESOURCE_ID)&&(scopeIds.length!==1||!value.rights.read||value.rights.write||value.rights.move||value.rights.delete))
+      throw new Error("Root resource capabilities are read-only");
     if (value.expiresAt !== undefined && value.expiresAt <= now) throw new Error("Device expiry is invalid");
     const token = randomBytes(32).toString("base64url");
     const record = await this.input.repository.create({ id: uuidv7(), name: cleanName(value.name), tokenHash: this.#hash(token), scopeIds, rights: value.rights, ...(value.expiresAt === undefined ? {} : { expiresAt: value.expiresAt }), createdAt: now });
@@ -98,6 +102,11 @@ export class DeviceService {
   async updateDevice(id: string, value: { readonly name?: string; readonly scopeIds?: readonly string[]; readonly rights?: DeviceRights; readonly expiresAt?: Date | null }, now = new Date()): Promise<PublicDevice> {
     if (value.scopeIds !== undefined && (value.scopeIds.length < 1 || value.scopeIds.length > 3 || value.scopeIds.some((item) => !idAliases.has(item)))) throw new Error("Device scopes are invalid");
     if (value.rights !== undefined && !validRights(value.rights)) throw new Error("Device rights are invalid");
+    const previous=await this.input.repository.getById(id);
+    if(previous===undefined)throw new DeviceServiceError("not_found");
+    const selectedScope=value.scopeIds??previous.scopeIds,selectedRights=value.rights??previous.rights;
+    if(selectedScope.includes(ROOT_RESOURCE_ID)&&(selectedScope.length!==1||!selectedRights.read||selectedRights.write||selectedRights.move||selectedRights.delete))
+      throw new Error("Root resource capabilities are read-only");
     const updated = await this.input.repository.update(id, { ...(value.name === undefined ? {} : { name: cleanName(value.name) }), ...(value.scopeIds === undefined ? {} : { scopeIds: [...new Set(value.scopeIds)] }), ...(value.rights === undefined ? {} : { rights: value.rights }), ...(value.expiresAt === undefined ? {} : { expiresAt: value.expiresAt }) }, now);
     await this.#audit("device.updated", updated.id, { scopeIds: updated.scopeIds, rights: updated.rights });
     return publicDevice(updated);
@@ -259,15 +268,29 @@ export class DeviceService {
   async #upload(context: DeviceContext, parentId: string, filename: string, source: Readable, size: number, overwriteResourceId?: string): Promise<Resource> {
     const upload = await this.input.files.createUpload({ parentId, filename, expectedSize: size, idempotencyKey: `dav-upload-${uuidv7()}`, ...(overwriteResourceId === undefined ? {} : { overwriteResourceId }), auditActor: this.#actor(context) });
     let offset = 0;
+    // Network chunks are commonly 16-64 KiB. Each storage append opens an SFTP
+    // handle and commits a database offset: coalesce them into bounded writes.
+    const buffer = Buffer.alloc(Math.max(1, Math.min(size, this.input.options.uploadChunkMaxBytes, 1024 * 1024)));
+    let buffered = 0;
+    const flush = async (): Promise<void> => {
+      if (buffered === 0) return;
+      await this.input.files.appendUpload(upload.id, offset, buffered, Readable.from(buffer.subarray(0, buffered)));
+      offset += buffered;
+      buffered = 0;
+    };
     try {
       for await (const raw of source) {
-        const value = Buffer.from(raw as Uint8Array);
-        for (let cursor = 0; cursor < value.length; cursor += this.input.options.uploadChunkMaxBytes) {
-          const chunk = value.subarray(cursor, Math.min(cursor + this.input.options.uploadChunkMaxBytes, value.length));
-          await this.input.files.appendUpload(upload.id, offset, chunk.length, Readable.from(chunk));
-          offset += chunk.length;
+        const value = Buffer.isBuffer(raw) ? raw : Buffer.from(raw as Uint8Array);
+        if (offset + buffered + value.length > size) throw new Error("WebDAV body exceeds Content-Length");
+        for (let cursor = 0; cursor < value.length;) {
+          const count = Math.min(buffer.length - buffered, value.length - cursor);
+          value.copy(buffer, buffered, cursor, cursor + count);
+          cursor += count;
+          buffered += count;
+          if (buffered === buffer.length) await flush();
         }
       }
+      await flush();
       if (offset !== size) throw new Error("WebDAV body length differs from Content-Length");
       return (await this.input.files.completeUpload(upload.id)).resource;
     } catch (error) {
@@ -295,7 +318,59 @@ export class DeviceService {
   }
 
   #right(context: DeviceContext, right: keyof DeviceRights): void {
+    // Enforce again at use, including concurrent administrative policy changes.
+    if(right!=="read"&&context.device.scopeIds.includes(ROOT_RESOURCE_ID))throw new DeviceServiceError("forbidden");
     if (!context.device.rights[right]) throw new DeviceServiceError("forbidden");
+  }
+
+  async readerResolve(context:DeviceContext,path:string):Promise<Resource>{
+    this.#right(context,"read");
+    if(context.device.rights.write||context.device.rights.move||context.device.rights.delete)throw new DeviceServiceError("forbidden");
+    const parts=logicalResourcePath(path);
+    if(context.device.scopeIds.includes(ROOT_RESOURCE_ID)){
+      try{return await this.input.files.resolveResourcePath(parts.slice(1));}
+      catch{throw new DeviceServiceError("not_found");}
+    }
+    if(parts.length<2)throw new DeviceServiceError("forbidden");
+    return (await this.#resolve(context,parts.slice(1))).resource;
+  }
+
+  async readerPage(context:DeviceContext,path:string,cursor:string|undefined,limit=100){
+    if(!Number.isSafeInteger(limit)||limit<1||limit>100)throw new DeviceServiceError("invalid_path");
+    const resource=await this.readerResolve(context,path);
+    if(resource.type!=="folder")throw new DeviceServiceError("not_found");
+    let offset=0;
+    if(cursor!==undefined){
+      try{
+        if(cursor.length>2048)throw new Error("cursor");
+        const parts=cursor.split("."),body=parts[0],signatureText=parts[1];
+        if(parts.length!==2||body===undefined||signatureText===undefined)throw new Error("cursor");
+        const signature=Buffer.from(signatureText,"base64url");
+        const expected=createHmac("sha256",this.#pepper).update("resource-reader-cursor\0").update(body).digest();
+        if(signature.length!==expected.length||!timingSafeEqual(signature,expected))throw new Error("cursor");
+        const value=JSON.parse(Buffer.from(body,"base64url").toString("utf8")) as {device:string;path:string;etag:string;offset:number;expires:number};
+        if(value.device!==context.device.id||value.path!==path||value.etag!==resourceEtag(resource)||!Number.isSafeInteger(value.expires)||value.expires<Date.now()
+          ||!Number.isSafeInteger(value.offset)||value.offset<0)throw new Error("cursor");offset=value.offset;
+      }catch{throw new DeviceServiceError("invalid_path");}
+    }
+    const entries=await this.input.files.listChildren(resource.id,offset,limit+1);
+    let next:string|null=null;
+    if(entries.length>limit){
+      const body=Buffer.from(JSON.stringify({device:context.device.id,path,etag:resourceEtag(resource),offset:offset+limit,expires:Date.now()+15*60_000})).toString("base64url");
+      next=body+"."+createHmac("sha256",this.#pepper).update("resource-reader-cursor\0").update(body).digest("base64url");
+    }
+    return {schema:"saturn.resource-reader.v1",entries:entries.slice(0,limit).map(entry=>readerMetadata(entry,path+"/"+entry.name)),next_cursor:next};
+  }
+
+  async readerContent(context:DeviceContext,path:string,range?:string,ifRange?:string):Promise<DavRead>{
+    const resource=await this.readerResolve(context,path);
+    if(resource.type!=="file")throw new DeviceServiceError("not_found");
+    let selected:{offset:number;length:number}|undefined;
+    const opened=await this.input.files.openDownload(resource.id,current=>{
+      selected=readerRange(current,range,ifRange);return selected??{offset:0};
+    },undefined,this.#actor(context));
+    return {resource:opened.resource,stream:opened.stream,offset:selected?.offset??0,
+      length:selected?.length??opened.resource.sizeBytes,partial:selected!==undefined};
   }
 
   #actor(context: DeviceContext) { return { type: "device_token", id: context.device.id }; }

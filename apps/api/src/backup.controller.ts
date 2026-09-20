@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { Readable } from "node:stream";
+import { ROOT_RESOURCE_ID } from "@saturn/file-core";
 import { Body, Controller, Delete, Get, Head, Headers, Inject, Param, Patch, Post, Query, Req, Res, UseFilters, UseGuards } from "@nestjs/common";
 import type { BackupContext, BackupIngestService, BackupServiceCreateInput } from "@saturn/backup-ingest";
 import type { SaturnConfig } from "@saturn/config";
@@ -66,12 +67,24 @@ export class BackupEnrollmentController {
       scopeIds: [redeemed.mirrorRoot === "volt" ? VOLT_RESOURCE_ID : MASTERMIND_RESOURCE_ID],
       rights: { read: true, write: true, move: true, delete: true },
     });
-    try { await this.backups.attachMirrorDevice(redeemed.serviceId, device.device.id); }
-    catch (error) { await this.devices.revokeDevice(device.device.id).catch(() => undefined); throw error; }
+    let reader: Awaited<ReturnType<DeviceService["createDevice"]>> | undefined;
+    try {
+      if(redeemed.mirrorRoot==="mastermind")reader=await this.devices.createDevice({
+        name:`Neptune ${redeemed.namespaceSlug}/${redeemed.deploymentId} reader`,scopeIds:[ROOT_RESOURCE_ID],
+        rights:{read:true,write:false,move:false,delete:false},
+      });
+      await this.backups.attachMirrorDevice(redeemed.serviceId, device.device.id, new Date(), reader?.device.id);
+    }
+    catch (error) {
+      await this.devices.revokeDevice(device.device.id).catch(() => undefined);
+      if(reader!==undefined)await this.devices.revokeDevice(reader.device.id).catch(()=>undefined);
+      throw error;
+    }
     return {
       ...redeemed,
       mirrorToken: device.token,
       mirrorMode: redeemed.mirrorRoot === "volt" ? "single-file" : "zip-tree",
+      ...(reader===undefined?{}:{readerToken:reader.token,readerRoot:"root",readerCapability:"neptune.resource-reader.v1"}),
       ...(redeemed.mirrorRoot === "volt" ? { mirrorTargetFilename: "personal.volt" } : {}),
     };
   }

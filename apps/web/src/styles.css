@@ -1459,3 +1459,19 @@ button.share-browser__name:active:not(:disabled) { transform: scale(.985); trans
   .login-submit:hover:not(:disabled), .login-submit:focus-visible, .login-submit:active:not(:disabled) { transform: none; }
   .login-reachability--ready { animation: none; }
 }
+
+
+/* Operational Settings cards: shared reference geometry (Part 01, section 10.9). */
+:is(.setting-card,.universal-card,[data-card]):has(:is(.backup-content,.updates-content,.logs-content,.exo-backup-policy,.exo-service-logs,.exo-wyvern-connection,.bot-connection-groups)) {
+  border-radius: 0; border-color: #fff; min-height: 0; height: auto; background: #000; color: #fff; font: 14px/22px Consolas,"Liberation Mono",monospace;
+}
+:is(.setting-card,.universal-card,[data-card]):has(:is(.backup-content,.updates-content,.logs-content,.exo-backup-policy,.exo-service-logs,.exo-wyvern-connection,.bot-connection-groups)) h2 {
+  font: 700 24px/29px Consolas,"Liberation Mono",monospace; color: var(--accent,#00a8ff);
+}
+:is(.backup-content,.updates-content,.logs-content,.bot-connection-groups,[data-card="backup"],[data-card="updates"],[data-card="wyvern"]) h3 {
+  font: 700 20px/24px Consolas,"Liberation Mono",monospace;
+}
+:is(.backup-content,.updates-content,.bot-connection-groups) :is(.settings-group,.setting-group) + :is(.settings-group,.setting-group) { margin-top: 0; border-top: 0; }
+
+:is(.backup-content,.bot-connection-groups) > .settings-group { padding-top: 0; }
+:is(.backup-content,.bot-connection-groups) { gap: 40px; }

@@ -132,6 +132,26 @@ describe("DeviceService", () => {
     await expect(service.propfind(context, "sync", 0)).rejects.toMatchObject({ code: "not_found" });
   });
 
+  it("coalesces fragmented DAV bodies without changing bytes or acknowledged offsets", async () => {
+    const created = await service.createDevice({ name: "Notes", scopeIds: [MASTERMIND_RESOURCE_ID], rights }, now);
+    const context = await service.authenticate(`Bearer ${created.token}`, now);
+    const append = vi.spyOn(files, "appendUpload");
+    await service.put(context, "mastermind/fragmented.bin", Readable.from(Array.from({ length: 19 }, (_, index) => Buffer.from([index]))), 19,
+      { ifNoneMatch: "*" });
+    expect(append.mock.calls.map((call) => [call[1], call[2]])).toEqual([[0, 8], [8, 8], [16, 3]]);
+    expect(Buffer.concat([...files.uploadBytes.values()][0] ?? [])).toEqual(Buffer.from(Array.from({ length: 19 }, (_, index) => index)));
+  });
+
+  it("abandons an oversized fragmented body before committing a resource", async () => {
+    const created = await service.createDevice({ name: "Notes", scopeIds: [MASTERMIND_RESOURCE_ID], rights }, now);
+    const context = await service.authenticate(`Bearer ${created.token}`, now);
+    const abandon = vi.spyOn(files, "abandonUpload");
+    await expect(service.put(context, "mastermind/overflow.bin", Readable.from([Buffer.alloc(5), Buffer.alloc(6)]), 10,
+      { ifNoneMatch: "*" })).rejects.toThrow("exceeds Content-Length");
+    expect(abandon).toHaveBeenCalledOnce();
+    expect([...files.resources.values()].some((value) => value.name === "overflow.bin")).toBe(false);
+  });
+
   it("keeps the current resource and records a conflict copy for stale If-Match", async () => {
     const current: Resource = { id: crypto.randomUUID(), type: "file", parentId: MASTERMIND_RESOURCE_ID, name: "note.md", storagePath: "mastermind/note.md", mimeType: "text/markdown", sizeBytes: 3, sha256: "a".repeat(64), status: "active", securityClassification: "internal", createdAt: now, updatedAt: now };
     files.resources.set(current.id, current);

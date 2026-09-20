@@ -39,7 +39,7 @@ function dropChannelHint(): string | undefined {
   return typeof channelId === "string" && channelId !== "" ? channelId : undefined;
 }
 
-async function request<T>(relativePath: string, options: RequestInit = {}): Promise<T> {
+export async function request<T>(relativePath: string, options: RequestInit = {}): Promise<T> {
   const headers = new Headers(options.headers);
   const method = options.method?.toUpperCase() ?? "GET";
   if (!["GET", "HEAD", "OPTIONS"].includes(method)) {
@@ -129,11 +129,11 @@ export const api = {
   agentJob: (id: string) => request<{ id: string; state: string; message?: string; rollback_available?: boolean }>(`/operator/updates/jobs/${encodeURIComponent(id)}`),
   rollbackSaturnUpdate: (id: string) => request<{ id: string; state: string }>(`/operator/updates/jobs/${encodeURIComponent(id)}/rollback`, { method: "POST" }),
   installUpdater: () => request<{ id: string; state: string }>("/operator/updates/updater/install", { method: "POST" }),
-  initializeGryphon: () => request<{ id: string; state: string }>("/operator/gryphon/initialize", { method: "POST" }),
+  initializeGryphon: (requestId: string = crypto.randomUUID()) => request<{ id: string; state: string }>("/operator/gryphon/initialize", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ request_id: requestId }) }),
   recoveryStatus: () => request<RecoveryStatus>("/operator/recovery"),
   neptuneStatus: () => request<NeptuneStatus>("/operator/neptune/status"),
   neptuneAvailability: () => request<NeptuneAvailability>("/operator/neptune/availability"),
-  initializeNeptune: (enrollmentCode: string) => request<{ readonly id: string; readonly state: string }>("/operator/neptune/initialize", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enrollment_code: enrollmentCode }) }),
+  initializeNeptune: (enrollmentCode: string, requestId?: string) => request<{ readonly id: string; readonly state: string }>("/operator/neptune/initialize", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enrollment_code: enrollmentCode, request_id: requestId }) }),
   neptuneInitialization: (id: string) => request<{ readonly id: string; readonly state: string; readonly message?: string }>(`/operator/neptune/initializations/${encodeURIComponent(id)}`),
   updateNeptuneSchedule: (enabled: boolean, intervalHours: number) => request<undefined>("/operator/neptune/schedule", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled, interval_hours: intervalHours }) }),
   runNeptune: () => request<Record<string, unknown>>("/operator/neptune/runs", { method: "POST" }),
@@ -146,6 +146,7 @@ export const api = {
   updateNeptuneAgentSchedule: (serviceId: string, input: { readonly archiveEnabled: boolean; readonly archiveIntervalHours: number; readonly mirrorEnabled?: boolean; readonly mirrorIntervalMinutes?: number }) => request<NeptuneAgentInfo>(`/operator/neptune/agents/${encodeURIComponent(serviceId)}/schedule`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) }),
   commandNeptuneAgent: (serviceId: string, input: { readonly kind: "archive.run" | "mirror.run" } | { readonly kind: "agent.update"; readonly version: string }) => request<{ readonly id: string; readonly state: string }>(`/operator/neptune/agents/${encodeURIComponent(serviceId)}/commands`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) }),
   gryphonStatus: () => request<GryphonStatus>("/operator/gryphon/status"),
+  gryphonManagement: () => request<{ url: string }>("/operator/gryphon/management"),
   gryphonBots: () => request<{ readonly bots: readonly GryphonBot[] }>("/operator/gryphon/bots"),
   connectGryphon: (botId: string) => request<GryphonStatus>("/operator/gryphon/connection", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ botId }) }),
   disconnectGryphon: () => request<{ readonly disconnected: boolean }>("/operator/gryphon/connection", { method: "DELETE" }),

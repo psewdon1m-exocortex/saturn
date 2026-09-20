@@ -139,8 +139,8 @@ export class RecoveryWorkflowService implements OnModuleInit, OnApplicationShutd
       fs.mkdir(this.#config.recovery.spoolDirectory, { recursive: true, mode: 0o700 }),
       fs.mkdir(this.#config.recovery.archiveDirectory, { recursive: true, mode: 0o700 }),
     ]);
-    await this.#cleanupInterruptedUploads();
     this.#recoveryDatabase = new Database(this.#config.databaseUrl, { max: 3 });
+    await this.#cleanupInterruptedUploads();
     this.#toolchain = new PostgresCommandToolchain({
       databaseUrl: this.#config.databaseUrl,
       database: this.#recoveryDatabase,
@@ -324,12 +324,17 @@ export class RecoveryWorkflowService implements OnModuleInit, OnApplicationShutd
     try {
       record.state = "applying";
       await this.#writeJournal(record);
+      const storageParticipant = await createStorageRecoveryParticipant(this.#config, this.#storage);
       const result = await this.#requireBackup().restore({
         archivePath: record.archivePath,
         mode: "replace",
         snapshotOutputPath,
         snapshotInput: this.#requireInputs(),
-        configuration: await createStorageRecoveryParticipant(this.#config, this.#storage),
+        configuration: {
+          prepare: value => storageParticipant.prepare(value),
+          apply: async () => { await storageParticipant.apply(); await this.#pauseRestoredPolicies(); },
+          rollback: () => storageParticipant.rollback(),
+        },
       }, () => migrate(this.#config.databaseUrl, this.#requireInputs().migrationsDirectory), (action) => this.#database.withExclusiveMaintenance(action));
       record.state = "complete";
       await this.#writeJournal(record);
@@ -355,6 +360,7 @@ export class RecoveryWorkflowService implements OnModuleInit, OnApplicationShutd
       await Promise.all([
         fs.rm(record.archivePath, { force: true }),
         fs.rm(this.#journalPath(id), { force: true }),
+        fs.rm(snapshotOutputPath, { force: true }),
       ]);
     }
   }
@@ -453,9 +459,28 @@ export class RecoveryWorkflowService implements OnModuleInit, OnApplicationShutd
       }
     }
     const entries = await fs.readdir(this.#config.recovery.spoolDirectory).catch(() => [] as string[]);
+    for (const name of entries.filter(name => /^web-restore-[0-9a-f-]+\.json$/.test(name))) {
+      const filename = path.join(this.#config.recovery.spoolDirectory, name);
+      if ((await fs.stat(filename)).size > 65536) throw new Error("Oversized restore journal");
+      const journal = JSON.parse(await fs.readFile(filename, "utf8")) as { state?: string };
+      if (journal.state === "applying") await this.#pauseRestoredPolicies();
+    }
     await Promise.all(entries
       .filter((name) => /^web-(restore|validation)-[0-9a-f-]+\.(zip|json)$/.test(name) || /^web-validation-[0-9a-f-]+$/.test(name))
       .map((name) => fs.rm(path.join(this.#config.recovery.spoolDirectory, name), { recursive: true, force: true })));
+  }
+
+  async #pauseRestoredPolicies(): Promise<void> {
+    if (!this.#recoveryDatabase) throw new Error("Recovery database is unavailable");
+    // Runs under the write barrier, or before startup accepts any requests.
+    // Millisecond revisions outrank revisions retained by connected daemons.
+    await this.#recoveryDatabase.transaction(async sql => {
+      await sql`UPDATE neptune_agents SET policy_paused=true,
+        desired_revision=greatest(desired_revision+1,floor(extract(epoch from clock_timestamp())*1000)::bigint),
+        updated_at=now()`;
+      await sql`UPDATE neptune_agent_commands SET state='failed',error='policy_restored_pending_verification',completed_at=now()
+        WHERE kind IN ('archive.run','mirror.run') AND state='pending'`;
+    });
   }
 
   async #recordRecovery(result: RestoreResult | undefined, record: RestoreUploadRecord, state: "complete" | "rolled_back" | "failed"): Promise<void> {

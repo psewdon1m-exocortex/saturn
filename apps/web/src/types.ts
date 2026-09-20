@@ -260,9 +260,9 @@ export interface NeptuneStatus {
 }
 
 export interface NeptuneAvailability {
-  readonly installed: boolean;
-  readonly linked: boolean;
-  readonly state: "linked" | "unlinked" | "unavailable";
+  readonly installed: boolean | null;
+  readonly linked: boolean | null;
+  readonly state: "linked" | "unlinked" | "unavailable" | "authorization_failed";
   readonly version?: string | null;
 }
 

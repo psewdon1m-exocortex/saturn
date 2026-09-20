@@ -176,6 +176,20 @@ export class FileService {
     return this.#repository.listTrash(offset, limit);
   }
 
+  async resolveResourcePath(segments: readonly string[], rootId = ROOT_RESOURCE_ID): Promise<Resource> {
+    if (segments.length > 64) throw new Error("Resource path exceeds the supported depth");
+    let current = await this.getResource(rootId);
+    for (const name of segments) {
+      if (current.type !== "folder" || current.status !== "active" || normalizeStorageName(name) !== name)
+        throw new Error("Resource path is not canonical");
+      const child = await this.#repository.getChild(current.id, name);
+      if (child === undefined || child.status !== "active") throw new Error("Resource path not found");
+      current = child;
+    }
+    if (current.status !== "active") throw new Error("Resource path not active");
+    return current;
+  }
+
   async createFolder(parentId: string, rawName: string, auditActor?: { readonly type: string; readonly id: string }): Promise<Resource> {
     const parent = await this.getResource(parentId);
     if (parent.type !== "folder" || parent.status !== "active") throw new Error("Parent folder is not active");

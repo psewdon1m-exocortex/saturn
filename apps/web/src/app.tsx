@@ -1,8 +1,12 @@
+import { ServiceLogsPanel } from "./ServiceLogsPanel";
+import { openAgentInitialization, confirmAgentAction, type InitializationJob } from "./agent-initialize.js";
+import { BackupPolicyPanel } from "./service-agents";
+import { updateCookieHeaders } from "./update-overlay.js";
+import { request as agentRequest } from "./api";
+const policyHeaders = () => updateCookieHeaders(["vault_csrf_dev", "__Host-vault_csrf"], "X-Vault-CSRF");
 import { openSaturnUpdates, openRemoteNeptuneUpdates } from "./update-flow.js";
-import { LocalAgentActions } from "./local-agent-actions.js";
 import { HelperRecoveryPanel } from "./helper-recovery-panel.js";
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type CSSProperties, type DragEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode, type SyntheticEvent } from "react";
-import { pendingAgentJob, waitForAgentJob } from "./agent-job.js";
 import DOMPurify from "dompurify";
 import { marked } from "marked";
 import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
@@ -18,7 +22,6 @@ import {
   SYNC_RESOURCE_ID,
   type BackupServiceInfo,
   type BackupRunInfo,
-  type AuditEventInfo,
   type ArchiveJobInfo,
   type DeviceInfo,
   type FileVersion,
@@ -76,7 +79,7 @@ const SETTINGS_CARD_TITLES: Readonly<Record<SettingsCardName, string>> = {
   appearance: "Appearance",
   security: "Security",
   backup: "Backup",
-  gryphon: "Bot connection",
+  gryphon: "Gryphon Connection",
   updates: "Updates",
   logs: "Logs",
 };
@@ -2299,22 +2302,16 @@ function StatusRow({ label, state, detail }: { readonly label: string; readonly 
   return <div className="status-row"><span>{label}</span><span className={`semantic-status semantic-status--${state}`}>{detail ?? (state === "ready" ? "Service Reachability" : state === "busy" ? "Busy" : "Unavailable")}<i aria-hidden="true" /></span></div>;
 }
 
-function NeptunePipelineRow({ service, agent, pending, reauthed, onSchedule, onCommand, onCheckUpdate, onSetup, onRotate, onRevoke }: {
+function NeptunePipelineRow({ service, agent, pending, reauthed, onCheckUpdate, onSetup, onRotate, onRevoke }: {
   readonly service: BackupServiceInfo;
   readonly agent?: NeptuneAgentInfo | undefined;
   readonly pending: boolean;
   readonly reauthed: boolean;
-  readonly onSchedule: (service: BackupServiceInfo, archiveEnabled: boolean, archiveIntervalHours: number, mirrorEnabled: boolean, mirrorIntervalMinutes: number) => Promise<void>;
-  readonly onCommand: (service: BackupServiceInfo, kind: "archive.run" | "mirror.run") => Promise<void>;
   readonly onCheckUpdate: (service: BackupServiceInfo) => void;
   readonly onSetup: (id: string) => Promise<void>;
   readonly onRotate: (id: string) => Promise<void>;
   readonly onRevoke: (id: string) => Promise<void>;
 }) {
-  const [archiveEnabled, setArchiveEnabled] = useState(agent?.desired.archiveEnabled ?? false);
-  const [archiveHours, setArchiveHours] = useState(agent?.desired.archiveIntervalHours ?? 24);
-  const [mirrorEnabled, setMirrorEnabled] = useState(agent?.desired.mirrorEnabled ?? false);
-  const [mirrorMinutes, setMirrorMinutes] = useState(agent?.desired.mirrorIntervalMinutes ?? 5);
   const [runs, setRuns] = useState<readonly BackupRunInfo[]>([]);
   useEffect(() => {
     let live = true;
@@ -2323,39 +2320,19 @@ function NeptunePipelineRow({ service, agent, pending, reauthed, onSchedule, onC
     const timer = window.setInterval(load, 30_000);
     return () => { live = false; window.clearInterval(timer); };
   }, [service.id]);
-  useEffect(() => {
-    setArchiveEnabled(agent?.desired.archiveEnabled ?? false);
-    setArchiveHours(agent?.desired.archiveIntervalHours ?? 24);
-    setMirrorEnabled(agent?.desired.mirrorEnabled ?? false);
-    setMirrorMinutes(agent?.desired.mirrorIntervalMinutes ?? 5);
-  }, [agent?.desired.revision]);
   const lastSeenAt = agent?.observed.lastSeenAt;
   const online = agent?.observed.online ?? (lastSeenAt !== undefined && Date.now() - new Date(lastSeenAt).getTime() < 45_000);
   const applied = agent !== undefined && agent.observed.appliedRevision >= agent.desired.revision;
-  const archiveActive = agent?.observed.archive["active"] === true;
-  const mirrorActive = agent?.observed.mirror["active"] === true;
   const versionPending = agent?.desired.version !== undefined && agent.desired.version !== agent.observed.version;
   const heartbeat = online
     ? `online · Neptune ${agent?.observed.version ?? "unknown"}`
     : lastSeenAt === undefined ? "waiting for first check-in" : `offline · last seen ${new Date(lastSeenAt).toLocaleString()}`;
-  const disabled = pending || service.state !== "active";
   const archiveLastAttempt = typeof agent?.observed.archive["lastAttemptAt"] === "string" ? agent.observed.archive["lastAttemptAt"] : undefined;
   const archiveLastSuccess = typeof agent?.observed.archive["lastSuccessAt"] === "string" ? agent.observed.archive["lastSuccessAt"] : service.usage.lastCompletedAt;
   const archiveNextRun = typeof agent?.observed.archive["nextRunAt"] === "string" ? agent.observed.archive["nextRunAt"] : undefined;
-  const save = (next?: { readonly archiveEnabled?: boolean; readonly mirrorEnabled?: boolean }) => onSchedule(service,
-    next?.archiveEnabled ?? archiveEnabled, archiveHours, next?.mirrorEnabled ?? mirrorEnabled, mirrorMinutes);
   return <article className="fleet-agent">
     <div className="fleet-agent__summary"><strong>{service.name}</strong><span>{service.namespaceSlug}/{service.deploymentId} · {service.state} · {formatBytes(service.usage.storedBytes)}/{formatBytes(service.storedQuotaBytes)} stored</span><span>{heartbeat} · {applied ? "schedule applied" : "schedule pending"}{versionPending ? ` · update ${agent.desired.version} pending` : ""}</span><span>{archiveLastSuccess === undefined ? "no successful ZIP reported" : `last ZIP ${new Date(archiveLastSuccess).toLocaleString()}`}{archiveNextRun === undefined ? "" : ` · next ${new Date(archiveNextRun).toLocaleString()}`}{archiveLastAttempt === undefined || archiveLastAttempt === archiveLastSuccess ? "" : ` · last attempt ${new Date(archiveLastAttempt).toLocaleString()}`}</span>{agent?.observed.latestError === undefined ? null : <span className="danger-text">{agent.observed.latestError}</span>}</div>
-    <div className="fleet-agent__schedule">
-      <label><input type="checkbox" checked={archiveEnabled} disabled={disabled} onChange={(event) => { setArchiveEnabled(event.target.checked); void save({ archiveEnabled: event.target.checked }); }} />Automatic ZIP</label>
-      <label>Every, hours<input type="number" min={1} max={8760} value={archiveHours} disabled={disabled} onChange={(event) => setArchiveHours(Number(event.target.value))} onBlur={() => void save()} /></label>
-      <button className="button" type="button" disabled={disabled || archiveActive} onClick={() => void onCommand(service, "archive.run")}>{online ? "Run ZIP now" : "Queue ZIP run"}</button>
-      {service.mirrorRoot === undefined ? null : <>
-        <label><input type="checkbox" checked={mirrorEnabled} disabled={disabled} onChange={(event) => { setMirrorEnabled(event.target.checked); void save({ mirrorEnabled: event.target.checked }); }} />Automatic /{service.mirrorRoot} mirror</label>
-        <label>Every, minutes<input type="number" min={1} max={10080} value={mirrorMinutes} disabled={disabled} onChange={(event) => setMirrorMinutes(Number(event.target.value))} onBlur={() => void save()} /></label>
-        <button className="button" type="button" disabled={disabled || mirrorActive} onClick={() => void onCommand(service, "mirror.run")}>{online ? "Run mirror now" : "Queue mirror run"}</button>
-      </>}
-    </div>
+    <p>Schedules and manual backup runs are controlled from this service’s Settings → Backup. This panel shows observed state and manages identity, enrollment and access.</p>
     <div className="inline-actions"><button className="button" type="button" disabled={pending || !online} onClick={() => onCheckUpdate(service)}>Check update</button><button className="button" type="button" disabled={pending || !reauthed || service.state !== "active"} onClick={() => void onSetup(service.id)}>Setup code</button><button className="button" type="button" disabled={pending || !reauthed || service.state !== "active"} onClick={() => void onRotate(service.id)}>Rotate archive token</button><button className="button button--danger" type="button" disabled={pending || !reauthed || service.state !== "active"} onClick={() => void onRevoke(service.id)}>Revoke</button></div>
     <details className="fleet-agent__runs"><summary>Recent ZIP runs ({runs.length})</summary>{runs.length === 0 ? <p className="empty-state">No runs recorded.</p> : <div className="compact-list">{runs.map((run) => <div className="compact-row" key={run.id}><span>{run.state} · {new Date(run.updatedAt).toLocaleString()} · {formatBytes(run.expectedSize)}</span><span>{run.receipt?.logicalPath ?? run.failureCode ?? run.filename}</span></div>)}</div>}</details>
   </article>;
@@ -2459,37 +2436,23 @@ function SynchronizationView({ addNotice }: { readonly addNotice: (kind: Notice[
     catch { addNotice("error", "Revocation requires recent owner proof."); }
     finally { setPending(false); }
   };
-  const saveAgentSchedule = async (service: BackupServiceInfo, archiveEnabled: boolean, archiveIntervalHours: number, mirrorEnabled: boolean, mirrorIntervalMinutes: number) => {
-    setPending(true);
-    try {
-      await api.updateNeptuneAgentSchedule(service.id, { archiveEnabled, archiveIntervalHours, ...(service.mirrorRoot === undefined ? {} : { mirrorEnabled, mirrorIntervalMinutes }) });
-      await loadAgents(); addNotice("success", `Schedule for ${service.namespaceSlug}/${service.deploymentId} saved.`);
-    } catch { addNotice("error", "Remote schedule could not be saved."); }
-    finally { setPending(false); }
-  };
-  const commandAgent = async (service: BackupServiceInfo, kind: "archive.run" | "mirror.run") => {
-    setPending(true);
-    try { await api.commandNeptuneAgent(service.id, { kind }); addNotice("success", `Command queued for ${service.namespaceSlug}/${service.deploymentId}.`); }
-    catch { addNotice("error", "Remote Neptune command could not be queued."); }
-    finally { setPending(false); }
-  };
   const checkAgentUpdate = (service: BackupServiceInfo) => { openRemoteNeptuneUpdates(service.id); };
 
   const archiveServices = services.filter((service) => service.mirrorRoot === undefined);
   const mirrorServices = services.filter((service) => service.mirrorRoot !== undefined);
   const linkedMirrorDevices = new Set(mirrorServices.flatMap((service) => service.mirrorDeviceId === undefined ? [] : [service.mirrorDeviceId]));
   const windowsDevices = devices.filter((device) => device.scopeIds.length === 1 && device.scopeIds[0] === SYNC_RESOURCE_ID && !linkedMirrorDevices.has(device.id));
-  const identityList = (items: readonly BackupServiceInfo[]) => <div className="compact-list fleet-list">{items.length === 0 ? <p className="empty-state">No identities configured.</p> : items.map((service) => <NeptunePipelineRow key={service.id} service={service} agent={agents.find((agent) => agent.serviceId === service.id)} pending={pending} reauthed={reauthed} onSchedule={saveAgentSchedule} onCommand={commandAgent} onCheckUpdate={checkAgentUpdate} onSetup={createEnrollment} onRotate={rotateService} onRevoke={revokeService} />)}</div>;
+  const identityList = (items: readonly BackupServiceInfo[]) => <div className="compact-list fleet-list">{items.length === 0 ? <p className="empty-state">No identities configured.</p> : items.map((service) => <NeptunePipelineRow key={service.id} service={service} agent={agents.find((agent) => agent.serviceId === service.id)} pending={pending} reauthed={reauthed} onCheckUpdate={checkAgentUpdate} onSetup={createEnrollment} onRotate={rotateService} onRevoke={revokeService} />)}</div>;
 
   return <section className="workspace synchronization" aria-labelledby="synchronization-title">
     <PageHeader title="synchronization" id="synchronization-title" />
     <div className="synchronization-intro"><p>Three isolated pipelines share Saturn storage without sharing credentials or schedules. Linux ZIP archives are immutable recovery points; Linux mirrors keep dedicated roots current; Windows clients mirror selected folders into unique <code>sync/&lt;folder&gt;</code> destinations.</p><form className="reauth-form" onSubmit={(event) => void reauthenticate(event)}><label>Current Access Key<input type="password" value={accessKey} onChange={(event) => setAccessKey(event.target.value)} autoComplete="current-password" required /></label><button className="button" type="submit" disabled={pending || !accessKey}>{reauthed ? "Owner verified" : "Unlock management"}</button></form></div>
     <div className="card-grid synchronization-grid">
-      <UniversalCard ordinal={1} title="Linux · recovery archives" className="synchronization-card"><p>Each remote Neptune checks in over outbound HTTPS, applies the schedule stored here and creates immutable recovery ZIPs under <code>backups/&lt;project&gt;/&lt;server&gt;</code>.</p>{identityList(archiveServices)}</UniversalCard>
+      <UniversalCard ordinal={1} title="Linux · recovery archives" className="synchronization-card"><p>Each remote Neptune checks in over outbound HTTPS, applies the policy configured in its own service and creates immutable recovery ZIPs under <code>backups/&lt;project&gt;/&lt;server&gt;</code>.</p>{identityList(archiveServices)}</UniversalCard>
       <UniversalCard ordinal={2} title="Linux · dedicated mirrors" className="synchronization-card"><p>Volt publishes <code>personal.volt</code> into <code>/volt</code>; Mastermind publishes its vault tree into <code>/mastermind</code>. Archive and mirror schedules remain independent.</p>{identityList(mirrorServices)}</UniversalCard>
       <UniversalCard ordinal={3} title="Windows · folder synchronization" className="synchronization-card"><div className="settings-groups"><section className="settings-group"><p>Create one client password per PC. The desktop app chooses local directories and a unique destination name; every destination is an exact one-way mirror under <code>sync/&lt;name&gt;</code>.</p><form className="device-form" onSubmit={(event) => void createWindowsClient(event)}><label>PC / client name<input value={windowsName} onChange={(event) => setWindowsName(event.target.value)} maxLength={80} placeholder="Office PC" required /></label><button className="button" type="submit" disabled={pending || !reauthed}>Create Windows client password</button></form>{windowsToken === undefined ? null : <div className="one-time-code" role="status"><span>Paste this one-time password into Neptune for Windows</span><strong>{windowsToken}</strong><small>It is held only in this page memory.</small></div>}<div className="compact-list">{windowsDevices.length === 0 ? <p className="empty-state">No Windows clients configured.</p> : windowsDevices.map((device) => <article key={device.id}><div><strong>{device.name}</strong><span>{device.state} · last used {device.lastUsedAt === undefined ? "never" : new Date(device.lastUsedAt).toLocaleString()}</span></div><button className="button button--danger" type="button" disabled={pending || !reauthed || device.state !== "active"} onClick={() => void revokeDevice(device.id)}>Revoke</button></article>)}</div></section></div></UniversalCard>
       <UniversalCard ordinal={4} title="Add Linux pipeline" className="synchronization-card"><form className="backup-service-form" onSubmit={(event) => void createService(event)}><label>Pipeline<select value={pipeline} onChange={(event) => changePipeline(event.target.value as "archive" | "volt" | "mastermind")}><option value="archive">Recovery ZIP only</option><option value="volt">Volt ZIP + personal.volt mirror</option><option value="mastermind">Mastermind ZIP + vault mirror</option></select></label><label>Connection name<input value={serviceName} onChange={(event) => setServiceName(event.target.value)} maxLength={100} required /></label><label>Project namespace<input value={pipeline === "archive" ? namespace : pipeline} disabled={pipeline !== "archive"} onChange={(event) => setNamespace(event.target.value.toLowerCase())} pattern="[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?" maxLength={63} placeholder="chronos" required /></label><label>Server ID<input value={deployment} onChange={(event) => setDeployment(event.target.value.toLowerCase())} pattern="[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?" maxLength={63} placeholder="vps-1" required /></label><label>Parallel archive runs<input type="number" min={1} max={32} value={maxConcurrentRuns} onChange={(event) => setMaxConcurrentRuns(Number(event.target.value))} required /></label><button className="button button--primary" type="submit" disabled={pending || !reauthed}>Create setup code</button></form>{enrollment === undefined ? null : <div className="one-time-code" role="status"><span>Enter this in the simplified Neptune Linux installer</span><strong>{enrollment.code}</strong><small>One use · expires {new Date(enrollment.expiresAt).toLocaleString()}.</small></div>}{producerToken === undefined ? null : <div className="one-time-code" role="status"><span>Rotated archive producer token</span><strong>{producerToken}</strong><small>Use only when repairing an existing installation.</small></div>}</UniversalCard>
-      <UniversalCard ordinal={5} title="Neptune fleet" className="synchronization-card"><p>Connected Linux agents report their version and last heartbeat on the pipeline rows above. Commands and schedules are delivered through outbound polling, so no inbound server port is required.</p><p className="setting-meta">Windows clients continue to check and install their Windows release from the desktop application.</p></UniversalCard>
+      <UniversalCard ordinal={5} title="Neptune fleet" className="synchronization-card"><p>Connected Linux agents report their version and last heartbeat on the pipeline rows above. Service-owned policies are applied through outbound polling, so no inbound server port is required.</p><p className="setting-meta">Windows clients continue to check and install their Windows release from the desktop application.</p></UniversalCard>
     </div>
   </section>;
 }
@@ -2514,9 +2477,8 @@ function SettingsView({ preferences, setPreferences, addNotice, onAnonymous }: {
   const [kernelUrl, setKernelUrl] = useState("");
   const [recovery, setRecovery] = useState<RecoveryStatus | undefined>();
   const [neptune, setNeptune] = useState<NeptuneAvailability | undefined>();
-  const [neptuneDialog, setNeptuneDialog] = useState(false);
-  const [neptuneCode, setNeptuneCode] = useState("");
   const [gryphon, setGryphon] = useState<GryphonStatus | undefined>();
+  const [gryphonError, setGryphonError] = useState("");
   const [gryphonBots, setGryphonBots] = useState<readonly GryphonBot[]>([]);
   const [gryphonBotId, setGryphonBotId] = useState("");
   const [gryphonConnectionDialog, setGryphonConnectionDialog] = useState(false);
@@ -2530,7 +2492,6 @@ function SettingsView({ preferences, setPreferences, addNotice, onAnonymous }: {
   const [restoreError, setRestoreError] = useState("");
   const restoreInput = useRef<HTMLInputElement>(null);
   const [updates, setUpdates] = useState<UpdateStatus | undefined>();
-  const [events, setEvents] = useState<readonly AuditEventInfo[]>([]);
   const [draggingCard, setDraggingCard] = useState<SettingsCardName | undefined>();
   const [dropCard, setDropCard] = useState<SettingsCardName | undefined>();
   const [dropBuffer, setDropBuffer] = useState<{ readonly capacity?: NonNullable<DropSessionInfo["buffer"]>; readonly sessionTtlMs: number; readonly continuationTtlMs: number; readonly workers: number; readonly intervalMs: number; readonly maximumFileBytes: number } | undefined>();
@@ -2555,34 +2516,21 @@ function SettingsView({ preferences, setPreferences, addNotice, onAnonymous }: {
     catch { setKernel(undefined); }
   };
   const loadRecovery = async () => { try { setRecovery(await api.recoveryStatus()); } catch { setRecovery(undefined); } };
-  const loadNeptune = async () => { try { setNeptune(await api.neptuneAvailability()); } catch { setNeptune({ installed: false, linked: false, state: "unavailable" }); } };
+  const loadNeptune = async () => { try { setNeptune(await api.neptuneAvailability()); } catch { setNeptune(previous => ({ installed: null, linked: null, ...previous, state: "unavailable" })); } };
   const loadGryphon = useCallback(async () => {
     try {
       const raw: unknown = await api.gryphonStatus();
       if (typeof raw !== "object" || raw === null || !("connected" in raw) || typeof raw.connected !== "boolean" || !("bot" in raw) || !("binding" in raw) || !("version" in raw) || typeof raw.version !== "string" || (raw.connected && (typeof raw.bot !== "object" || raw.bot === null))) throw new Error("Invalid Gryphon status");
       const value = raw as GryphonStatus;
-      setGryphon(value);
+      setGryphon(value); setGryphonError("");
     }
-    catch { setGryphon(undefined); }
+    catch { setGryphonError("Gryphon is unavailable. Last verified registration is retained."); }
   }, []);
   const loadUpdates = async () => { try { setUpdates(await api.updateStatus()); } catch { setUpdates(undefined); } };
-  const loadEvents = async () => {
-    try {
-      const latest = await api.activity(undefined, 100);
-      setEvents((current) => {
-        const merged = new Map([...current, ...latest].map((item) => [item.id, item]));
-        return [...merged.values()].sort((left, right) => right.sequence - left.sequence).slice(0, 200);
-      });
-    } catch { /* The visible unavailable state remains honest. */ }
-  };
   const loadDropBuffer = async () => { try { setDropBuffer(await api.dropBuffer()); } catch { setDropBuffer(undefined); } };
   const loadStorage = async () => { try { setStorage(await api.storageStatus()); } catch { setStorage(undefined); } };
   useEffect(() => {
-    void Promise.all([loadKernel(), loadRecovery(), loadNeptune(), loadGryphon(), loadUpdates(), loadEvents(), loadDropBuffer(), loadStorage()]);
-    const timer = window.setInterval(() => { if (!document.hidden) void loadEvents(); }, 5_000);
-    const visible = () => { if (!document.hidden) void loadEvents(); };
-    document.addEventListener("visibilitychange", visible);
-    return () => { window.clearInterval(timer); document.removeEventListener("visibilitychange", visible); };
+    void Promise.all([loadKernel(), loadRecovery(), loadNeptune(), loadGryphon(), loadUpdates(), loadDropBuffer(), loadStorage()]);
   }, [loadGryphon]);
 
   const persistPreferences = async (candidate: Omit<OwnerPreferences, "updatedAt">, message: string) => {
@@ -2715,6 +2663,11 @@ function SettingsView({ preferences, setPreferences, addNotice, onAnonymous }: {
       await loadRecovery();
     }
   };
+  const openGryphonManagement = async () => {
+    try { const { url } = await api.gryphonManagement(); window.location.assign(url); }
+    catch (error) { addNotice("error", error instanceof Error ? error.message : "Management destination is unavailable"); }
+  };
+
   const openGryphonConnection = async () => {
     setPending(true);
     try {
@@ -2726,29 +2679,48 @@ function SettingsView({ preferences, setPreferences, addNotice, onAnonymous }: {
     catch { addNotice("error", "Gryphon bot list could not be loaded."); }
     finally { setPending(false); }
   };
-  const initializeNeptune = async (event: SyntheticEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    if (!/^[A-Za-z0-9_-]{32}$/.test(neptuneCode)) { addNotice("error", "Enter the 32-character setup code from Synchronization."); return; }
+  const initializeAgent = (component: "Neptune" | "Gryphon") => openAgentInitialization({
+    component, service: "saturn", description: "Initialize this scoped connection through the local Updater. Existing shared agents are reused.",
+    ...(component === "Neptune" ? { codeLabel: "One-time setup code", profile: "Required pipeline: recovery ZIP archive." } : {}),
+    initialize: input => component === "Neptune" ? api.initializeNeptune(input.enrollment_code || "", input.request_id) : api.initializeGryphon(input.request_id),
+    observe: id => agentRequest<InitializationJob>("/operator/updates/flow/jobs/" + encodeURIComponent(id || "")),
+    recover: async hint => {
+      if (hint?.id) return agentRequest<InitializationJob>("/operator/updates/flow/jobs/" + encodeURIComponent(hint.id));
+      const result = await agentRequest<{ jobs: (InitializationJob & { service?: string })[] }>("/operator/updates/flow/jobs");
+      return result.jobs.find(job => job.service === component.toLowerCase() + "-initialization" &&
+        (hint?.request_id ? job.request_id === hint.request_id : !["COMPLETED", "FAILED"].includes(job.state)));
+    },
+    verify: async () => {
+      if (component === "Neptune") {
+        const availability = await api.neptuneAvailability(); setNeptune(availability);
+        return { ready: availability.state === "linked" && availability.linked === true, message: "The scoped archive connection is not verified." };
+      }
+      const status = await api.gryphonStatus(); setGryphon(status); setGryphonError("");
+      return { ready: typeof status.connected === "boolean" };
+    },
+  });
+  const cancelGryphonChallenge = async () => {
+    try { await agentRequest("/operator/gryphon/link-challenge", { method: "DELETE" }); setGryphonChallenge(undefined); }
+    catch { addNotice("error", "Cancellation was not confirmed. The code remains valid until expiry."); }
+  };
+  const revokeGryphonBinding = async () => {
+    if (!await confirmAgentAction({ title: "Revoke Telegram binding", message: "This account will lose access to this service. The service function and shared bot remain connected. A new link code will be required.", confirmLabel: "Revoke binding" })) return;
     setPending(true);
-    try {
-      const job = await api.initializeNeptune(neptuneCode); setNeptuneCode("");
-      await waitForAgentJob(job, api.neptuneInitialization);
-      const availability = await api.neptuneAvailability(); setNeptune(availability);
-      if (!availability.linked) throw new Error("Neptune enrollment completed but its project health is unavailable.");
-      setNeptuneDialog(false);
-      addNotice("success", "Neptune is linked and ready.");
-    } catch (error) { addNotice("error", error instanceof Error ? error.message : "Neptune initialization could not be completed."); }
+    try { await agentRequest("/operator/gryphon/binding", { method: "DELETE" }); setGryphonChallenge(undefined); await loadGryphon(); addNotice("success", "Telegram binding revoked."); }
+    catch { addNotice("error", "Telegram binding revocation was not confirmed."); }
     finally { setPending(false); }
   };
   useEffect(() => {
-    const job = pendingAgentJob();
-    if (!job) return;
-    setPending(true);
-    void waitForAgentJob(job, api.neptuneInitialization)
-      .then(async () => { setNeptune(await api.neptuneAvailability()); })
-      .catch((error: unknown) => addNotice("error", error instanceof Error ? error.message : "Initialization status is unavailable."))
-      .finally(() => setPending(false));
-  }, [addNotice]);
+    const timer = setInterval(() => { void loadNeptune(); void loadGryphon(); }, 15000);
+    return () => clearInterval(timer);
+  }, [loadGryphon]);
+  useEffect(() => {
+    if (!gryphonChallenge) return;
+    if (gryphon?.binding) { setGryphonChallenge(undefined); return; }
+    const timer = setTimeout(() => { setGryphonChallenge(undefined); addNotice("info", "Telegram link code expired."); },
+      Math.max(0, Date.parse(gryphonChallenge.expiresAt) - Date.now()));
+    return () => clearTimeout(timer);
+  }, [gryphonChallenge, gryphon?.binding, addNotice]);
   const issueGryphonLink = async () => {
     setPending(true);
     try { setGryphonChallenge(await api.issueGryphonLink()); }
@@ -2763,6 +2735,7 @@ function SettingsView({ preferences, setPreferences, addNotice, onAnonymous }: {
     finally { setPending(false); }
   };
   const disconnectGryphon = async () => {
+    if (!await confirmAgentAction({ title: "Unlink service function", message: "Telegram commands and notifications for this service will stop and its Telegram binding will be removed. Other services remain connected.", confirmLabel: "Unlink function" })) return;
     setPending(true);
     try { await api.disconnectGryphon(); await loadGryphon(); addNotice("success", "Saturn function unlinked from Gryphon."); }
     catch { addNotice("error", "Saturn function could not be unlinked."); }
@@ -2831,17 +2804,33 @@ function SettingsView({ preferences, setPreferences, addNotice, onAnonymous }: {
       </div></details>
     </div>,
     backup: <div className="settings-groups backup-content">
-      <HelperRecoveryPanel enabled={updates?.updater.state === "ready"} />
       <section className="settings-group"><h3>System snapshot</h3><p>Logical snapshots contain authoritative state and personalization, but no plaintext passwords or service tokens.</p><button className="button settings-action" type="button" disabled={pending || !recovery?.exportEnabled} title={recovery?.reason} onClick={() => void createRecoverySnapshot()}>{pending ? "Creating snapshot…" : "Create and download snapshot"}</button></section>
       <section className="settings-group"><h3>Restore snapshot</h3><p>Restore validates the complete archive before replacement and rolls back if post-restore health fails.</p><button className="button settings-action" type="button" disabled={pending || !recovery?.restoreEnabled} title={recovery?.reason} onClick={openRestore}>Browse local snapshot archive</button></section>
-      <section className="settings-group"><h3>Automatic pipelines</h3><button className="button settings-action" type="button" onClick={() => openSaturnUpdates("neptune")}>Check Neptune for updates</button><p>Schedules, remote runs and Neptune fleet status are managed only from Synchronization.</p><StatusRow label="Local Neptune agent:" state={neptune?.linked ? "ready" : "unavailable"} detail={neptune?.linked ? "Linked to Saturn" : neptune?.installed ? "Detected · not linked" : "Not installed"} />{!neptune?.linked ? <button className="button settings-action" type="button" disabled={pending || updates?.updater.state !== "ready"} onClick={() => setNeptuneDialog(true)}>Initialize Neptune</button> : null}</section>
+      <section className="settings-group"><h3>Automatic backup to Saturn</h3><p>Neptune exports the same ZIP as the manual action and uploads it without changing its bytes.</p>
+        <StatusRow label="Local Neptune agent:" state={neptune?.state === "linked" ? "ready" : "unavailable"} detail={!neptune ? "Checking" : neptune.state === "linked" ? "Linked" : neptune.state === "unlinked" ? "Not linked" : neptune.state === "authorization_failed" ? "Authorization failed" : neptune.linked ? "Unavailable · last known linked" : "Unavailable · installation unknown"} />
+        <button className="button settings-action" onClick={() => initializeAgent("Neptune")}>Initialize</button>
+        <BackupPolicyPanel service="saturn" base="/api/v1/operator/neptune/policy" headers={policyHeaders} />
+        </section>
+      <section className="settings-group"><h3>Neptune version</h3><p>Current installed version: {neptune?.version ?? "Unavailable"}</p><button className="button settings-action" onClick={() => openSaturnUpdates("neptune")}>Check Neptune for updates</button>
+      </section>
+      <details><summary>Advanced helper recovery</summary><HelperRecoveryPanel enabled={updates?.updater.state === "ready"} /></details>
     </div>,
     gryphon: <div className="settings-groups bot-connection-groups">
-      <section className="settings-group"><h3>Gryphon bot binding</h3><p>Gryphon owns the Telegram connection, service receives only service-scoped commands.</p><StatusRow label="Local Gryphon agent:" state={gryphon === undefined ? "unavailable" : "ready"} detail={gryphon === undefined ? "Service Unavailable" : "Service Reachability"} />{gryphon?.connected === true && gryphon.bot !== null ? <p className="bot-connection-selected">Connected bot: <strong>{gryphon.bot.username === undefined ? gryphon.bot.alias : `@${gryphon.bot.username}`}</strong></p> : null}{gryphon?.connected === true && gryphon.binding === null ? <button className="button button--primary settings-action bot-connection-action" type="button" disabled={pending} onClick={() => void issueGryphonLink()}>{pending ? "Creating…" : "Initialize bot"}</button> : null}<button className="button settings-action bot-connection-action" type="button" disabled={pending || gryphon === undefined} onClick={() => void (gryphon?.connected === true ? disconnectGryphon() : openGryphonConnection())}>{pending ? "Working…" : gryphon?.connected === true ? "Unlink Saturn function" : "Link Saturn function"}</button>{gryphon?.binding !== null && gryphon?.binding !== undefined ? <p className="bot-connection-selected">Telegram account linked.</p> : null}</section>
-      <section className="settings-group"><h3>Gryphon version</h3>{gryphon === undefined ? <LocalAgentActions kind="gryphon" onComplete={loadGryphon} enabled={updates?.updater.state === "ready"} /> : null}<p>Current installed version: <strong>{gryphon?.version ?? "unavailable"}</strong></p><button className="button settings-action" type="button" disabled={pending || gryphon === undefined} onClick={() => openSaturnUpdates("gryphon")}>Check Gryphon for updates</button></section>
+      <section className="settings-group"><h3>Service connection</h3><p>Gryphon handles Telegram commands and notifications for this service.</p>
+        <StatusRow label="Local Gryphon agent:" state={gryphon && !gryphonError ? "ready" : "unavailable"} detail={gryphonError ? gryphon ? "Unavailable · last known registration retained" : "Unavailable · registration unknown" : gryphon ? "Reachable" : "Checking"} />
+        {gryphonError && <p role="alert">{gryphonError}</p>}
+        <button className="button settings-action" onClick={() => initializeAgent("Gryphon")}>Initialize</button>
+        <button className="button settings-action" disabled={!gryphon || Boolean(gryphonError) || pending} onClick={() => void (gryphon?.connected ? disconnectGryphon() : openGryphonConnection())}>{gryphon?.connected ? "Unlink service function" : "Link service function"}</button>
+        <button className="button settings-action" onClick={() => void openGryphonManagement()}>Open Gryphon management</button>
+        {gryphon?.bot && <p>Selected bot: <strong>{gryphon.bot.username ? "@" + gryphon.bot.username : gryphon.bot.alias}</strong></p>}
+      </section>
+      <section className="settings-group"><h3>Telegram account</h3><p>{gryphon?.binding ? "Telegram account linked." : "No Telegram account is linked to this service."}</p>
+        <button className="button settings-action" disabled={!gryphon?.connected || Boolean(gryphonError) || pending} onClick={() => void (gryphon?.binding ? revokeGryphonBinding() : issueGryphonLink())}>{gryphon?.binding ? "Revoke Telegram binding" : "Link Telegram account"}</button>
+      </section>
+      <section className="settings-group"><h3>Gryphon version</h3><p>Current installed version: <strong>{gryphon?.version ?? "unavailable"}</strong></p><button className="button settings-action" onClick={() => openSaturnUpdates("gryphon")}>Check Gryphon for updates</button></section>
     </div>,
     updates: <div className="settings-groups updates-content"><section className="settings-group update-pipeline-group"><h3>Update pipeline</h3><p>Release discovery comes from Kernel Register; replacement and rollback are performed by the local Updater.</p><p>Current installed version: <strong className="accent-text">v{updates?.installedVersion ?? "unknown"}</strong></p><div className="settings-status-stack"><StatusRow label="Local Updater agent:" state={updates === undefined ? "busy" : updates.updater.state} detail={updates === undefined ? "Checking" : updates.updater.state === "ready" ? "Service Reachability" : updates.updater.reason ?? "Service Unavailable"} /><StatusRow label="Kernel Register:" state={updates === undefined ? "busy" : updates.registry.state} detail={updates === undefined ? "Checking" : updates.registry.state === "ready" ? "Service Reachability" : updates.registry.reason ?? "Service Unavailable"} /></div><button className="button settings-action update-check-action" type="button" disabled={pending} onClick={() => openSaturnUpdates()}>Check for updates</button></section><section className="settings-group updater-version-group"><h3>Updater version</h3><p>Current installed version: {updates?.updater.version ?? "unavailable"}</p><button className="button settings-action" type="button" disabled={pending} onClick={() => openSaturnUpdates("updater")}>Check Updater for updates</button></section></div>,
-    logs: <div className="settings-groups"><section className="settings-group logs-group"><div className="logs-actions"><p>Compact ordered audit stream. The browser keeps at most 200 visible events.</p><a className="button" href="/api/v1/activity/export?limit=10000" download>Download archived logs</a></div><div className="log-table" role="log" aria-live="polite"><div className="log-row log-row--head"><span>TYPE</span><span>BODY</span><span>TIME</span></div>{events.length === 0 ? <p className="empty-state">No retained events are available.</p> : events.map((item) => <div className="log-row" key={item.id}><strong className={item.outcome === "success" ? "log-type--success" : "log-type--failure"}>/{item.outcome.toUpperCase()}</strong><span title={item.correlationId}>{item.action}{item.resourceId === undefined ? "" : ` · ${item.resourceId}`}</span><time dateTime={item.occurredAt}>{new Date(item.occurredAt).toLocaleString("ru-RU")}</time></div>)}</div><button className="button settings-action" type="button" disabled={events.length === 0} onClick={() => { const before = events.at(-1)?.sequence; if (before !== undefined) void api.activity(before, 100).then((older) => setEvents((current) => [...current, ...older].slice(0, 200))); }}>Load older</button></section></div>,
+    logs: <div className="settings-groups"><ServiceLogsPanel base="/api/v1/activity" beforeParam="before" download="/api/v1/activity/export?limit=10000" /></div>,
   };
 
   return <section className="workspace settings" aria-labelledby="settings-title">
@@ -2849,11 +2838,10 @@ function SettingsView({ preferences, setPreferences, addNotice, onAnonymous }: {
     <div className="card-grid card-grid--settings">
       {preferences.settingsOrder.map((id, index) => <UniversalCard ordinal={index + 1} title={SETTINGS_CARD_TITLES[id]} className={`settings-card settings-card--${id}${dropCard === id ? " universal-card--drop-target" : ""}`} draggable handleLabel={`Reorder ${id} settings card`} onHandleKeyDown={(event) => moveSettingsCardByKeyboard(event, id)} onDragStart={(event) => { setDraggingCard(id); event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", id); }} onDragOver={(event) => { if (draggingCard !== undefined && draggingCard !== id) { event.preventDefault(); setDropCard(id); } }} onDrop={(event) => { event.preventDefault(); if (draggingCard !== undefined) moveSettingsCard(draggingCard, id); setDraggingCard(undefined); setDropCard(undefined); }} onDragEnd={() => { setDraggingCard(undefined); setDropCard(undefined); }} key={id}>{cards[id]}</UniversalCard>)}
     </div>
-    {neptuneDialog ? <Dialog title="Initialize Neptune" description="Paste a one-time Linux pipeline code created in Synchronization. It is sent directly to the local Updater and is never stored by Saturn." onClose={() => { if (!pending) { setNeptuneDialog(false); setNeptuneCode(""); } }} dismissible={!pending}><form className="dialog-form" onSubmit={(event) => void initializeNeptune(event)}><label>Saturn setup code<input value={neptuneCode} minLength={32} maxLength={32} autoComplete="off" onChange={(event) => setNeptuneCode(event.target.value.trim())} required /></label><div className="dialog__actions"><button className="button" type="button" disabled={pending} onClick={() => { setNeptuneDialog(false); setNeptuneCode(""); }}>Cancel</button><button className="button button--primary" type="submit" disabled={pending || neptuneCode.length !== 32}>{pending ? "Starting…" : "Initialize"}</button></div></form></Dialog> : null}
-    {gryphonChallenge ? <Dialog title="Link Telegram account" description={`Send this command to ${gryphonChallenge.botUsername === undefined ? "the connected bot" : `@${gryphonChallenge.botUsername}`}. It is single-use and expires ${new Date(gryphonChallenge.expiresAt).toLocaleString()}.`} onClose={() => setGryphonChallenge(undefined)}><div className="dialog-form"><div className="one-time-code" role="status"><strong>{gryphonChallenge.command}</strong></div><div className="dialog__actions"><button className="button" type="button" onClick={() => void navigator.clipboard.writeText(gryphonChallenge.command).then(() => addNotice("success", "Command copied."))}>Copy command</button><button className="button button--primary" type="button" onClick={() => setGryphonChallenge(undefined)}>Done</button></div></div></Dialog> : null}
+    {gryphonChallenge ? <Dialog title="Link Telegram account" description={`Send this command to ${gryphonChallenge.botUsername === undefined ? "the connected bot" : `@${gryphonChallenge.botUsername}`}. It is single-use and expires ${new Date(gryphonChallenge.expiresAt).toLocaleString()}.`} onClose={() => void cancelGryphonChallenge()}><div className="dialog-form"><div className="one-time-code" role="status"><strong>{gryphonChallenge.command}</strong></div><div className="dialog__actions"><button className="button" type="button" onClick={() => void navigator.clipboard.writeText(gryphonChallenge.command).then(() => addNotice("success", "Command copied."))}>Copy command</button><button className="button button--primary" type="button" onClick={() => void cancelGryphonChallenge()}>Cancel link code</button></div></div></Dialog> : null}
     {accessKeyDialog ? <Dialog title="Change Access Key" description="Enter the current key, then the replacement twice. No field is preloaded." onClose={() => { setAccessKeyDialog(false); setAccessKeyChange({ currentAccessKey: "", newAccessKey: "", confirmation: "" }); }}><form className="dialog-form" onSubmit={(event) => void changeOwnerAccessKey(event)}><label>Current Access Key<input type="password" autoComplete="current-password" value={accessKeyChange.currentAccessKey} onChange={(event) => setAccessKeyChange({ ...accessKeyChange, currentAccessKey: event.target.value })} required /></label><label>New Access Key<input type="password" autoComplete="new-password" minLength={32} value={accessKeyChange.newAccessKey} onChange={(event) => setAccessKeyChange({ ...accessKeyChange, newAccessKey: event.target.value })} required /></label><label>Confirm new Access Key<input type="password" autoComplete="new-password" minLength={32} value={accessKeyChange.confirmation} onChange={(event) => setAccessKeyChange({ ...accessKeyChange, confirmation: event.target.value })} required /></label><div className="dialog__actions"><button className="button" type="button" onClick={() => { setAccessKeyDialog(false); setAccessKeyChange({ currentAccessKey: "", newAccessKey: "", confirmation: "" }); }}>Cancel</button><button className="button button--primary" type="submit" disabled={pending || accessKeyChange.newAccessKey.length < 32 || accessKeyChange.confirmation !== accessKeyChange.newAccessKey}>Change Access Key</button></div></form></Dialog> : null}
     {kernelTokenDialog ? <Dialog title="Change Kernel token" description="The replacement is write-only and activates only after authenticated validation." onClose={() => { setKernelTokenDialog(false); setKernelToken(""); }}><form className="dialog-form" onSubmit={(event) => void rotateKernelToken(event)}><label>Replacement Kernel token<input type="password" autoComplete="new-password" value={kernelToken} minLength={32} onChange={(event) => setKernelToken(event.target.value)} required /></label><div className="dialog__actions"><button className="button" type="button" onClick={() => { setKernelTokenDialog(false); setKernelToken(""); }}>Cancel</button><button className="button button--primary" type="submit" disabled={pending || kernelToken.length < 32}>Validate and rotate</button></div></form></Dialog> : null}
-    {gryphonConnectionDialog ? <Dialog title="Link Saturn function" description="Select a Telegram bot already connected through the Gryphon CLI." onClose={() => setGryphonConnectionDialog(false)} dismissible={!pending}><div className="bot-picker"><div className="bot-picker-list">{gryphonBots.length === 0 ? <p>No bots are connected. Run <code>sudo gryphon bot connect ALIAS</code> on the server first.</p> : gryphonBots.map((bot) => <label key={bot.id} className={bot.state === "ready" ? "" : "is-disabled"}><input type="radio" name="saturn-gryphon-bot" value={bot.id} checked={gryphonBotId === bot.id} disabled={bot.state !== "ready" || pending} onChange={() => setGryphonBotId(bot.id)} /><span><strong>{bot.username === undefined ? bot.alias : `@${bot.username}`}</strong><small>{bot.alias} · {bot.state}</small></span></label>)}</div><div className="dialog__actions"><button className="button" type="button" disabled={pending} onClick={() => setGryphonConnectionDialog(false)}>Cancel</button><button className="button button--primary" type="button" disabled={pending || gryphonBotId === ""} onClick={() => void connectGryphon()}>{pending ? "Linking…" : "Link function"}</button></div></div></Dialog> : null}
+    {gryphonConnectionDialog ? <Dialog title="Link service function" description="Select a bot available to this service in the shared gateway." onClose={() => setGryphonConnectionDialog(false)} dismissible={!pending}><div className="bot-picker"><button className="button" onClick={() => void openGryphonManagement()}>Open Gryphon management</button><div className="bot-picker-list">{gryphonBots.length === 0 ? <p>No ready bots are available. Open authorized gateway management to register a bot.</p> : gryphonBots.map((bot) => <label key={bot.id} className={bot.state === "ready" ? "" : "is-disabled"}><input type="radio" name="saturn-gryphon-bot" value={bot.id} checked={gryphonBotId === bot.id} disabled={bot.state !== "ready" || pending} onChange={() => setGryphonBotId(bot.id)} /><span><strong>{bot.username === undefined ? bot.alias : `@${bot.username}`}</strong><small>{bot.alias} · {bot.state}</small></span></label>)}</div><div className="dialog__actions"><button className="button" type="button" disabled={pending} onClick={() => setGryphonConnectionDialog(false)}>Cancel</button><button className="button button--primary" type="button" disabled={pending || gryphonBotId === ""} onClick={() => void connectGryphon()}>{pending ? "Linking…" : "Link function"}</button></div></div></Dialog> : null}
     {storageDialog ? <Dialog title="Configure storage" description="Connect an independent SFTP file set. No files are copied from or deleted in the current storage." dismissible={false} onClose={() => undefined}>
       <form className="dialog-form storage-dialog" onSubmit={(event) => { event.preventDefault(); void testStorage(); }} autoComplete="off">
         <div className="storage-dialog__grid">

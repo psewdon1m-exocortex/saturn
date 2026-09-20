@@ -10,6 +10,7 @@ import type {
 } from "./types.js";
 
 interface ServiceRow {
+  reader_device_id: string | null;
   id: string; slug: string; namespace_slug: string; deployment_id: string; mirror_root: "volt" | "mastermind" | null; mirror_device_id: string | null; name: string; token_hash: string; previous_token_hash: string | null;
   previous_token_expires_at: Date | null; state: BackupServiceRecord["state"]; require_encryption: boolean;
   mtls_cert_fingerprint: string | null; max_backup_bytes: string; daily_quota_bytes: string; stored_quota_bytes: string;
@@ -31,6 +32,7 @@ function service(row: ServiceRow): BackupServiceRecord {
   return {
     id: row.id, slug: row.slug, namespaceSlug: row.namespace_slug, deploymentId: row.deployment_id,
     ...(row.mirror_root === null ? {} : { mirrorRoot: row.mirror_root }), ...(row.mirror_device_id === null ? {} : { mirrorDeviceId: row.mirror_device_id }),
+    ...(row.reader_device_id === null ? {} : { readerDeviceId: row.reader_device_id }),
     name: row.name, tokenHash: row.token_hash,
     ...(row.previous_token_hash === null ? {} : { previousTokenHash: row.previous_token_hash }),
     ...(row.previous_token_expires_at === null ? {} : { previousTokenExpiresAt: row.previous_token_expires_at }),
@@ -158,8 +160,8 @@ export class PostgresBackupRepository implements BackupRepository {
     const services = await sql<ServiceRow[]>`SELECT * FROM backup_services WHERE id = ${id} AND state = 'active' LIMIT 1`;
     return services[0] === undefined ? undefined : service(services[0]);
   }); }
-  attachMirrorDevice(serviceId: string, deviceId: string, now: Date): Promise<BackupServiceRecord> { return this.database.withSql(async (sql) => {
-    const rows = await sql<ServiceRow[]>`UPDATE backup_services SET mirror_device_id = ${deviceId}, updated_at = ${now} WHERE id = ${serviceId} AND state = 'active' AND mirror_root IS NOT NULL RETURNING *`;
+  attachMirrorDevice(serviceId: string, deviceId: string, now: Date, readerDeviceId?: string): Promise<BackupServiceRecord> { return this.database.withSql(async (sql) => {
+    const rows = await sql<ServiceRow[]>`UPDATE backup_services SET mirror_device_id = ${deviceId}, reader_device_id = ${readerDeviceId ?? null}, updated_at = ${now} WHERE id = ${serviceId} AND state = 'active' AND mirror_root IS NOT NULL RETURNING *`;
     if (rows[0] === undefined) throw new Error("Backup mirror identity is unavailable");
     return service(rows[0]);
   }); }
