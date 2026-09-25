@@ -116,12 +116,9 @@ export class NeptuneFleetOwnerController {
   async command(@Param("serviceId") serviceId: string, @Body() body: unknown) {
     const input = commandSchema.parse(body);
     if (input.kind !== "agent.update") throw new GoneException("Open Backup in the owning service to start its backup");
-    if (input.kind === "agent.update") {
-      const checked = await this.checkUpdate(serviceId);
-      if (checked.update_available !== true || checked.available_version !== input.version)
-        throw new Error("Requested Neptune version is not the current upgrade candidate");
-    }
-    return this.fleet.enqueue(serviceId, input.kind,
-      input.kind === "agent.update" ? { version: input.version } : {});
+    const checked = await this.checkUpdate(serviceId);
+    if (checked.update_available !== true || checked.available_version !== input.version)
+      throw new Error("Requested Neptune version is not the current upgrade candidate");
+    return this.fleet.enqueue(serviceId, input.kind, { version: input.version });
   }
 }

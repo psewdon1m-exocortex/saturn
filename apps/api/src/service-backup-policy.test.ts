@@ -30,7 +30,8 @@ it("binds every agent policy operation to the authenticated producer", async () 
     run: vi.fn().mockResolvedValue({ id: requestId, state: "pending" }),
     jobs: vi.fn().mockResolvedValue([]),
   };
-  const fleet = { authenticate: vi.fn().mockResolvedValue(serviceId), policy } as unknown as NeptuneFleetService;
+  const authenticate = vi.fn().mockResolvedValue(serviceId);
+  const fleet = { authenticate, policy } as unknown as NeptuneFleetService;
   const controller = new NeptuneAgentController(fleet);
   const authorization = "Bearer producer-fixture";
   await controller.policy(authorization);
@@ -38,7 +39,7 @@ it("binds every agent policy operation to the authenticated producer", async () 
     intervalHours: 24, expectedRevision: 4, requestId });
   await controller.run(authorization, { pipeline: "archive", requestId });
   await controller.runs(authorization);
-  expect(fleet.authenticate).toHaveBeenCalledTimes(4);
+  expect(authenticate).toHaveBeenCalledTimes(4);
   expect(policy.read).toHaveBeenCalledWith(serviceId);
   expect(policy.mutate).toHaveBeenCalledWith(serviceId, expect.objectContaining({ requestId }));
   expect(policy.run).toHaveBeenCalledWith(serviceId, { pipeline: "archive", requestId });
@@ -48,8 +49,13 @@ it("binds every agent policy operation to the authenticated producer", async () 
 describe.skipIf(!process.env.POLICY_TEST_DATABASE_URL)("service-owned policy on PostgreSQL", () => {
   let db: Database, policies: ServiceBackupPolicy;
   const serviceId = randomUUID(), otherId = randomUUID();
+  const databaseUrl = () => {
+    const url = process.env.POLICY_TEST_DATABASE_URL;
+    if (!url) throw new Error("POLICY_TEST_DATABASE_URL is required for PostgreSQL policy tests");
+    return url;
+  };
   beforeAll(async () => {
-    const url = process.env.POLICY_TEST_DATABASE_URL!;
+    const url = databaseUrl();
     await migrate(url, fileURLToPath(new URL("../../../packages/database/migrations", import.meta.url)));
     db = new Database(url);
     policies = new ServiceBackupPolicy(db);
@@ -67,7 +73,6 @@ describe.skipIf(!process.env.POLICY_TEST_DATABASE_URL)("service-owned policy on 
     }
   });
   afterAll(async () => {
-    if (!db) return;
     await db.withSql(sql => sql`DELETE FROM backup_services WHERE id IN (${serviceId},${otherId})`);
     await db.close();
   });
@@ -81,11 +86,13 @@ describe.skipIf(!process.env.POLICY_TEST_DATABASE_URL)("service-owned policy on 
     expect(results.filter(result => result.status === "fulfilled")).toHaveLength(1);
     expect(results.filter(result => result.status === "rejected")).toHaveLength(1);
     const winner = results.findIndex(result => result.status === "fulfilled");
+    const winningRequest = requests[winner];
+    if (!winningRequest) throw new Error("Exactly one policy mutation must succeed");
     const committed = await policies.read(serviceId);
     expect(committed.revision).toBe(before.revision + 1);
     expect(committed.mirror?.intervalMinutes).toBe(5);
-    expect(await policies.mutate(serviceId, requests[winner]!)).toMatchObject({ revision: committed.revision });
-    await expect(policies.mutate(serviceId, { ...requests[winner]!, intervalHours: 10 })).rejects.toThrow("another policy change");
+    expect(await policies.mutate(serviceId, winningRequest)).toMatchObject({ revision: committed.revision });
+    await expect(policies.mutate(serviceId, { ...winningRequest, intervalHours: 10 })).rejects.toThrow("another policy change");
     expect((await policies.read(otherId)).revision).toBe(12);
   });
 
@@ -110,7 +117,7 @@ describe.skipIf(!process.env.POLICY_TEST_DATABASE_URL)("service-owned policy on 
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), "saturn-policy-startup-"));
     const secret = path.join(directory, "synthetic.token");
     await fs.writeFile(secret, "synthetic-fixture-only");
-    const config = loadEnvironment({ NODE_ENV: "test", PUBLIC_ORIGIN: "http://localhost:5173", DATABASE_URL: process.env.POLICY_TEST_DATABASE_URL!,
+    const config = loadEnvironment({ NODE_ENV: "test", PUBLIC_ORIGIN: "http://localhost:5173", DATABASE_URL: databaseUrl(),
       OWNER_BOOTSTRAP_TOKEN_FILE: secret, AUTH_PEPPER_FILE: secret, DROP_PEPPER_FILE: secret, SHARE_PEPPER_FILE: secret,
       DEVICE_PEPPER_FILE: secret, BACKUP_PEPPER_FILE: secret, LABORATORY_PEPPER_FILE: secret,
       STORAGE_HOST: "localhost", STORAGE_USER: "vault", STORAGE_ROOT: "gateway", STORAGE_HOST_FINGERPRINT: `SHA256:${"A".repeat(43)}`,

@@ -25,8 +25,16 @@ const config: SaturnConfig["storage"] = {
 
 async function collect(stream: Readable): Promise<Buffer> {
   const chunks: Buffer[] = [];
-  for await (const chunk of stream) chunks.push(Buffer.from(chunk));
+  for await (const chunk of stream as AsyncIterable<unknown>) {
+    if (!Buffer.isBuffer(chunk)) throw new Error("SFTP fixture emitted a non-buffer chunk");
+    chunks.push(chunk);
+  }
   return Buffer.concat(chunks);
+}
+
+function reader(): Readable {
+  if (!fixture.reader) throw new Error("SFTP fixture reader is not initialized");
+  return fixture.reader;
 }
 
 beforeEach(() => {
@@ -37,7 +45,7 @@ afterEach(() => { fixture.reader?.destroy(); vi.useRealTimers(); });
 
 describe("SFTP read lifecycle", () => {
   it("retains bytes supplied before the HTTP consumer attaches and releases once", async () => {
-    const source = fixture.reader!;
+    const source = reader();
     source.push(Buffer.from("before open "));
     const stream = await new SftpStorageAdapter(config).openRead("note.md");
     await tick();
@@ -51,17 +59,17 @@ describe("SFTP read lifecycle", () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     const stream = await new SftpStorageAdapter(config).openRead("note.md");
     const result = expect(collect(stream)).rejects.toThrow("SFTP read idle timeout");
-    fixture.reader!.push(Buffer.from("partial")); await tick();
+    reader().push(Buffer.from("partial")); await tick();
     await vi.advanceTimersByTimeAsync(1001);
     await result; await tick();
-    expect(fixture.reader!.destroyed).toBe(true);
+    expect(reader().destroyed).toBe(true);
     expect(fixture.release).toHaveBeenCalledExactlyOnceWith(true);
   });
 
   it("propagates HTTP cancellation to the remote handle without leaking its lease", async () => {
     const stream = await new SftpStorageAdapter(config).openRead("note.md");
     stream.destroy(); await tick(); await tick();
-    expect(fixture.reader!.destroyed).toBe(true);
+    expect(reader().destroyed).toBe(true);
     expect(fixture.release).toHaveBeenCalledExactlyOnceWith(true);
   });
 
@@ -70,10 +78,10 @@ describe("SFTP read lifecycle", () => {
     const stream = await new SftpStorageAdapter(config).openRead("note.md");
     const completed = collect(stream);
     for (let i = 0; i < 4; i++) {
-      fixture.reader!.push(Buffer.from(String(i))); await tick();
+      reader().push(Buffer.from(String(i))); await tick();
       await vi.advanceTimersByTimeAsync(600);
     }
-    fixture.reader!.push(null);
+    reader().push(null);
     expect((await completed).toString()).toBe("0123");
     await tick();
     expect(fixture.release).toHaveBeenCalledExactlyOnceWith(false);

@@ -70,7 +70,7 @@ function publicAgent(row: AgentRow) {
     serviceId: row.service_id,
     desired: {
       revision: Number(row.desired_revision),
-      paused: row.policy_paused ?? false,
+      paused: row.policy_paused,
       archiveEnabled: row.archive_enabled,
       archiveIntervalHours: row.archive_interval_hours,
       mirrorEnabled: row.mirror_enabled,

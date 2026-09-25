@@ -38,7 +38,7 @@ export default tseslint.config(
     },
   },
   {
-    files: ["apps/web/src/update-overlay.js"],
+    files: ["apps/api/vitest.config.ts", "apps/web/src/*.js"],
     extends: [tseslint.configs.disableTypeChecked],
   },
 );

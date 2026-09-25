@@ -8,4 +8,4 @@ Restoring Saturn's control-plane state marks recovered policies paused and advan
 
 Migration `0038_neptune_resource_reader` adds the distinct reader identity used by full archive/mirror/reader enrollment. Reader requests are bounded and scoped; replacement or revocation invalidates the previous reader. Keep this migration after the existing share-capability and policy migrations; do not reuse their numbers.
 
-Upgrade compatible Neptune and Updater builds before enabling this interface. Apply the Saturn release, then the application releases that expose their own policy controls. Qualify the whole signed tuple and verify existing registrations/next-run values; do not replace them with example values during installation.
+Apply the Saturn release before upgrading Neptune to a build that advertises `policy_protocol: 1`; the new agent relays policy requests to Saturn. Upgrade the application release with protocol-aware policy controls before enabling the editor. Qualify the whole signed tuple, including Updater, and verify existing registrations/next-run values; do not replace them with example values during installation.

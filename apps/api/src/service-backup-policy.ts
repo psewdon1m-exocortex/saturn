@@ -8,19 +8,21 @@ const archiveIntent = z.object({ enabled: z.boolean(), intervalHours: z.number()
 const mirrorIntent = z.object({ enabled: z.boolean(), intervalMinutes: z.number().int().min(1).max(10080) }).strict();
 const base = { expectedRevision: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER), requestId: z.uuid() };
 export const policyMutationSchema = z.discriminatedUnion("kind", [
-  z.object({ ...base, kind: z.literal("schedule"), pipeline, enabled: z.boolean(), intervalHours: z.number().finite().min(1 / 60).max(8760) }).strict(),
+  z.object({ ...base, kind: z.literal("schedule"), pipeline, enabled: z.boolean(), intervalHours: z.number().min(1 / 60).max(8760) }).strict(),
   z.object({ ...base, kind: z.literal("restore"), archive: archiveIntent, mirror: mirrorIntent.nullable() }).strict(),
   z.object({ ...base, kind: z.literal("resume") }).strict(),
 ]);
 export type PolicyMutation = z.infer<typeof policyMutationSchema>;
 export const policyRunSchema = z.object({ requestId: z.uuid(), pipeline }).strict();
 
+type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
+
 interface PolicyRow {
   service_id: string; desired_revision: string; applied_revision: string;
   archive_enabled: boolean; archive_interval_hours: number;
   mirror_enabled: boolean; mirror_interval_minutes: number; policy_paused: boolean;
   namespace_slug: string; deployment_id: string; mirror_root: string | null;
-  archive_status: Record<string, unknown>; mirror_status: Record<string, unknown>;
+  archive_status: Record<string, JsonValue>; mirror_status: Record<string, JsonValue>;
   agent_version: string | null; last_seen_at: Date | null;
 }
 
@@ -106,7 +108,7 @@ export class ServiceBackupPolicy {
       row.desired_revision = String(Number(row.desired_revision) + 1);
       const result = view(row);
       await sql`INSERT INTO neptune_policy_operations(service_id,request_id,request_digest,result)
-        VALUES(${serviceId},${input.requestId},${digest},${sql.json(result as never)})`;
+        VALUES(${serviceId},${input.requestId},${digest},${sql.json(result)})`;
       return result;
     });
   }
@@ -131,7 +133,7 @@ export class ServiceBackupPolicy {
         WHERE service_id=${serviceId} AND kind=${kind} AND state='pending' AND created_at>now()-interval '7 days'`;
       if (active.length) throw new ConflictException("A run is already pending; observe the existing run");
       await sql`INSERT INTO neptune_agent_commands(id,service_id,kind,payload,created_at)
-        VALUES(${input.requestId},${serviceId},${kind},${sql.json({ source: "service" } as never)},now())`;
+        VALUES(${input.requestId},${serviceId},${kind},${sql.json({ source: "service" })},now())`;
       return { id: input.requestId, pipeline: input.pipeline, state: "pending", error: null };
     });
   }
