@@ -888,7 +888,7 @@ describe("owner Saturn UI", () => {
       if (url.endsWith("/operator/kernel")) return json({ configured: false, reachability: "unavailable", revision: 1 });
       if (url.endsWith("/operator/recovery")) return json({ exportEnabled: false, restoreEnabled: false, reason: "not configured" });
       if (url.endsWith("/operator/updates")) return json({ installedVersion: "0.1.0", updater: { state: "unavailable" }, registry: { state: "unavailable" }, discoveryEnabled: false });
-      if (url.endsWith("/operator/gryphon/status")) return json({ schema: "exocortex.gryphon.service-status.v1", version: "1.2.3", serviceId: "saturn", state: gryphonConnected ? "enabled" : "unlinked", connected: gryphonConnected, commandPrefix: gryphonConnected ? "saturn" : null, bot: gryphonConnected ? { id: "bot-1", alias: "main", username: "saturn_bot", state: "ready" } : null, binding: null });
+      if (url.endsWith("/operator/gryphon/status")) return json({ schema: "exocortex.gryphon.service-status.v1", version: "1.2.3", serviceId: "saturn", state: gryphonConnected ? "enabled" : "unlinked", connected: gryphonConnected, commandPrefix: gryphonConnected ? "saturn" : null, bot: gryphonConnected ? { id: "bot-1", alias: "main", username: "saturn_bot", state: "ready" } : null, binding: gryphonConnected ? { telegramUserId: "123", chatId: "123", linkedAt: now } : null });
       if (url.endsWith("/operator/gryphon/bots")) return json({ schema: "exocortex.gryphon.service-bots.v1", serviceId: "saturn", bots: [{ id: "bot-1", alias: "main", username: "saturn_bot", state: "ready", selected: gryphonConnected }] });
       if (url.endsWith("/operator/gryphon/connection") && init?.method === "PUT") { gryphonConnected = true; return json({ connected: true }); }
       if (url.endsWith("/operator/gryphon/connection") && init?.method === "DELETE") { gryphonConnected = false; return json({ disconnected: true }); }
@@ -906,25 +906,22 @@ describe("owner Saturn UI", () => {
 
     expect(await screen.findByRole("heading", { name: "settings" })).toBeTruthy();
     for (const title of ["Appearance", "Security", "Backup", "Gryphon Connection", "Updates", "Logs"]) expect(screen.getByRole("heading", { name: title })).toBeTruthy();
-    const linkFunction = screen.getByRole("button", { name: "Link service function" });
+    const linkFunction = screen.getByRole("button", { name: "Link Gryphon function" });
     await waitFor(() => expect(linkFunction).toHaveProperty("disabled", false));
     fireEvent.click(linkFunction);
-    const gryphonDialog = within(await screen.findByRole("dialog", { name: "Link service function" }));
-    fireEvent.click(gryphonDialog.getByRole("button", { name: "Link function" }));
+    const gryphonDialog = within(await screen.findByRole("dialog", { name: "Gryphon Connection" }));
+    fireEvent.click(gryphonDialog.getByRole("button", { name: "@saturn_bot" }));
     await waitFor(() => {
       const request = fetchMock.mock.calls.find((call) => requestUrl(call[0]).endsWith("/operator/gryphon/connection") && call[1]?.method === "PUT");
       expect(jsonRequestBody(request?.[1])).toEqual({ botId: "bot-1" });
     });
-    expect(await screen.findByRole("button", { name: "Unlink service function" })).toBeTruthy();
-    const gryphonCheck = screen.getByRole("button", { name: "Check Gryphon for updates" });
-    await waitFor(() => expect(gryphonCheck).toHaveProperty("disabled", false));
-    fireEvent.click(gryphonCheck);
-    fireEvent.click(await screen.findByRole("button", { name: "Install 1.2.4" }));
-    await waitFor(() => {
-      const request = fetchMock.mock.calls.find((call) => requestUrl(call[0]).endsWith("/operator/updates/flow/install/gryphon"));
-      expect(jsonRequestBody(request?.[1])).toMatchObject({ version: "1.2.4" });
-      expect(screen.queryByText("Create backup and install")).toBeNull();
-    });
+    expect(await screen.findByRole("button", { name: "Change Gryphon function" })).toBeTruthy();
+    expect(document.querySelector(".bot-connection-selected")?.textContent).toBe("Applied connection: main");
+    expect(screen.queryByRole("button", { name: "Check Gryphon for updates" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Link Telegram account" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Change Gryphon function" }));
+    expect(within(await screen.findByRole("dialog", { name: "Gryphon Connection" })).getByRole("button", { name: "Unlink all adapters" })).toBeTruthy();
+    expect(fetchMock.mock.calls.some((call) => requestUrl(call[0]).endsWith("/operator/updates/flow/install/gryphon"))).toBe(false);
     await waitFor(() => {
       const request = fetchMock.mock.calls.find((call) => requestUrl(call[0]).endsWith("/auth/preferences") && call[1]?.method !== "PUT");
       expect(request).toBeTruthy();

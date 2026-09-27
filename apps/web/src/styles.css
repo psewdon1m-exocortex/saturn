@@ -864,24 +864,29 @@ button.share-status--active:active { transform: scale(.985); }
 .sidebar-mode-fieldset input { width: 20px; height: 20px; min-height: 20px; padding: 0; accent-color: var(--accent); }
 .settings-action { width: min(326px, 100%); margin-top: 20px; }
 .settings-card--gryphon .universal-card__body { padding-top: 22px; }
-.bot-connection-groups { gap: 50px; }
-.bot-connection-groups .settings-group { display: grid; gap: 8px; }
-.bot-connection-groups .settings-group h3 { margin-bottom: 0; }
-.bot-connection-groups .settings-group:last-child .settings-action { margin-top: 0; }
-.bot-connection-groups .settings-group:first-child .status-row { margin-top: 18px; }
-.bot-connection-groups .settings-group:first-child .semantic-status i { width: 18px; height: 18px; flex-basis: 18px; }
-.bot-connection-action { margin-top: 24px; }
-.bot-connection-selected { margin-top: 4px !important; color: var(--white-80) !important; }
-.bot-connection-selected strong { color: var(--white); }
-.bot-picker { display: grid; gap: 20px; padding-top: 20px; }
-.bot-picker-list { display: grid; border: 1px solid var(--line-inner); }
-.bot-picker-list > label { min-height: 56px; display: flex; align-items: center; gap: 12px; padding: 9px 12px; border-bottom: 1px solid var(--line-inner); cursor: pointer; }
-.bot-picker-list > label:last-child { border-bottom: 0; }
-.bot-picker-list > label.is-disabled { opacity: .5; cursor: not-allowed; }
-.bot-picker-list input { width: 18px; height: 18px; min-height: 18px; padding: 0; accent-color: var(--accent); }
-.bot-picker-list label > span { display: grid; gap: 3px; }
-.bot-picker-list small { color: var(--white-80); }
-.bot-picker-list > p { margin: 0; padding: 16px; color: var(--white-80); }
+.bot-connection-groups .settings-group { display: block; }
+.bot-connection-groups .settings-group h3 { margin-bottom: 8px; }
+.gryphon-status-rows { display: grid; gap: 10px; margin-top: 28px; }
+.gryphon-status-rows .semantic-status i { width: 18px; height: 18px; flex-basis: 18px; }
+.bot-connection-selected { margin-top: 30px !important; color: var(--white-80) !important; }
+.bot-connection-selected strong { color: var(--white); font-weight: 400; }
+.bot-connection-action { margin-top: 8px; }
+.dialog.gryphon-choice-dialog { width: min(760px, 100%); min-height: min(710px, calc(100vh - 36px)); padding: 0; display: flex; flex-direction: column; }
+.gryphon-choice-dialog .dialog__head { min-height: 55px; align-items: center; padding: 7px 8px 7px 20px; }
+.gryphon-choice-dialog .dialog__head h2 { font-family: Consolas, "Liberation Mono", monospace; font-size: 24px; }
+.gryphon-choice-intro { margin: 24px 20px 20px; color: var(--white-80); }
+.gryphon-choice-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; flex: 1; min-height: 0; padding: 0 20px; }
+.gryphon-choice-list { display: grid; align-content: start; gap: 22px; }
+.gryphon-choice-list > p { margin: 0; color: var(--white-80); }
+.gryphon-choice { min-height: 52px; display: flex; align-items: center; gap: 14px; width: 100%; padding: 10px 15px; text-align: left; color: var(--white-80); border: 1px solid var(--line-inner); background: var(--black); cursor: pointer; }
+.gryphon-choice.is-selected { border-color: var(--accent); color: var(--accent); }
+.gryphon-choice:disabled { opacity: .55; cursor: not-allowed; }
+.gryphon-choice-check { width: 20px; height: 20px; flex: 0 0 20px; border: 1px solid var(--line-inner); }
+.gryphon-choice.is-selected .gryphon-choice-check { border: 4px double var(--white); background: var(--white); box-shadow: inset 0 0 0 4px var(--black); }
+.gryphon-adapter-config { display: grid; align-content: start; gap: 10px; min-height: 460px; padding: 14px 16px; border: 1px solid var(--line-inner); overflow-wrap: anywhere; }
+.gryphon-adapter-config strong { margin-bottom: 20px; }
+.gryphon-unlink-action { margin: 16px 20px 20px; width: calc(100% - 40px); color: var(--danger); border-color: var(--danger); }
+@media (max-width: 620px) { .gryphon-choice-layout { grid-template-columns: 1fr; } .gryphon-adapter-config { min-height: 180px; } .dialog.gryphon-choice-dialog { min-height: 0; } }
 .reauth-form { display: grid; grid-template-columns: minmax(220px, 1fr) auto; align-items: end; gap: 10px; max-width: 760px; }
 .upload-limits-form { display: grid; grid-template-columns: minmax(180px, 1fr) minmax(220px, 1fr) auto; align-items: end; gap: 12px; max-width: 900px; margin-top: 18px; }
 .trash-retention-form { margin-top: 18px; grid-template-columns: minmax(220px, 326px) auto; }

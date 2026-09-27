@@ -183,15 +183,13 @@ the active catalog for that independent target and migrates no file bytes. See
 
 Saturn does not connect to Telegram directly. Gryphon owns bot tokens and
 webhooks, then calls Saturn's authenticated `POST /internal/gryphon/command`
-adapter. Connect bot tokens with `sudo gryphon bot connect ALIAS`; **Link Saturn function**
-in the Bot connection Settings card selects one of those bots through the
+adapter. Register and pair a bot with one `/link CODE` through `sudo updater tui`; **Link Gryphon function**
+in the Gryphon Connection Settings card selects one of the paired bots through the
 service-scoped `GRYPHON_SOCKET_PATH`. The installer provisions
 `/etc/gryphon/clients/saturn.token`; Saturn never receives a bot token. When the
-function is connected but no Telegram user is bound, **Initialize bot** creates
-the one-time `/link CODE` challenge directly in Settings; `gryphon link issue
-saturn` remains the equivalent CLI fallback.
-The same Settings card can ask the privileged Updater to check or install a
-verified Gryphon Linux release.
+function is connected, Gryphon grants its paired Telegram account access to Saturn.
+If that service binding is revoked, selecting the paired bot again restores it without another code.
+Install and update the shared Gryphon instance through `sudo updater tui` on the host.
 After linking, `/drop` creates a one-time Drop Point code immediately;
 `/drop_status` and `/drop_revoke` inspect or revoke access.
 

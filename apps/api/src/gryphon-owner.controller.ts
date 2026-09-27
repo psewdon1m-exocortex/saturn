@@ -1,5 +1,5 @@
 import fs from "node:fs";
-import { Body, ConflictException, Controller, Delete, Get, Inject, NotFoundException, Post, Put, UseFilters, UseGuards } from "@nestjs/common";
+import { Body, ConflictException, Controller, Delete, ForbiddenException, Get, Inject, NotFoundException, Post, Put, UseFilters, UseGuards } from "@nestjs/common";
 import type { OnApplicationBootstrap, OnApplicationShutdown } from "@nestjs/common";
 import type { SaturnConfig } from "@saturn/config";
 import type { Database } from "@saturn/database";
@@ -7,11 +7,10 @@ import { SATURN_COMMAND_CATALOG } from "@saturn/drop";
 import { z } from "zod";
 import { APP_CONFIG, DATABASE } from "./tokens.js";
 import { registeredOrigin } from "./kernel-discovery.js";
-import { updater, unixJson } from "./neptune.controller.js";
+import { unixJson } from "./neptune.controller.js";
 import { OwnerTokenGuard } from "./owner-token.guard.js";
 import { SaturnApiExceptionFilter } from "./saturn-api-exception.filter.js";
 
-const installSchema = z.object({ version: z.string().regex(/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/) }).strict();
 const statusSchema = z.object({
   schema: z.literal("exocortex.gryphon.service-status.v1"),
   version: z.string().min(1),
@@ -29,9 +28,6 @@ const botsSchema = z.object({
   bots: z.array(z.object({ id: z.string(), alias: z.string(), username: z.string().optional(), state: z.string(), selected: z.boolean() })),
 });
 const connectionSchema = z.object({ botId: z.string().min(1).max(200) }).strict();
-const challengeSchema = z.object({
-  code: z.string().min(1), expiresAt: z.iso.datetime(), command: z.string().min(1), botUsername: z.string().optional(),
-});
 const catalogSchema = z.object({
   schema: z.literal("exocortex.telegram.command-catalog.v1"),
   serviceId: z.literal("saturn"),
@@ -69,10 +65,7 @@ export class GryphonOwnerController implements OnApplicationBootstrap, OnApplica
   }
 
   @Post("initialize")
-  initialize(@Body() body: unknown) {
-    const input = z.object({ request_id: z.uuid() }).strict().parse(body);
-    return updater("/v1/lifecycle/gryphon-initialization", { head_id: process.env.UPDATER_HEAD_ID?.trim() || "saturn", request_id: input.request_id });
-  }
+  initialize() { throw new ForbiddenException("Manage the shared Gryphon gateway with sudo updater tui"); }
 
   private request(method: string, route: string, body?: JsonObject) {
     const tokenFile = this.config.gryphon.serviceTokenFile;
@@ -83,7 +76,7 @@ export class GryphonOwnerController implements OnApplicationBootstrap, OnApplica
 
   @Get("status") async status() { return statusSchema.parse(await this.request("GET", "/v1/service")); }
 
-  @Get("management") async management() { return { url: await registeredOrigin(this.database, this.config, "gryphon", true)() }; }
+  @Get("management") management() { throw new ForbiddenException("Manage bots with sudo updater tui"); }
 
   @Get("bots") async bots() { return botsSchema.parse(await this.request("GET", "/v1/service/bots")); }
 
@@ -101,7 +94,9 @@ export class GryphonOwnerController implements OnApplicationBootstrap, OnApplica
   @Delete("connection") disconnect() { return this.request("DELETE", "/v1/service/connection"); }
 
   @Post("link-challenge")
-  async linkChallenge() { return challengeSchema.parse(await this.request("POST", "/v1/service/link-challenges")); }
+  linkChallenge() { throw new ForbiddenException("Bot pairing is managed with sudo updater tui"); }
+
+  @Put("binding") attachOwner() { return this.request("PUT", "/v1/service/binding"); }
 
   @Delete("link-challenge")
   cancelChallenge() { return this.request("DELETE", "/v1/service/link-challenges"); }
@@ -130,22 +125,8 @@ export class GryphonOwnerController implements OnApplicationBootstrap, OnApplica
   }
 
   @Post("update/check")
-  async check() {
-    const status = await this.status();
-    return updater("/v1/components/gryphon-linux/check", {
-      head_id: process.env.UPDATER_HEAD_ID?.trim() || "saturn",
-      current_version: status.version,
-    });
-  }
+  check() { throw new ForbiddenException("Check shared Gryphon releases with sudo updater tui"); }
 
   @Post("update/install")
-  async install(@Body() body: unknown) {
-    const input = installSchema.parse(body);
-    const checked = await this.check();
-    if (checked.update_available !== true || checked.available_version !== input.version) throw new ConflictException("Requested Gryphon version is not the current upgrade candidate");
-    return updater("/v1/components/gryphon-linux/update", {
-      head_id: process.env.UPDATER_HEAD_ID?.trim() || "saturn",
-      version: input.version,
-    }, 300_000);
-  }
+  install() { throw new ForbiddenException("Update the shared Gryphon gateway with sudo updater tui"); }
 }

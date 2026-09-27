@@ -50,6 +50,7 @@ export class UpdaterController {
   @Post("flow/check")
   async flowCheck(@Body() body: unknown) {
     const { component } = z.object({ component: z.enum(["saturn", "updater", "gryphon", "neptune"]) }).strict().parse(body);
+    if (component === "gryphon") throw new BadRequestException("Check shared Gryphon releases with sudo updater tui");
     const health = await agent("GET", "/v1/health");
     if (health.update_protocol !== 2) throw new BadRequestException("Updater 0.5.0 or later is required for the saved-copy update protocol");
     return updater("/v2/check", { head_id: headId(), component }, 45_000);
@@ -72,6 +73,7 @@ export class UpdaterController {
   @Post("flow/install/:component")
   async flowInstall(@Param("component") component: string, @Body() body: unknown,
     @Headers("x-update-receipt") receipt = "", @Headers("x-update-saved") saved = "") {
+    if (component === "gryphon") throw new BadRequestException("Update the shared Gryphon gateway with sudo updater tui");
     if (component === "saturn") {
       if (saved !== "1") throw new BadRequestException("Save the ZIP on your computer before installing");
       const archive = await readUpdateBytes(body);

@@ -1,4 +1,4 @@
-import type { ArchiveJobInfo, AuditEventInfo, BackupRunInfo, BackupServiceInfo, DeviceInfo, DropSessionInfo, DropUploadStatus, FileVersion, GryphonBot, GryphonChallenge, GryphonStatus, KernelStatus, NeptuneAgentInfo, NeptuneAvailability, NeptuneReleaseCheck, NeptuneStatus, OperatorOverview, OwnerPreferences, RecoveryRestoreCandidate, RecoveryRestoreResult, RecoveryStatus, Resource, ShareChild, ShareInfo, StorageConnectionInput, StorageConnectionStatus, UpdateStatus } from "./types.js";
+import type { ArchiveJobInfo, AuditEventInfo, BackupRunInfo, BackupServiceInfo, DeviceInfo, DropSessionInfo, DropUploadStatus, FileVersion, GryphonBot, GryphonStatus, KernelStatus, NeptuneAgentInfo, NeptuneAvailability, NeptuneReleaseCheck, NeptuneStatus, OperatorOverview, OwnerPreferences, RecoveryRestoreCandidate, RecoveryRestoreResult, RecoveryStatus, Resource, ShareChild, ShareInfo, StorageConnectionInput, StorageConnectionStatus, UpdateStatus } from "./types.js";
 
 export class ApiError extends Error {
   readonly status: number;
@@ -150,7 +150,7 @@ export const api = {
   gryphonBots: () => request<{ readonly bots: readonly GryphonBot[] }>("/operator/gryphon/bots"),
   connectGryphon: (botId: string) => request<GryphonStatus>("/operator/gryphon/connection", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ botId }) }),
   disconnectGryphon: () => request<{ readonly disconnected: boolean }>("/operator/gryphon/connection", { method: "DELETE" }),
-  issueGryphonLink: () => request<GryphonChallenge>("/operator/gryphon/link-challenge", { method: "POST" }),
+  attachGryphonOwner: () => request<GryphonStatus>("/operator/gryphon/binding", { method: "PUT" }),
   checkGryphonUpdate: () => request<NeptuneReleaseCheck>("/operator/gryphon/update/check", { method: "POST" }),
   installGryphonUpdate: (version: string) => request<{ readonly updated: boolean; readonly version: string }>("/operator/gryphon/update/install", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ version }) }),
   beginRecoveryRestore: (filename: string, expectedBytes: number) => request<{ readonly id: string; readonly filename: string; readonly archiveBytes: number; readonly state: "uploading" }>("/operator/recovery/restores", {

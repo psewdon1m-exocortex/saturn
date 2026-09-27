@@ -26,7 +26,6 @@ import {
   type DeviceInfo,
   type FileVersion,
   type GryphonBot,
-  type GryphonChallenge,
   type GryphonStatus,
   type KernelStatus,
   type OwnerPreferences,
@@ -621,12 +620,13 @@ function LoginView({ health, onAuthenticated }: { readonly health: GatewayState;
   );
 }
 
-function Dialog({ title, description, children, onClose, dismissible = true }: {
+function Dialog({ title, description, children, onClose, dismissible = true, className = "" }: {
   readonly title: string;
   readonly description?: string;
   readonly children: ReactNode;
   readonly onClose: () => void;
   readonly dismissible?: boolean;
+  readonly className?: string;
 }) {
   const titleId = useId();
   const dialog = useRef<HTMLElement>(null);
@@ -664,7 +664,7 @@ function Dialog({ title, description, children, onClose, dismissible = true }: {
   };
   return (
     <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (dismissible && event.target === event.currentTarget) onClose(); }}>
-      <section ref={dialog} className="dialog" role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1} style={{ transform: `translate(${String(offset.x)}px, ${String(offset.y)}px)` }}>
+      <section ref={dialog} className={`dialog ${className}`} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1} style={{ transform: `translate(${String(offset.x)}px, ${String(offset.y)}px)` }}>
         <header
           className="dialog__head"
           onPointerDown={(event) => { if ((event.target as HTMLElement).closest("button") !== null || dialog.current === null) return; const box = dialog.current.getBoundingClientRect(); drag.current = { x: event.clientX, y: event.clientY, left: box.left, top: box.top }; event.currentTarget.setPointerCapture(event.pointerId); }}
@@ -2482,7 +2482,6 @@ function SettingsView({ preferences, setPreferences, addNotice, onAnonymous }: {
   const [gryphonBots, setGryphonBots] = useState<readonly GryphonBot[]>([]);
   const [gryphonBotId, setGryphonBotId] = useState("");
   const [gryphonConnectionDialog, setGryphonConnectionDialog] = useState(false);
-  const [gryphonChallenge, setGryphonChallenge] = useState<GryphonChallenge | undefined>();
   const [restoreDialog, setRestoreDialog] = useState(false);
   const [restoreCandidate, setRestoreCandidate] = useState<RecoveryRestoreCandidate | undefined>();
   const [restoreResult, setRestoreResult] = useState<RecoveryRestoreResult | undefined>();
@@ -2663,81 +2662,48 @@ function SettingsView({ preferences, setPreferences, addNotice, onAnonymous }: {
       await loadRecovery();
     }
   };
-  const openGryphonManagement = async () => {
-    try { const { url } = await api.gryphonManagement(); window.location.assign(url); }
-    catch (error) { addNotice("error", error instanceof Error ? error.message : "Management destination is unavailable"); }
-  };
-
   const openGryphonConnection = async () => {
     setPending(true);
     try {
       const result = await api.gryphonBots();
       setGryphonBots(result.bots);
-      setGryphonBotId(result.bots.find((bot) => bot.state === "ready")?.id ?? "");
+      setGryphonBotId(gryphon?.bot?.id ?? "");
       setGryphonConnectionDialog(true);
     }
     catch { addNotice("error", "Gryphon bot list could not be loaded."); }
     finally { setPending(false); }
   };
-  const initializeAgent = (component: "Neptune" | "Gryphon") => openAgentInitialization({
-    component, service: "saturn", description: "Initialize this scoped connection through the local Updater. Existing shared agents are reused.",
-    ...(component === "Neptune" ? { codeLabel: "One-time setup code", profile: "Required pipeline: recovery ZIP archive." } : {}),
-    initialize: input => component === "Neptune" ? api.initializeNeptune(input.enrollment_code || "", input.request_id) : api.initializeGryphon(input.request_id),
+  const initializeAgent = () => openAgentInitialization({
+    component: "Neptune", service: "saturn", description: "Initialize this scoped connection through the local Updater. Existing shared agents are reused.",
+    codeLabel: "One-time setup code", profile: "Required pipeline: recovery ZIP archive.",
+    initialize: input => api.initializeNeptune(input.enrollment_code || "", input.request_id),
     observe: id => agentRequest<InitializationJob>("/operator/updates/flow/jobs/" + encodeURIComponent(id || "")),
     recover: async hint => {
       if (hint?.id) return agentRequest<InitializationJob>("/operator/updates/flow/jobs/" + encodeURIComponent(hint.id));
       const result = await agentRequest<{ jobs: (InitializationJob & { service?: string })[] }>("/operator/updates/flow/jobs");
-      return result.jobs.find(job => job.service === component.toLowerCase() + "-initialization" &&
+      return result.jobs.find(job => job.service === "neptune-initialization" &&
         (hint?.request_id ? job.request_id === hint.request_id : !["COMPLETED", "FAILED"].includes(job.state)));
     },
     verify: async () => {
-      if (component === "Neptune") {
-        const availability = await api.neptuneAvailability(); setNeptune(availability);
-        return { ready: availability.state === "linked" && availability.linked === true, message: "The scoped archive connection is not verified." };
-      }
-      const status = await api.gryphonStatus(); setGryphon(status); setGryphonError("");
-      return { ready: typeof status.connected === "boolean" };
+      const availability = await api.neptuneAvailability(); setNeptune(availability);
+      return { ready: availability.state === "linked" && availability.linked === true, message: "The scoped archive connection is not verified." };
     },
   });
-  const cancelGryphonChallenge = async () => {
-    try { await agentRequest("/operator/gryphon/link-challenge", { method: "DELETE" }); setGryphonChallenge(undefined); }
-    catch { addNotice("error", "Cancellation was not confirmed. The code remains valid until expiry."); }
-  };
-  const revokeGryphonBinding = async () => {
-    if (!await confirmAgentAction({ title: "Revoke Telegram binding", message: "This account will lose access to this service. The service function and shared bot remain connected. A new link code will be required.", confirmLabel: "Revoke binding" })) return;
-    setPending(true);
-    try { await agentRequest("/operator/gryphon/binding", { method: "DELETE" }); setGryphonChallenge(undefined); await loadGryphon(); addNotice("success", "Telegram binding revoked."); }
-    catch { addNotice("error", "Telegram binding revocation was not confirmed."); }
-    finally { setPending(false); }
-  };
   useEffect(() => {
     const timer = setInterval(() => { void loadNeptune(); void loadGryphon(); }, 15000);
     return () => clearInterval(timer);
   }, [loadGryphon]);
-  useEffect(() => {
-    if (!gryphonChallenge) return;
-    if (gryphon?.binding) { setGryphonChallenge(undefined); return; }
-    const timer = setTimeout(() => { setGryphonChallenge(undefined); addNotice("info", "Telegram link code expired."); },
-      Math.max(0, Date.parse(gryphonChallenge.expiresAt) - Date.now()));
-    return () => clearTimeout(timer);
-  }, [gryphonChallenge, gryphon?.binding, addNotice]);
-  const issueGryphonLink = async () => {
+  const connectGryphon = async (botId: string) => {
+    if (!botId || (botId === gryphon?.bot?.id && gryphon.binding)) return;
     setPending(true);
-    try { setGryphonChallenge(await api.issueGryphonLink()); }
-    catch { addNotice("error", "Telegram link code could not be created."); }
-    finally { setPending(false); }
-  };
-  const connectGryphon = async () => {
-    if (gryphonBotId === "") return;
-    setPending(true);
-    try { await api.connectGryphon(gryphonBotId); setGryphonConnectionDialog(false); await loadGryphon(); addNotice("success", "Saturn function linked to Gryphon."); }
+    try { await api.connectGryphon(botId); setGryphonBotId(botId); await loadGryphon(); addNotice("success", "Saturn function and paired Telegram account linked."); }
     catch { addNotice("error", "Saturn function could not be linked."); }
     finally { setPending(false); }
   };
   const disconnectGryphon = async () => {
     if (!await confirmAgentAction({ title: "Unlink service function", message: "Telegram commands and notifications for this service will stop and its Telegram binding will be removed. Other services remain connected.", confirmLabel: "Unlink function" })) return;
     setPending(true);
-    try { await api.disconnectGryphon(); await loadGryphon(); addNotice("success", "Saturn function unlinked from Gryphon."); }
+    try { await api.disconnectGryphon(); setGryphonBotId(""); await loadGryphon(); addNotice("success", "Saturn function unlinked from Gryphon."); }
     catch { addNotice("error", "Saturn function could not be unlinked."); }
     finally { setPending(false); }
   };
@@ -2808,7 +2774,7 @@ function SettingsView({ preferences, setPreferences, addNotice, onAnonymous }: {
       <section className="settings-group"><h3>Restore snapshot</h3><p>Restore validates the complete archive before replacement and rolls back if post-restore health fails.</p><button className="button settings-action" type="button" disabled={pending || !recovery?.restoreEnabled} title={recovery?.reason} onClick={openRestore}>Browse local snapshot archive</button></section>
       <section className="settings-group"><h3>Automatic backup to Saturn</h3><p>Neptune exports the same ZIP as the manual action and uploads it without changing its bytes.</p>
         <StatusRow label="Local Neptune agent:" state={neptune?.state === "linked" ? "ready" : "unavailable"} detail={!neptune ? "Checking" : neptune.state === "linked" ? "Linked" : neptune.state === "unlinked" ? "Not linked" : neptune.state === "authorization_failed" ? "Authorization failed" : neptune.linked ? "Unavailable · last known linked" : "Unavailable · installation unknown"} />
-        <button className="button settings-action" onClick={() => initializeAgent("Neptune")}>Initialize</button>
+        <button className="button settings-action" onClick={() => initializeAgent()}>Initialize</button>
         <BackupPolicyPanel service="saturn" base="/api/v1/operator/neptune/policy" headers={policyHeaders} />
         </section>
       <section className="settings-group"><h3>Neptune version</h3><p>Current installed version: {neptune?.version ?? "Unavailable"}</p><button className="button settings-action" onClick={() => openSaturnUpdates("neptune")}>Check Neptune for updates</button>
@@ -2816,18 +2782,15 @@ function SettingsView({ preferences, setPreferences, addNotice, onAnonymous }: {
       <details><summary>Advanced helper recovery</summary><HelperRecoveryPanel enabled={updates?.updater.state === "ready"} /></details>
     </div>,
     gryphon: <div className="settings-groups bot-connection-groups">
-      <section className="settings-group"><h3>Service connection</h3><p>Gryphon handles Telegram commands and notifications for this service.</p>
-        <StatusRow label="Local Gryphon agent:" state={gryphon && !gryphonError ? "ready" : "unavailable"} detail={gryphonError ? gryphon ? "Unavailable · last known registration retained" : "Unavailable · registration unknown" : gryphon ? "Reachable" : "Checking"} />
+      <section className="settings-group"><h3>Gryphon bot binding</h3><p>Gryphon owns the Telegram connection, service receives only service-scoped commands.</p>
+        <div className="gryphon-status-rows">
+          <StatusRow label="Local Gryphon agent:" state={!gryphon ? "busy" : gryphonError ? "unavailable" : "ready"} detail={gryphon ? "Reachability" : "Checking"} />
+          <StatusRow label="Applied connection:" state={gryphon?.connected && gryphon.binding && !gryphonError ? "ready" : "unavailable"} detail="Reachability" />
+        </div>
         {gryphonError && <p role="alert">{gryphonError}</p>}
-        <button className="button settings-action" onClick={() => initializeAgent("Gryphon")}>Initialize</button>
-        <button className="button settings-action" disabled={!gryphon || Boolean(gryphonError) || pending} onClick={() => void (gryphon?.connected ? disconnectGryphon() : openGryphonConnection())}>{gryphon?.connected ? "Unlink service function" : "Link service function"}</button>
-        <button className="button settings-action" onClick={() => void openGryphonManagement()}>Open Gryphon management</button>
-        {gryphon?.bot && <p>Selected bot: <strong>{gryphon.bot.username ? "@" + gryphon.bot.username : gryphon.bot.alias}</strong></p>}
+        <p className="bot-connection-selected">Applied connection: <strong>{gryphon?.connected ? gryphon.bot?.alias ?? "unknown" : "none"}</strong></p>
+        <button type="button" className="button settings-action bot-connection-action" disabled={!gryphon || Boolean(gryphonError) || pending} onClick={() => void openGryphonConnection()}>{gryphon?.connected ? "Change Gryphon function" : "Link Gryphon function"}</button>
       </section>
-      <section className="settings-group"><h3>Telegram account</h3><p>{gryphon?.binding ? "Telegram account linked." : "No Telegram account is linked to this service."}</p>
-        <button className="button settings-action" disabled={!gryphon?.connected || Boolean(gryphonError) || pending} onClick={() => void (gryphon?.binding ? revokeGryphonBinding() : issueGryphonLink())}>{gryphon?.binding ? "Revoke Telegram binding" : "Link Telegram account"}</button>
-      </section>
-      <section className="settings-group"><h3>Gryphon version</h3><p>Current installed version: <strong>{gryphon?.version ?? "unavailable"}</strong></p><button className="button settings-action" onClick={() => openSaturnUpdates("gryphon")}>Check Gryphon for updates</button></section>
     </div>,
     updates: <div className="settings-groups updates-content"><section className="settings-group update-pipeline-group"><h3>Update pipeline</h3><p>Release discovery comes from Kernel Register; replacement and rollback are performed by the local Updater.</p><p>Current installed version: <strong className="accent-text">v{updates?.installedVersion ?? "unknown"}</strong></p><div className="settings-status-stack"><StatusRow label="Local Updater agent:" state={updates === undefined ? "busy" : updates.updater.state} detail={updates === undefined ? "Checking" : updates.updater.state === "ready" ? "Service Reachability" : updates.updater.reason ?? "Service Unavailable"} /><StatusRow label="Kernel Register:" state={updates === undefined ? "busy" : updates.registry.state} detail={updates === undefined ? "Checking" : updates.registry.state === "ready" ? "Service Reachability" : updates.registry.reason ?? "Service Unavailable"} /></div><button className="button settings-action update-check-action" type="button" disabled={pending} onClick={() => openSaturnUpdates()}>Check for updates</button></section><section className="settings-group updater-version-group"><h3>Updater version</h3><p>Current installed version: {updates?.updater.version ?? "unavailable"}</p><button className="button settings-action" type="button" disabled={pending} onClick={() => openSaturnUpdates("updater")}>Check Updater for updates</button></section></div>,
     logs: <div className="settings-groups"><ServiceLogsPanel base="/api/v1/activity" beforeParam="before" download="/api/v1/activity/export?limit=10000" /></div>,
@@ -2838,10 +2801,16 @@ function SettingsView({ preferences, setPreferences, addNotice, onAnonymous }: {
     <div className="card-grid card-grid--settings">
       {preferences.settingsOrder.map((id, index) => <UniversalCard ordinal={index + 1} title={SETTINGS_CARD_TITLES[id]} className={`settings-card settings-card--${id}${dropCard === id ? " universal-card--drop-target" : ""}`} draggable handleLabel={`Reorder ${id} settings card`} onHandleKeyDown={(event) => moveSettingsCardByKeyboard(event, id)} onDragStart={(event) => { setDraggingCard(id); event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", id); }} onDragOver={(event) => { if (draggingCard !== undefined && draggingCard !== id) { event.preventDefault(); setDropCard(id); } }} onDrop={(event) => { event.preventDefault(); if (draggingCard !== undefined) moveSettingsCard(draggingCard, id); setDraggingCard(undefined); setDropCard(undefined); }} onDragEnd={() => { setDraggingCard(undefined); setDropCard(undefined); }} key={id}>{cards[id]}</UniversalCard>)}
     </div>
-    {gryphonChallenge ? <Dialog title="Link Telegram account" description={`Send this command to ${gryphonChallenge.botUsername === undefined ? "the connected bot" : `@${gryphonChallenge.botUsername}`}. It is single-use and expires ${new Date(gryphonChallenge.expiresAt).toLocaleString()}.`} onClose={() => void cancelGryphonChallenge()}><div className="dialog-form"><div className="one-time-code" role="status"><strong>{gryphonChallenge.command}</strong></div><div className="dialog__actions"><button className="button" type="button" onClick={() => void navigator.clipboard.writeText(gryphonChallenge.command).then(() => addNotice("success", "Command copied."))}>Copy command</button><button className="button button--primary" type="button" onClick={() => void cancelGryphonChallenge()}>Cancel link code</button></div></div></Dialog> : null}
     {accessKeyDialog ? <Dialog title="Change Access Key" description="Enter the current key, then the replacement twice. No field is preloaded." onClose={() => { setAccessKeyDialog(false); setAccessKeyChange({ currentAccessKey: "", newAccessKey: "", confirmation: "" }); }}><form className="dialog-form" onSubmit={(event) => void changeOwnerAccessKey(event)}><label>Current Access Key<input type="password" autoComplete="current-password" value={accessKeyChange.currentAccessKey} onChange={(event) => setAccessKeyChange({ ...accessKeyChange, currentAccessKey: event.target.value })} required /></label><label>New Access Key<input type="password" autoComplete="new-password" minLength={32} value={accessKeyChange.newAccessKey} onChange={(event) => setAccessKeyChange({ ...accessKeyChange, newAccessKey: event.target.value })} required /></label><label>Confirm new Access Key<input type="password" autoComplete="new-password" minLength={32} value={accessKeyChange.confirmation} onChange={(event) => setAccessKeyChange({ ...accessKeyChange, confirmation: event.target.value })} required /></label><div className="dialog__actions"><button className="button" type="button" onClick={() => { setAccessKeyDialog(false); setAccessKeyChange({ currentAccessKey: "", newAccessKey: "", confirmation: "" }); }}>Cancel</button><button className="button button--primary" type="submit" disabled={pending || accessKeyChange.newAccessKey.length < 32 || accessKeyChange.confirmation !== accessKeyChange.newAccessKey}>Change Access Key</button></div></form></Dialog> : null}
     {kernelTokenDialog ? <Dialog title="Change Kernel token" description="The replacement is write-only and activates only after authenticated validation." onClose={() => { setKernelTokenDialog(false); setKernelToken(""); }}><form className="dialog-form" onSubmit={(event) => void rotateKernelToken(event)}><label>Replacement Kernel token<input type="password" autoComplete="new-password" value={kernelToken} minLength={32} onChange={(event) => setKernelToken(event.target.value)} required /></label><div className="dialog__actions"><button className="button" type="button" onClick={() => { setKernelTokenDialog(false); setKernelToken(""); }}>Cancel</button><button className="button button--primary" type="submit" disabled={pending || kernelToken.length < 32}>Validate and rotate</button></div></form></Dialog> : null}
-    {gryphonConnectionDialog ? <Dialog title="Link service function" description="Select a bot available to this service in the shared gateway." onClose={() => setGryphonConnectionDialog(false)} dismissible={!pending}><div className="bot-picker"><button className="button" onClick={() => void openGryphonManagement()}>Open Gryphon management</button><div className="bot-picker-list">{gryphonBots.length === 0 ? <p>No ready bots are available. Open authorized gateway management to register a bot.</p> : gryphonBots.map((bot) => <label key={bot.id} className={bot.state === "ready" ? "" : "is-disabled"}><input type="radio" name="saturn-gryphon-bot" value={bot.id} checked={gryphonBotId === bot.id} disabled={bot.state !== "ready" || pending} onChange={() => setGryphonBotId(bot.id)} /><span><strong>{bot.username === undefined ? bot.alias : `@${bot.username}`}</strong><small>{bot.alias} · {bot.state}</small></span></label>)}</div><div className="dialog__actions"><button className="button" type="button" disabled={pending} onClick={() => setGryphonConnectionDialog(false)}>Cancel</button><button className="button button--primary" type="button" disabled={pending || gryphonBotId === ""} onClick={() => void connectGryphon()}>{pending ? "Linking…" : "Link function"}</button></div></div></Dialog> : null}
+    {gryphonConnectionDialog ? <Dialog title="Gryphon Connection" className="gryphon-choice-dialog" onClose={() => setGryphonConnectionDialog(false)} dismissible={!pending}>
+      <p className="gryphon-choice-intro">Select a connection already applied through Gryphon</p>
+      <div className="gryphon-choice-layout">
+        <div className="gryphon-choice-list">{gryphonBots.some((bot) => bot.state === "ready" || bot.id === gryphon?.bot?.id) ? gryphonBots.filter((bot) => bot.state === "ready" || bot.id === gryphon?.bot?.id).map((bot) => <button key={bot.id} type="button" className={`gryphon-choice${gryphonBotId === bot.id ? " is-selected" : ""}`} aria-pressed={gryphonBotId === bot.id} disabled={bot.state !== "ready" || pending} onClick={() => void connectGryphon(bot.id)}><span className="gryphon-choice-check" aria-hidden="true" />{bot.username ? `@${bot.username}` : bot.alias}</button>) : <p>No paired bots are available. Register and pair one with sudo updater tui.</p>}</div>
+        {gryphon?.connected && gryphon.bot ? <div className="gryphon-adapter-config"><strong>Active adapter config:</strong><span>Bot: {gryphon.bot.alias}</span><span>{gryphon.bot.username ? `Telegram: @${gryphon.bot.username}` : "Telegram account paired in Gryphon"}</span><span>Saturn function: active</span></div> : null}
+      </div>
+      {gryphon?.connected && <button type="button" className="button gryphon-unlink-action" disabled={pending} onClick={() => void disconnectGryphon()}>Unlink all adapters</button>}
+    </Dialog> : null}
     {storageDialog ? <Dialog title="Configure storage" description="Connect an independent SFTP file set. No files are copied from or deleted in the current storage." dismissible={false} onClose={() => undefined}>
       <form className="dialog-form storage-dialog" onSubmit={(event) => { event.preventDefault(); void testStorage(); }} autoComplete="off">
         <div className="storage-dialog__grid">
