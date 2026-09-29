@@ -30,7 +30,7 @@ async function collectFiles(sourceDirectory, archiveDirectory) {
   return collected;
 }
 
-async function archive(files, updaterDirectory, output) {
+async function archive(files, updaterDirectory, helperDirectory, output) {
   await fs.mkdir(path.dirname(output), { recursive: true });
   const handle = await fs.open(output, "w", 0o600);
   const stream = handle.createWriteStream();
@@ -44,6 +44,8 @@ async function archive(files, updaterDirectory, output) {
   const entries = [
     ...files.map((file) => ({ source: path.join(root, file), name: file.replaceAll("\\", "/") })),
     ...(await collectFiles(updaterDirectory, "updater")),
+    ...(await collectFiles(path.join(helperDirectory, "neptune"), "helpers/neptune")),
+    ...(await collectFiles(path.join(helperDirectory, "gryphon"), "helpers/gryphon")),
   ];
   for (const entry of entries) {
     const bytes = await fs.readFile(entry.source);
@@ -68,6 +70,7 @@ if (command === "build") {
   const pinnedUpdaterVersion = (await fs.readFile(path.join(root, ".release", "updater.version"), "utf8")).trim();
   if (updaterVersion !== pinnedUpdaterVersion) throw new Error(`Updater bundle version ${updaterVersion} does not match pin ${pinnedUpdaterVersion}`);
   const updaterDirectory = path.resolve(updaterDirectoryValue);
+  const helperDirectory = path.resolve(process.env.HOST_HELPER_BUNDLE_DIR ?? path.join(root, ".release-inputs/helpers"));
   for (const required of ["install.sh", "updater-linux-amd64", "systemd/updater.service", "release-trust/updater.pem", "release-trust/neptune.pem", "release-trust/gryphon.pem"]) {
     const attributes = await fs.stat(path.join(updaterDirectory, required)).catch(() => undefined);
     if (!attributes?.isFile()) throw new Error(`Verified Updater install bundle is missing ${required}`);
@@ -96,7 +99,7 @@ if (command === "build") {
     "docs/implementation/STAGE_13_PRODUCTION_HARDENING_DEPLOYMENT.md",
     "docs/implementation/OPERATIONS.md",
     ".release/updater.version",
-  ], updaterDirectory, bundlePath);
+  ], updaterDirectory, helperDirectory, bundlePath);
   const bundle = await fs.readFile(bundlePath);
   const payload = {
     schema: "vault.release-manifest.v1",

@@ -267,6 +267,11 @@ install_release() {
   prepare_agent_mounts
   validate
   "$UPDATER_BUNDLE/install.sh" saturn "$CONFIG_FILE" "$UPDATER_BUNDLE/updater-linux-amd64"
+  if [ -f /etc/exocortex/updater-kernel.token ] && [ -n "$(get_config KERNEL_URL)" ]; then
+    updater host configure-kernel --url "$(get_config KERNEL_URL)" --token-file /etc/exocortex/updater-kernel.token
+  fi
+  updater neptune install --bundle "$INSTALL_ROOT/helpers/neptune"
+  updater gryphon install --bundle "$INSTALL_ROOT/helpers/gryphon"
   set -a; . "$CONFIG_FILE"; set +a
   docker pull "$VAULT_APP_IMAGE"
   docker pull "$VAULT_WEB_IMAGE"

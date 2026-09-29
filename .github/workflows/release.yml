@@ -64,6 +64,7 @@ jobs:
           printf '%s  %s\n' "$(tr -d '[:space:]' < .release/updater.sha256)" "updater-${updater_version}-install.tar.gz" > .release-inputs/updater-pinned.sha256
           (cd .release-inputs && sha256sum -c updater-pinned.sha256)
           tar -xzf ".release-inputs/updater-${updater_version}-install.tar.gz" -C .release-inputs
+          bash scripts/fetch-host-helpers.sh neptune gryphon
       - name: Install Chromium runtime
         run: pnpm exec playwright install --with-deps chromium
       - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
