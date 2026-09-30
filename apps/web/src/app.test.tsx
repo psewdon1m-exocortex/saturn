@@ -979,6 +979,15 @@ describe("owner Saturn UI", () => {
     window.history.replaceState({}, "", "/settings");
     const now = new Date().toISOString();
     const installedVersion = "0.1.13";
+    const receipt = `${btoa(JSON.stringify({ id: "saturn-backup-request", size: 3, sha256: "4a70fe9aa6436e02c2dea340fbd1e352e4ef2d8ce6ca52ad25d4b95471fc8bf2", filename: "saturn-before.zip" }))}.signature`;
+    vi.stubGlobal("crypto", (await import("node:crypto")).webcrypto);
+    class TestURL extends URL {
+      static override createObjectURL(): string { return "blob:saturn-backup"; }
+      static override revokeObjectURL(): void {}
+    }
+    vi.stubGlobal("URL", TestURL);
+    Object.defineProperty(window, "showSaveFilePicker", { configurable: true, value: undefined });
+    const downloadClick = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
     HTMLDialogElement.prototype.showModal = function () {this.setAttribute("open", "");};
     HTMLDialogElement.prototype.close = function () {this.removeAttribute("open");this.dispatchEvent(new Event("close"));};
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -989,6 +998,9 @@ describe("owner Saturn UI", () => {
       if (url.endsWith("/auth/preferences")) return json(preferences({ updatedAt: now }));
       if (url.endsWith("/auth/reauthenticate")) return json({ state: "authenticated" }, 201);
       if (url.endsWith("/operator/updates/flow/check")) return json({ installed_version: "0.1.13", available_version: "0.1.14", update_available: true, updater_version: "0.4.10", component: "saturn" });
+      if (url.endsWith("/operator/updates/flow/backup")) return new Response("zip", { headers: { "X-Update-Receipt": receipt } });
+      if (url.endsWith("/operator/updates/flow/install/saturn")) return json({ id: "saturn-update-job", request_id: "saturn-backup-request", service: "saturn", state: "COMPLETED", rollback_available: false });
+      if (url.endsWith("/operator/updates/flow/jobs/saturn-update-job")) return json({ id: "saturn-update-job", request_id: "saturn-backup-request", service: "saturn", state: "COMPLETED", rollback_available: false });
       if (url.endsWith("/operator/updates/flow/jobs")) return json({ jobs: [] });
       if (url.endsWith("/operator/updates")) return json({ installedVersion, updater: { state: "ready", version: "0.4.1" }, registry: { state: "ready" }, discoveryEnabled: true });
       if (url.endsWith("/operator/kernel")) return json({ configured: true, reachability: "ready", revision: 1 });
@@ -1015,6 +1027,11 @@ describe("owner Saturn UI", () => {
     expect(fetchMock.mock.calls.some(call => requestUrl(call[0]).includes("/install"))).toBe(false);
     fireEvent.click(warning.getByRole("button", { name: "Cancel" }));
     expect(screen.queryByRole("dialog", { name: "Install SATURN update" })).toBeNull();
+    fireEvent.click(dialog.getByRole("button", { name: "Install 0.1.14" }));
+    fireEvent.click(within(await screen.findByRole("dialog", { name: "Install SATURN update" })).getByRole("button", { name: "Create backup and install" }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(call => requestUrl(call[0]).endsWith("/flow/install/saturn"))).toBe(true));
+    expect(downloadClick).toHaveBeenCalledOnce();
+    expect(screen.queryByText("I have saved the ZIP on my computer.")).toBeNull();
   });
 
   it("keeps storage credentials write-only and requires a fresh connection test", async () => {
