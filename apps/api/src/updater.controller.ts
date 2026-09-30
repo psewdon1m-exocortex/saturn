@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
-import { BadRequestException, Body, Controller, Get, Headers, Inject, Param, Post, Res, UseFilters, UseGuards } from "@nestjs/common";
+import { BadRequestException, Body, Controller, ForbiddenException, Get, Headers, Inject, Param, Post, Res, UseFilters, UseGuards } from "@nestjs/common";
 import type { FastifyReply } from "fastify";
 import { backupReceipt, savedBackup, readUpdateBytes } from "./update-backup.js";
 import type { SaturnConfig } from "@saturn/config";
@@ -45,11 +45,12 @@ export class UpdaterController {
   @Post("install")
   install() { throw new BadRequestException("Use the update dialog to save the mandatory pre-update ZIP before installation"); }
   @Post("updater/install")
-  selfUpdate() { return updater("/v1/lifecycle/updater-self-update", { head_id: headId() }); }
+  selfUpdate() { throw new ForbiddenException("Update Updater with sudo updater tui on the host"); }
 
   @Post("flow/check")
   async flowCheck(@Body() body: unknown) {
     const { component } = z.object({ component: z.enum(["saturn", "updater", "gryphon", "neptune"]) }).strict().parse(body);
+    if (component === "updater") throw new ForbiddenException("Check Updater releases with sudo updater tui on the host");
     if (component === "gryphon") throw new BadRequestException("Check shared Gryphon releases with sudo updater tui");
     const health = await agent("GET", "/v1/health");
     if (health.update_protocol !== 2) throw new BadRequestException("Updater 0.5.0 or later is required for the saved-copy update protocol");
@@ -73,6 +74,7 @@ export class UpdaterController {
   @Post("flow/install/:component")
   async flowInstall(@Param("component") component: string, @Body() body: unknown,
     @Headers("x-update-receipt") receipt = "", @Headers("x-update-saved") saved = "") {
+    if (component === "updater") throw new ForbiddenException("Update Updater with sudo updater tui on the host");
     if (component === "gryphon") throw new BadRequestException("Update the shared Gryphon gateway with sudo updater tui");
     if (component === "saturn") {
       if (saved !== "1") throw new BadRequestException("Save the ZIP on your computer before installing");
@@ -80,7 +82,7 @@ export class UpdaterController {
       try { return await updater("/v2/updates", savedBackup(archive, receipt, updaterToken(), "saturn", headId()), 90_000); }
       finally { archive.fill(0); }
     }
-    if (!["updater", "neptune", "gryphon"].includes(component)) throw new BadRequestException("Unknown component");
+    if (!["neptune", "gryphon"].includes(component)) throw new BadRequestException("Unknown component");
     const input = z.object({ version: z.string().regex(/^\d+\.\d+\.\d+$/), request_id: z.uuid() }).strict().parse(body);
     return updater(`/v2/components/${component}/updates`, { ...input, head_id: headId() }, 45_000);
   }

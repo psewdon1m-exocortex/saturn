@@ -901,8 +901,6 @@ button.share-status--active:active { transform: scale(.985); }
 .settings-card--updates .universal-card__body { padding: 30px 38px 54px; }
 .updates-content { display: block; }
 .update-pipeline-group > p { margin-bottom: 6px; }
-.updater-version-group { margin-top: 45px; }
-.updater-version-group > p { margin-bottom: 12px; }
 .settings-card--backup .universal-card__body { padding: 30px 38px 50px; }
 .backup-content { gap: 41px; }
 .settings-card--backup .settings-action { margin-top: 0; }

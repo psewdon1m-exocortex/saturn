@@ -1001,6 +1001,9 @@ describe("owner Saturn UI", () => {
     vi.stubGlobal("fetch", fetchMock);
     render(<App />);
 
+    expect(screen.queryByRole("button", { name: "Check Updater for updates" })).toBeNull();
+    expect(screen.queryByText("Updater version")).toBeNull();
+    expect(fetchMock.mock.calls.filter(call => requestUrl(call[0]).endsWith("/flow/check"))).toHaveLength(0);
     fireEvent.click(await screen.findByRole("button", { name: "Check for updates" }));
     const dialog = within(await screen.findByRole("dialog", { name: "Updates" }));
     expect(await dialog.findByText("Saturn 0.1.14 is available.")).toBeTruthy();

@@ -128,7 +128,6 @@ export const api = {
   installSaturnUpdate: (version: string) => request<{ id: string; state: string; message?: string }>("/operator/updates/install", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ version }) }),
   agentJob: (id: string) => request<{ id: string; state: string; message?: string; rollback_available?: boolean }>(`/operator/updates/jobs/${encodeURIComponent(id)}`),
   rollbackSaturnUpdate: (id: string) => request<{ id: string; state: string }>(`/operator/updates/jobs/${encodeURIComponent(id)}/rollback`, { method: "POST" }),
-  installUpdater: () => request<{ id: string; state: string }>("/operator/updates/updater/install", { method: "POST" }),
   initializeGryphon: (requestId: string = crypto.randomUUID()) => request<{ id: string; state: string }>("/operator/gryphon/initialize", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ request_id: requestId }) }),
   recoveryStatus: () => request<RecoveryStatus>("/operator/recovery"),
   neptuneStatus: () => request<NeptuneStatus>("/operator/neptune/status"),
