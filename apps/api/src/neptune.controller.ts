@@ -1,17 +1,14 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
-import { Body, ConflictException, Controller, Get, Head, Headers, HttpCode, HttpException, Inject, Param, Post, Put, Res, UseFilters, UseGuards } from "@nestjs/common";
+import { Body, ConflictException, Controller, ForbiddenException, Get, GoneException, Head, Headers, HttpException, Inject, Param, Post, Put, Res, UseFilters, UseGuards } from "@nestjs/common";
 import type { FastifyReply } from "fastify";
 import { z } from "zod";
 import { OwnerTokenGuard } from "./owner-token.guard.js";
 import { RecoveryWorkflowService } from "./recovery-workflow.service.js";
 import { SaturnApiExceptionFilter } from "./saturn-api-exception.filter.js";
-import { policyMutationSchema, policyRunSchema } from "./service-backup-policy.js";
+import { policyMutationSchema } from "./service-backup-policy.js";
 
-const scheduleSchema = z.object({ enabled: z.boolean(), interval_hours: z.number().int().min(1).max(8760) }).strict();
-const mirrorScheduleSchema = z.object({ enabled: z.boolean(), interval_minutes: z.number().int().min(1).max(10_080) }).strict();
-const installSchema = z.object({ version: z.string().regex(/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/) }).strict();
 const initializeSchema = z.object({ enrollment_code: z.string().regex(/^[A-Za-z0-9_-]{32}$/), request_id: z.uuid().optional() }).strict();
 type JsonObject = Record<string, unknown>;
 
@@ -123,7 +120,7 @@ export class NeptuneOwnerController {
   @Get("policy") policy() { return neptune("GET", "/policy"); }
   @Put("policy") changePolicy(@Body() body: unknown) { return neptune("PUT", "/policy", policyMutationSchema.parse(body)); }
   @Get("policy/runs") policyRuns() { return neptune("GET", "/policy/runs"); }
-  @Post("policy/runs") policyRun(@Body() body: unknown) { return neptune("POST", "/policy/runs", policyRunSchema.parse(body)); }
+  @Post("policy/runs") policyRun() { throw new ForbiddenException("Manual Neptune runs are unavailable; configure the automatic schedule in Settings"); }
   @Get("initializations/:id")
   initialization(@Param("id") id: string) {
     if (!/^neptune-[0-9]+-[a-f0-9]{16}$/.test(id)) throw new Error("Invalid initialization job ID");
@@ -139,7 +136,8 @@ export class NeptuneOwnerController {
     try {
       const health = await neptuneHealth();
       try {
-        this.lastKnown = { ...(await this.status()), installed: true, linked: true, state: "linked", last_verified_at: new Date().toISOString() };
+        const status = await this.status() as { project?: { unlinking?: boolean } };
+        this.lastKnown = { ...status, installed: true, linked: true, state: status.project?.unlinking ? "unlinking" : "linked", last_verified_at: new Date().toISOString() };
         return this.lastKnown;
       } catch (error) {
         const status = error instanceof HttpException ? error.getStatus() : 503;
@@ -159,43 +157,31 @@ export class NeptuneOwnerController {
   }
 
   @Put("schedule")
-  @HttpCode(204)
-  async schedule(@Body() body: unknown): Promise<void> {
-    const input = scheduleSchema.parse(body);
-    await neptune("PUT", "/schedule", { enabled: input.enabled, intervalHours: input.interval_hours });
-  }
+  schedule() { throw new GoneException("Configure the service-owned backup policy in Saturn Settings"); }
 
   @Post("runs")
-  run() { return neptune("POST", "/runs"); }
+  run() { throw new ForbiddenException("Manual Neptune runs are unavailable; configure the automatic schedule in Settings"); }
 
   @Put("mirror/schedule")
-  @HttpCode(204)
-  async mirrorSchedule(@Body() body: unknown): Promise<void> {
-    const input = mirrorScheduleSchema.parse(body);
-    await neptune("PUT", "/mirror/schedule", { enabled: input.enabled, intervalMinutes: input.interval_minutes });
-  }
+  mirrorSchedule() { throw new GoneException("Configure the service-owned backup policy in Saturn Settings"); }
 
   @Post("mirror/runs")
-  mirrorRun() { return neptune("POST", "/mirror/runs"); }
+  mirrorRun() { throw new ForbiddenException("Manual Neptune runs are unavailable; configure the automatic schedule in Settings"); }
 
   @Post("update/check")
-  async check() {
-    const status = await neptune("GET", "/status");
-    if (typeof status.version !== "string") throw new Error("Neptune returned an invalid version");
-    return updater("/v1/components/neptune-linux/check", {
-      head_id: process.env.UPDATER_HEAD_ID?.trim() || "saturn",
-      current_version: status.version,
+  check() {
+    throw new ForbiddenException("Check Neptune releases with sudo updater tui on the host");
+  }
+
+  @Post("unlink")
+  async unlink() {
+    return updater("/v1/components/neptune-linux/unlink", {
+      request_id: crypto.randomUUID(), head_id: process.env.UPDATER_HEAD_ID?.trim() || "saturn", project_id: "saturn",
     });
   }
 
   @Post("update/install")
-  async install(@Body() body: unknown) {
-    const input = installSchema.parse(body);
-    const checked = await this.check();
-    if (checked.update_available !== true || checked.available_version !== input.version) throw new Error("Requested Neptune version is not the current upgrade candidate");
-    return updater("/v1/components/neptune-linux/update", {
-      head_id: process.env.UPDATER_HEAD_ID?.trim() || "saturn",
-      version: input.version,
-    }, 300_000);
+  install() {
+    throw new ForbiddenException("Update Neptune with sudo updater tui on the host");
   }
 }

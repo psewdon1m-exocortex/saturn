@@ -1491,3 +1491,10 @@ button.share-browser__name:active:not(:disabled) { transform: scale(.985); trans
 :root :is(.page-header h1,.page-title h1,.settings .page-title) { font-size:clamp(48px,4.2vw,80px); line-height:.95; letter-spacing:0; }
 
 @media(min-width:721px) { .settings-card .universal-card__body { padding-top:28px; padding-left:38px; padding-right:32px; } }
+/* Backup reference: manual export, agent schedule, then restore. */
+:root .settings-card.settings-card--backup .settings-groups.backup-content { gap:54px; }
+.settings-card--backup .settings-group:first-child > .settings-action,
+.settings-card--backup .settings-group:last-of-type > .settings-action { width:min(742px,100%); }
+.settings-card--backup .backup-neptune-group .exo-backup-policy { margin-top:10px; }
+.settings-card--backup .backup-neptune-group > :is(.backup-link-action,.backup-unlink-action) { width:280px; margin-top:20px; }
+.settings-card--backup .backup-unlink-action:disabled { color:var(--danger) !important; border-color:var(--danger) !important; opacity:1; }

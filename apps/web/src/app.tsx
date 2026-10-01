@@ -4,7 +4,7 @@ import { BackupPolicyPanel } from "./service-agents";
 import { updateCookieHeaders } from "./update-overlay.js";
 import { request as agentRequest } from "./api";
 const policyHeaders = () => updateCookieHeaders(["vault_csrf_dev", "__Host-vault_csrf"], "X-Vault-CSRF");
-import { openSaturnUpdates, openRemoteNeptuneUpdates } from "./update-flow.js";
+import { openSaturnUpdates } from "./update-flow.js";
 import { HelperRecoveryPanel } from "./helper-recovery-panel.js";
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type CSSProperties, type DragEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode, type SyntheticEvent } from "react";
 import DOMPurify from "dompurify";
@@ -2302,12 +2302,11 @@ function StatusRow({ label, state, detail }: { readonly label: string; readonly 
   return <div className="status-row"><span>{label}</span><span className={`semantic-status semantic-status--${state}`}>{detail ?? (state === "ready" ? "Service Reachability" : state === "busy" ? "Busy" : "Unavailable")}<i aria-hidden="true" /></span></div>;
 }
 
-function NeptunePipelineRow({ service, agent, pending, reauthed, onCheckUpdate, onSetup, onRotate, onRevoke }: {
+function NeptunePipelineRow({ service, agent, pending, reauthed, onSetup, onRotate, onRevoke }: {
   readonly service: BackupServiceInfo;
   readonly agent?: NeptuneAgentInfo | undefined;
   readonly pending: boolean;
   readonly reauthed: boolean;
-  readonly onCheckUpdate: (service: BackupServiceInfo) => void;
   readonly onSetup: (id: string) => Promise<void>;
   readonly onRotate: (id: string) => Promise<void>;
   readonly onRevoke: (id: string) => Promise<void>;
@@ -2332,8 +2331,8 @@ function NeptunePipelineRow({ service, agent, pending, reauthed, onCheckUpdate, 
   const archiveNextRun = typeof agent?.observed.archive["nextRunAt"] === "string" ? agent.observed.archive["nextRunAt"] : undefined;
   return <article className="fleet-agent">
     <div className="fleet-agent__summary"><strong>{service.name}</strong><span>{service.namespaceSlug}/{service.deploymentId} · {service.state} · {formatBytes(service.usage.storedBytes)}/{formatBytes(service.storedQuotaBytes)} stored</span><span>{heartbeat} · {applied ? "schedule applied" : "schedule pending"}{versionPending ? ` · update ${agent.desired.version} pending` : ""}</span><span>{archiveLastSuccess === undefined ? "no successful ZIP reported" : `last ZIP ${new Date(archiveLastSuccess).toLocaleString()}`}{archiveNextRun === undefined ? "" : ` · next ${new Date(archiveNextRun).toLocaleString()}`}{archiveLastAttempt === undefined || archiveLastAttempt === archiveLastSuccess ? "" : ` · last attempt ${new Date(archiveLastAttempt).toLocaleString()}`}</span>{agent?.observed.latestError === undefined ? null : <span className="danger-text">{agent.observed.latestError}</span>}</div>
-    <p>Schedules and manual backup runs are controlled from this service’s Settings → Backup. This panel shows observed state and manages identity, enrollment and access.</p>
-    <div className="inline-actions"><button className="button" type="button" disabled={pending || !online} onClick={() => onCheckUpdate(service)}>Check update</button><button className="button" type="button" disabled={pending || !reauthed || service.state !== "active"} onClick={() => void onSetup(service.id)}>Setup code</button><button className="button" type="button" disabled={pending || !reauthed || service.state !== "active"} onClick={() => void onRotate(service.id)}>Rotate archive token</button><button className="button button--danger" type="button" disabled={pending || !reauthed || service.state !== "active"} onClick={() => void onRevoke(service.id)}>Revoke</button></div>
+    <p>Automatic backup schedules are controlled from each service’s Settings → Backup. This panel shows observed state and manages identity, enrollment and access.</p>
+    <div className="inline-actions"><button className="button" type="button" disabled={pending || !reauthed || service.state !== "active"} onClick={() => void onSetup(service.id)}>Setup code</button><button className="button" type="button" disabled={pending || !reauthed || service.state !== "active"} onClick={() => void onRotate(service.id)}>Rotate archive token</button><button className="button button--danger" type="button" disabled={pending || !reauthed || service.state !== "active"} onClick={() => void onRevoke(service.id)}>Revoke</button></div>
     <details className="fleet-agent__runs"><summary>Recent ZIP runs ({runs.length})</summary>{runs.length === 0 ? <p className="empty-state">No runs recorded.</p> : <div className="compact-list">{runs.map((run) => <div className="compact-row" key={run.id}><span>{run.state} · {new Date(run.updatedAt).toLocaleString()} · {formatBytes(run.expectedSize)}</span><span>{run.receipt?.logicalPath ?? run.failureCode ?? run.filename}</span></div>)}</div>}</details>
   </article>;
 }
@@ -2436,20 +2435,19 @@ function SynchronizationView({ addNotice }: { readonly addNotice: (kind: Notice[
     catch { addNotice("error", "Revocation requires recent owner proof."); }
     finally { setPending(false); }
   };
-  const checkAgentUpdate = (service: BackupServiceInfo) => { openRemoteNeptuneUpdates(service.id); };
 
   const archiveServices = services.filter((service) => service.mirrorRoot === undefined);
   const mirrorServices = services.filter((service) => service.mirrorRoot !== undefined);
   const linkedMirrorDevices = new Set(mirrorServices.flatMap((service) => service.mirrorDeviceId === undefined ? [] : [service.mirrorDeviceId]));
   const windowsDevices = devices.filter((device) => device.scopeIds.length === 1 && device.scopeIds[0] === SYNC_RESOURCE_ID && !linkedMirrorDevices.has(device.id));
-  const identityList = (items: readonly BackupServiceInfo[]) => <div className="compact-list fleet-list">{items.length === 0 ? <p className="empty-state">No identities configured.</p> : items.map((service) => <NeptunePipelineRow key={service.id} service={service} agent={agents.find((agent) => agent.serviceId === service.id)} pending={pending} reauthed={reauthed} onCheckUpdate={checkAgentUpdate} onSetup={createEnrollment} onRotate={rotateService} onRevoke={revokeService} />)}</div>;
+  const identityList = (items: readonly BackupServiceInfo[]) => <div className="compact-list fleet-list">{items.length === 0 ? <p className="empty-state">No identities configured.</p> : items.map((service) => <NeptunePipelineRow key={service.id} service={service} agent={agents.find((agent) => agent.serviceId === service.id)} pending={pending} reauthed={reauthed} onSetup={createEnrollment} onRotate={rotateService} onRevoke={revokeService} />)}</div>;
 
   return <section className="workspace synchronization" aria-labelledby="synchronization-title">
     <PageHeader title="synchronization" id="synchronization-title" />
     <div className="synchronization-intro"><p>Three isolated pipelines share Saturn storage without sharing credentials or schedules. Linux ZIP archives are immutable recovery points; Linux mirrors keep dedicated roots current; Windows clients mirror selected folders into unique <code>sync/&lt;folder&gt;</code> destinations.</p><form className="reauth-form" onSubmit={(event) => void reauthenticate(event)}><label>Current Access Key<input type="password" value={accessKey} onChange={(event) => setAccessKey(event.target.value)} autoComplete="current-password" required /></label><button className="button" type="submit" disabled={pending || !accessKey}>{reauthed ? "Owner verified" : "Unlock management"}</button></form></div>
     <div className="card-grid synchronization-grid">
       <UniversalCard ordinal={1} title="Linux · recovery archives" className="synchronization-card"><p>Each remote Neptune checks in over outbound HTTPS, applies the policy configured in its own service and creates immutable recovery ZIPs under <code>backups/&lt;project&gt;/&lt;server&gt;</code>.</p>{identityList(archiveServices)}</UniversalCard>
-      <UniversalCard ordinal={2} title="Linux · dedicated mirrors" className="synchronization-card"><p>Volt publishes <code>personal.volt</code> into <code>/volt</code>; Mastermind publishes its vault tree into <code>/mastermind</code>. Archive and mirror schedules remain independent.</p>{identityList(mirrorServices)}</UniversalCard>
+      <UniversalCard ordinal={2} title="Linux · dedicated mirrors" className="synchronization-card"><p>Volt publishes <code>personal.volt</code> into <code>/volt</code>; Mastermind publishes its vault tree into <code>/mastermind</code>. Archive and mirror execution states remain independent; their automatic schedules are configured together in the owning service.</p>{identityList(mirrorServices)}</UniversalCard>
       <UniversalCard ordinal={3} title="Windows · folder synchronization" className="synchronization-card"><div className="settings-groups"><section className="settings-group"><p>Create one client password per PC. The desktop app chooses local directories and a unique destination name; every destination is an exact one-way mirror under <code>sync/&lt;name&gt;</code>.</p><form className="device-form" onSubmit={(event) => void createWindowsClient(event)}><label>PC / client name<input value={windowsName} onChange={(event) => setWindowsName(event.target.value)} maxLength={80} placeholder="Office PC" required /></label><button className="button" type="submit" disabled={pending || !reauthed}>Create Windows client password</button></form>{windowsToken === undefined ? null : <div className="one-time-code" role="status"><span>Paste this one-time password into Neptune for Windows</span><strong>{windowsToken}</strong><small>It is held only in this page memory.</small></div>}<div className="compact-list">{windowsDevices.length === 0 ? <p className="empty-state">No Windows clients configured.</p> : windowsDevices.map((device) => <article key={device.id}><div><strong>{device.name}</strong><span>{device.state} · last used {device.lastUsedAt === undefined ? "never" : new Date(device.lastUsedAt).toLocaleString()}</span></div><button className="button button--danger" type="button" disabled={pending || !reauthed || device.state !== "active"} onClick={() => void revokeDevice(device.id)}>Revoke</button></article>)}</div></section></div></UniversalCard>
       <UniversalCard ordinal={4} title="Add Linux pipeline" className="synchronization-card"><form className="backup-service-form" onSubmit={(event) => void createService(event)}><label>Pipeline<select value={pipeline} onChange={(event) => changePipeline(event.target.value as "archive" | "volt" | "mastermind")}><option value="archive">Recovery ZIP only</option><option value="volt">Volt ZIP + personal.volt mirror</option><option value="mastermind">Mastermind ZIP + vault mirror</option></select></label><label>Connection name<input value={serviceName} onChange={(event) => setServiceName(event.target.value)} maxLength={100} required /></label><label>Project namespace<input value={pipeline === "archive" ? namespace : pipeline} disabled={pipeline !== "archive"} onChange={(event) => setNamespace(event.target.value.toLowerCase())} pattern="[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?" maxLength={63} placeholder="chronos" required /></label><label>Server ID<input value={deployment} onChange={(event) => setDeployment(event.target.value.toLowerCase())} pattern="[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?" maxLength={63} placeholder="vps-1" required /></label><label>Parallel archive runs<input type="number" min={1} max={32} value={maxConcurrentRuns} onChange={(event) => setMaxConcurrentRuns(Number(event.target.value))} required /></label><button className="button button--primary" type="submit" disabled={pending || !reauthed}>Create setup code</button></form>{enrollment === undefined ? null : <div className="one-time-code" role="status"><span>Enter this in the simplified Neptune Linux installer</span><strong>{enrollment.code}</strong><small>One use · expires {new Date(enrollment.expiresAt).toLocaleString()}.</small></div>}{producerToken === undefined ? null : <div className="one-time-code" role="status"><span>Rotated archive producer token</span><strong>{producerToken}</strong><small>Use only when repairing an existing installation.</small></div>}</UniversalCard>
       <UniversalCard ordinal={5} title="Neptune fleet" className="synchronization-card"><p>Connected Linux agents report their version and last heartbeat on the pipeline rows above. Service-owned policies are applied through outbound polling, so no inbound server port is required.</p><p className="setting-meta">Windows clients continue to check and install their Windows release from the desktop application.</p></UniversalCard>
@@ -2477,6 +2475,7 @@ function SettingsView({ preferences, setPreferences, addNotice, onAnonymous }: {
   const [kernelUrl, setKernelUrl] = useState("");
   const [recovery, setRecovery] = useState<RecoveryStatus | undefined>();
   const [neptune, setNeptune] = useState<NeptuneAvailability | undefined>();
+  const [neptuneUnlinking, setNeptuneUnlinking] = useState(false);
   const [gryphon, setGryphon] = useState<GryphonStatus | undefined>();
   const [gryphonError, setGryphonError] = useState("");
   const [gryphonBots, setGryphonBots] = useState<readonly GryphonBot[]>([]);
@@ -2689,6 +2688,24 @@ function SettingsView({ preferences, setPreferences, addNotice, onAnonymous }: {
       return { ready: availability.state === "linked" && availability.linked === true, message: "The scoped archive connection is not verified." };
     },
   });
+  const unlinkNeptune = async () => {
+    if (!(["linked", "unlinking"].includes(neptune?.state ?? "")) || !await confirmAgentAction({
+      title: "Unlink Neptune agent", confirmLabel: "Unlink agent",
+      message: "Automatic Saturn backups will stop. Saved archives remain available. Other services and the shared Neptune agent stay connected. Saturn will need a new setup code to link again.",
+    })) return;
+    setNeptuneUnlinking(true);
+    try {
+      const accepted = await api.unlinkNeptune();
+      for (let attempt = 0; attempt < 600; attempt += 1) {
+        const job = await agentRequest<{ state: string; message?: string }>(`/operator/updates/flow/jobs/${encodeURIComponent(accepted.id)}`);
+        if (job.state === "COMPLETED") { await loadNeptune(); addNotice("success", "Saturn unlinked from Neptune. Automatic backups are off."); return; }
+        if (job.state === "FAILED") throw new Error(job.message || "Neptune unlink failed");
+        await new Promise(resolve => setTimeout(resolve, 1500));
+      }
+      throw new Error("Neptune is still finishing an accepted backup. Check its status before retrying.");
+    } catch (error) { addNotice("error", error instanceof Error ? error.message : "Neptune unlink failed."); }
+    finally { setNeptuneUnlinking(false); }
+  };
   useEffect(() => {
     const timer = setInterval(() => { void loadNeptune(); void loadGryphon(); }, 15000);
     return () => clearInterval(timer);
@@ -2770,15 +2787,14 @@ function SettingsView({ preferences, setPreferences, addNotice, onAnonymous }: {
       </div></details>
     </div>,
     backup: <div className="settings-groups backup-content">
-      <section className="settings-group"><h3>System snapshot</h3><p>Logical snapshots contain authoritative state and personalization, but no plaintext passwords or service tokens.</p><button className="button settings-action" type="button" disabled={pending || !recovery?.exportEnabled} title={recovery?.reason} onClick={() => void createRecoverySnapshot()}>{pending ? "Creating snapshot…" : "Create and download snapshot"}</button></section>
-      <section className="settings-group"><h3>Restore snapshot</h3><p>Restore validates the complete archive before replacement and rolls back if post-restore health fails.</p><button className="button settings-action" type="button" disabled={pending || !recovery?.restoreEnabled} title={recovery?.reason} onClick={openRestore}>Browse local snapshot archive</button></section>
+      <section className="settings-group"><h3>Manual snapshot</h3><p>Logical snapshots contain authoritative state and personalization, but no plaintext passwords or service tokens.</p><button className="button settings-action" type="button" disabled={pending || !recovery?.exportEnabled} title={recovery?.reason} onClick={() => void createRecoverySnapshot()}>{pending ? "Creating snapshot…" : "Create and download snapshot"}</button></section>
       <section className="settings-group"><h3>Automatic backup to Saturn</h3><p>Neptune exports the same ZIP as the manual action and uploads it without changing its bytes.</p>
-        <StatusRow label="Local Neptune agent:" state={neptune?.state === "linked" ? "ready" : "unavailable"} detail={!neptune ? "Checking" : neptune.state === "linked" ? "Linked" : neptune.state === "unlinked" ? "Not linked" : neptune.state === "authorization_failed" ? "Authorization failed" : neptune.linked ? "Unavailable · last known linked" : "Unavailable · installation unknown"} />
-        <button className="button settings-action" onClick={() => initializeAgent()}>Initialize</button>
+        <StatusRow label="Local Neptune agent:" state={neptune?.state === "linked" ? "ready" : "unavailable"} detail={!neptune ? "Checking" : neptune.state === "linked" ? "Linked" : neptune.state === "unlinking" ? "Unlinking" : neptune.state === "unlinked" ? "Not linked" : neptune.state === "authorization_failed" ? "Authorization failed" : neptune.linked ? "Unavailable · last known linked" : "Unavailable · installation unknown"} />
         <BackupPolicyPanel service="saturn" base="/api/v1/operator/neptune/policy" headers={policyHeaders} />
+        {neptune?.state === "linked" || neptune?.linked === true ? <button className="button settings-action backup-unlink-action" type="button" disabled={pending || neptuneUnlinking || !["linked", "unlinking"].includes(neptune.state)} onClick={() => void unlinkNeptune()}>{neptuneUnlinking ? "Unlinking Neptune…" : neptune.state === "unlinking" ? "Retry Neptune unlink" : "Unlink Neptune agent"}</button>
+          : <button className="button settings-action backup-link-action" type="button" disabled={!neptune || neptune.state === "unavailable" && neptune.linked !== false} onClick={() => initializeAgent()}>{neptune?.state === "authorization_failed" ? "Repair Neptune connection" : "Link Neptune agent"}</button>}
         </section>
-      <section className="settings-group"><h3>Neptune version</h3><p>Current installed version: {neptune?.version ?? "Unavailable"}</p><button className="button settings-action" onClick={() => openSaturnUpdates("neptune")}>Check Neptune for updates</button>
-      </section>
+      <section className="settings-group"><h3>Restore snapshot</h3><p>Restore validates the complete archive before replacement and rolls back if post-restore health fails.</p><button className="button settings-action" type="button" disabled={pending || !recovery?.restoreEnabled} title={recovery?.reason} onClick={openRestore}>Browse local snapshot archive</button></section>
       <details><summary>Advanced helper recovery</summary><HelperRecoveryPanel enabled={updates?.updater.state === "ready"} /></details>
     </div>,
     gryphon: <div className="settings-groups bot-connection-groups">

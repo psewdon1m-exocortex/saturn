@@ -11,14 +11,26 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { Database, migrate } from "@saturn/database";
 import { policyMutationSchema, ServiceBackupPolicy } from "./service-backup-policy.js";
 import { NeptuneAgentController, NeptuneFleetOwnerController } from "./neptune-fleet.controller.js";
-import type { NeptuneFleetService } from "./neptune-fleet.service.js";
+import { NeptuneOwnerController } from "./neptune.controller.js";
+import { NeptuneFleetService } from "./neptune-fleet.service.js";
 
 it("rejects scope injection and central schedule/run authoring", async () => {
   expect(() => policyMutationSchema.parse({ kind: "schedule", pipeline: "archive", enabled: true, intervalHours: 24,
     expectedRevision: 1, requestId: randomUUID(), serviceId: "another-service" })).toThrow();
   const controller = new NeptuneFleetOwnerController({} as NeptuneFleetService);
   expect(() => controller.schedule()).toThrow("owning service");
-  await expect(controller.command("irrelevant", { kind: "archive.run" })).rejects.toThrow("owning service");
+  expect(() => controller.command({ kind: "archive.run" })).toThrow("owning service");
+  expect(() => controller.command({ kind: "agent.update", version: "1.2.3" })).toThrow("updater tui");
+  expect(() => controller.flowCheck()).toThrow("updater tui");
+  expect(() => controller.install()).toThrow("updater tui");
+  expect(policyMutationSchema.parse({ kind: "schedule-all", enabled: true, intervalHours: 24,
+    expectedRevision: 1, requestId: randomUUID() })).toMatchObject({ kind: "schedule-all", intervalHours: 24 });
+  expect(() => policyMutationSchema.parse({ kind: "schedule-all", enabled: true, intervalHours: 169,
+    expectedRevision: 1, requestId: randomUUID() })).toThrow();
+  const local = new NeptuneOwnerController();
+  expect(() => local.schedule()).toThrow("Saturn Settings");
+  expect(() => local.mirrorSchedule()).toThrow("Saturn Settings");
+  expect(() => local.policyRun()).toThrow("Manual Neptune runs");
 });
 
 it("binds every agent policy operation to the authenticated producer", async () => {
@@ -27,7 +39,6 @@ it("binds every agent policy operation to the authenticated producer", async () 
   const policy = {
     read: vi.fn().mockResolvedValue({ schema: "exocortex.backup.policy.v1", revision: 4 }),
     mutate: vi.fn().mockResolvedValue({ revision: 5 }),
-    run: vi.fn().mockResolvedValue({ id: requestId, state: "pending" }),
     jobs: vi.fn().mockResolvedValue([]),
   };
   const authenticate = vi.fn().mockResolvedValue(serviceId);
@@ -37,13 +48,48 @@ it("binds every agent policy operation to the authenticated producer", async () 
   await controller.policy(authorization);
   await controller.changePolicy(authorization, { kind: "schedule", pipeline: "archive", enabled: true,
     intervalHours: 24, expectedRevision: 4, requestId });
-  await controller.run(authorization, { pipeline: "archive", requestId });
+  await expect(controller.run(authorization)).rejects.toThrow("Manual Neptune runs");
   await controller.runs(authorization);
   expect(authenticate).toHaveBeenCalledTimes(4);
   expect(policy.read).toHaveBeenCalledWith(serviceId);
   expect(policy.mutate).toHaveBeenCalledWith(serviceId, expect.objectContaining({ requestId }));
-  expect(policy.run).toHaveBeenCalledWith(serviceId, { pipeline: "archive", requestId });
   expect(policy.jobs).toHaveBeenCalledWith(serviceId);
+});
+
+it("disconnects only with the producer credential", async () => {
+  const disconnect = vi.fn().mockResolvedValue({ state: "disconnected" });
+  const controller = new NeptuneAgentController({ disconnect } as unknown as NeptuneFleetService);
+  await expect(controller.disconnect("Bearer scoped-producer")).resolves.toEqual({ state: "disconnected" });
+  expect(disconnect).toHaveBeenCalledWith("Bearer scoped-producer");
+});
+
+it("confirms an already revoked producer without restoring its access", async () => {
+  const serviceId = randomUUID();
+  const authorization = `Bearer ${"A".repeat(43)}`;
+  const statements: string[] = [];
+  const sql = async (parts: TemplateStringsArray) => {
+    const statement = parts.join("?");
+    statements.push(statement);
+    if (statement.includes("SELECT id FROM backup_services")) return [{ id: serviceId }];
+    if (statement.includes("SELECT service_id FROM neptune_agents")) return [{ service_id: serviceId }];
+    return [];
+  };
+  const database = { transaction: (work: (tag: typeof sql) => Promise<unknown>) => work(sql),
+    withSql: (work: (tag: typeof sql) => Promise<unknown>) => work(sql) } as unknown as Database;
+  let revoked = false;
+  const backups = { authenticate: vi.fn(async () => {
+    if (revoked) throw new Error("Producer credential revoked");
+    return { service: { id: serviceId } };
+  }), hmac: vi.fn(() => "a".repeat(64)) };
+  const fleet = new NeptuneFleetService(database, backups as never);
+  await expect(fleet.disconnect(authorization)).resolves.toEqual({ state: "disconnected" });
+  expect(statements.some(statement => statement.includes("disconnect_token_hash = ?"))).toBe(true);
+  expect(statements.some(statement => statement.includes("UPDATE backup_enrollments SET consumed_at"))).toBe(true);
+  const firstCallStatements = statements.length;
+  revoked = true;
+  await expect(fleet.disconnect(authorization)).resolves.toEqual({ state: "disconnected" });
+  expect(statements.slice(firstCallStatements)).toHaveLength(1);
+  expect(statements.at(-1)).toContain("SELECT service_id FROM neptune_agents WHERE disconnect_token_hash");
 });
 
 describe.skipIf(!process.env.POLICY_TEST_DATABASE_URL)("service-owned policy on PostgreSQL", () => {
@@ -94,6 +140,19 @@ describe.skipIf(!process.env.POLICY_TEST_DATABASE_URL)("service-owned policy on 
     expect(await policies.mutate(serviceId, winningRequest)).toMatchObject({ revision: committed.revision });
     await expect(policies.mutate(serviceId, { ...winningRequest, intervalHours: 10 })).rejects.toThrow("another policy change");
     expect((await policies.read(otherId)).revision).toBe(12);
+  });
+
+  it("atomically applies one switch and hourly interval to both advanced pipelines", async () => {
+    const before = await policies.read(serviceId);
+    const request = { kind: "schedule-all" as const, enabled: false, intervalHours: 24,
+      expectedRevision: before.revision, requestId: randomUUID() };
+    const result = await policies.mutate(serviceId, request);
+    expect(result.revision).toBe(before.revision + 1);
+    expect(result.archive).toEqual({ enabled: false, intervalHours: 24 });
+    expect(result.mirror).toEqual({ enabled: false, intervalMinutes: 1440 });
+    expect(await policies.mutate(serviceId, request)).toEqual(result);
+    await expect(policies.mutate(otherId, { ...request, requestId: randomUUID(),
+      expectedRevision: (await policies.read(otherId)).revision })).rejects.toThrow("no advanced backup pipeline");
   });
 
   it("keeps restored intent paused and deduplicates manual commands without changing schedule", async () => {

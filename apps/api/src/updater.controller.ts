@@ -52,6 +52,7 @@ export class UpdaterController {
     const { component } = z.object({ component: z.enum(["saturn", "updater", "gryphon", "neptune"]) }).strict().parse(body);
     if (component === "updater") throw new ForbiddenException("Check Updater releases with sudo updater tui on the host");
     if (component === "gryphon") throw new BadRequestException("Check shared Gryphon releases with sudo updater tui");
+    if (component === "neptune") throw new ForbiddenException("Check Neptune releases with sudo updater tui on the host");
     const health = await agent("GET", "/v1/health");
     if (health.update_protocol !== 2) throw new BadRequestException("Updater 0.5.0 or later is required for the saved-copy update protocol");
     return updater("/v2/check", { head_id: headId(), component }, 45_000);
@@ -76,15 +77,14 @@ export class UpdaterController {
     @Headers("x-update-receipt") receipt = "", @Headers("x-update-saved") saved = "") {
     if (component === "updater") throw new ForbiddenException("Update Updater with sudo updater tui on the host");
     if (component === "gryphon") throw new BadRequestException("Update the shared Gryphon gateway with sudo updater tui");
+    if (component === "neptune") throw new ForbiddenException("Update Neptune with sudo updater tui on the host");
     if (component === "saturn") {
       if (saved !== "1") throw new BadRequestException("Save the ZIP on your computer before installing");
       const archive = await readUpdateBytes(body);
       try { return await updater("/v2/updates", savedBackup(archive, receipt, updaterToken(), "saturn", headId()), 90_000); }
       finally { archive.fill(0); }
     }
-    if (!["neptune", "gryphon"].includes(component)) throw new BadRequestException("Unknown component");
-    const input = z.object({ version: z.string().regex(/^\d+\.\d+\.\d+$/), request_id: z.uuid() }).strict().parse(body);
-    return updater(`/v2/components/${component}/updates`, { ...input, head_id: headId() }, 45_000);
+    throw new BadRequestException("Unknown component");
   }
 
   @Get("flow/jobs") flowJobs() { return agent("GET", `/v1/jobs?head_id=${encodeURIComponent(headId())}`); }

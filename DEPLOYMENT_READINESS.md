@@ -10,7 +10,7 @@ Owner login and administration routes use the public/non-indexable authenticated
 
 ## Trust and operator prerequisites
 
-The selected deployment profile contains Kernel, Volt, Saturn, Updater, Neptune and Gryphon. Per-host helpers are reused when healthy; attaching a service does not silently downgrade or reinstall them. Operator control is available through connected service Settings and typed CLI actions. Jobs retain their identifiers across page reloads and must reach a verified terminal result.
+The selected deployment profile contains Kernel, Volt, Saturn, Updater, Neptune and Gryphon. Per-host agents are reused when healthy; attaching a service does not silently downgrade or reinstall them. Root `sudo updater tui` owns shared-agent release checks and updates. Each service's Settings owns its own Neptune policy and scoped agent bindings. Jobs retain their identifiers across page reloads and must reach a verified terminal result.
 
 Release manifests use detached RSA-PSS-SHA256 signatures with a per-project RSA key of at least 3072 bits, while Saturn retains its Ed25519 installer signature. Keep both private keys only in GitHub Secrets and expose them only to the protected release-signing job. CI derives the public counterparts and embeds them in Saturn's versioned `bootstrap.sh`; bootstrap creates `/etc/exocortex/release-trust/saturn.pem` and `/etc/vault/release-public-key.pem`, verifies the manifest before downloading the service, and never replaces an existing mismatching key automatically. No `scp`, manual release-key fingerprint or separately downloaded public key is part of this trust path. Saturn releases using server-owned Nginx require Updater 0.4.9 or newer.
 

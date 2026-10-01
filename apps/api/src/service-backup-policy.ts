@@ -9,6 +9,7 @@ const mirrorIntent = z.object({ enabled: z.boolean(), intervalMinutes: z.number(
 const base = { expectedRevision: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER), requestId: z.uuid() };
 export const policyMutationSchema = z.discriminatedUnion("kind", [
   z.object({ ...base, kind: z.literal("schedule"), pipeline, enabled: z.boolean(), intervalHours: z.number().min(1 / 60).max(8760) }).strict(),
+  z.object({ ...base, kind: z.literal("schedule-all"), enabled: z.boolean(), intervalHours: z.number().int().min(1).max(168) }).strict(),
   z.object({ ...base, kind: z.literal("restore"), archive: archiveIntent, mirror: mirrorIntent.nullable() }).strict(),
   z.object({ ...base, kind: z.literal("resume") }).strict(),
 ]);
@@ -89,6 +90,11 @@ export class ServiceBackupPolicy {
         } else {
           row.mirror_enabled = input.enabled; row.mirror_interval_minutes = Math.round(minutes);
         }
+      } else if (input.kind === "schedule-all") {
+        if (row.mirror_root === null) throw new NotFoundException("This service has no advanced backup pipeline");
+        row.archive_enabled = row.mirror_enabled = input.enabled;
+        row.archive_interval_hours = input.intervalHours;
+        row.mirror_interval_minutes = input.intervalHours * 60;
       } else if (input.kind === "restore") {
         if ((input.mirror !== null) !== (row.mirror_root !== null)) throw new ConflictException("Backup pipeline profile differs from this deployment");
         row.archive_enabled = input.archive.enabled; row.archive_interval_hours = input.archive.intervalHours;

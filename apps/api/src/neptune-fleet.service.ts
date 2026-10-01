@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { Inject, Injectable } from "@nestjs/common";
 import type { BackupIngestService } from "@saturn/backup-ingest";
 import type { Database } from "@saturn/database";
@@ -105,6 +105,61 @@ export class NeptuneFleetService {
     return (await this.backups.authenticate(authorization)).service.id;
   }
 
+  async disconnect(authorization: string | undefined) {
+    const match = /^Bearer ([A-Za-z0-9_-]{43})$/.exec(authorization ?? "");
+    let serviceId: string;
+    try { serviceId = await this.authenticate(authorization); }
+    catch (error) {
+      // A successful first response may be lost after the credential rotation.
+      // This receipt grants only confirmation of that already completed unlink.
+      if (match?.[1] !== undefined) {
+        const tokenHash = this.backups.hmac("backup-service-token", match[1]);
+        const rows = await this.database.withSql(sql => sql<{ service_id: string }[]>`
+          SELECT service_id FROM neptune_agents WHERE disconnect_token_hash = ${tokenHash} LIMIT 1
+        `);
+        if (rows.length === 1) return { state: "disconnected" as const };
+      }
+      throw error;
+    }
+    if (match?.[1] === undefined) throw new Error("Invalid producer authorization");
+    const tokenHash = this.backups.hmac("backup-service-token", match[1]);
+    // Keep the storage identity and archive history so the same deployment can
+    // obtain a fresh setup code later. Rotate the producer credential to an
+    // undisclosed value and revoke both optional device capabilities.
+    const inaccessibleTokenHash = this.backups.hmac("backup-service-token", randomBytes(32).toString("base64url"));
+    await this.database.transaction(async (sql) => {
+      const selected = await sql<{ id: string }[]>`
+        SELECT id FROM backup_services WHERE id = ${serviceId} AND state = 'active' FOR UPDATE
+      `;
+      if (selected.length !== 1) throw new Error("Neptune identity not found or not active");
+      await sql`
+        INSERT INTO neptune_agents(service_id) VALUES (${serviceId})
+        ON CONFLICT (service_id) DO NOTHING
+      `;
+      await sql`
+        UPDATE neptune_agents SET desired_revision = desired_revision + 1,
+          archive_enabled = false, mirror_enabled = false, policy_paused = false,
+          disconnect_token_hash = ${tokenHash}, latest_error = 'Unlinked by owner', updated_at = now()
+        WHERE service_id = ${serviceId}
+      `;
+      await sql`
+        UPDATE neptune_agent_commands SET state = 'failed', error = 'service_unlinked', completed_at = now()
+        WHERE service_id = ${serviceId} AND state = 'pending'
+      `;
+      await sql`
+        UPDATE backup_enrollments SET consumed_at = now()
+        WHERE service_id = ${serviceId} AND consumed_at IS NULL
+      `;
+      await sql`
+        UPDATE backup_services SET token_hash = ${inaccessibleTokenHash},
+          previous_token_hash = NULL, previous_token_expires_at = NULL,
+          mirror_device_id = NULL, reader_device_id = NULL, updated_at = now()
+        WHERE id = ${serviceId}
+      `;
+    });
+    return { state: "disconnected" as const };
+  }
+
   async list() {
     const rows = await this.database.withSql((sql) => sql<AgentRow[]>`
       SELECT service_id, desired_revision::text, archive_enabled, archive_interval_hours,
@@ -171,6 +226,7 @@ export class NeptuneFleetService {
   }
 
   async enqueue(serviceId: string, kind: NeptuneCommandKind, payload: Record<string, unknown> = {}, id: string = randomUUID()) {
+    if (kind === "agent.update") throw new Error("Update Neptune with sudo updater tui on the agent host");
     await this.database.transaction(async (sql) => {
       const services = await sql<{ mirror_root: string | null }[]>`
         SELECT mirror_root FROM backup_services WHERE id = ${serviceId} AND state = 'active' FOR UPDATE
@@ -182,10 +238,6 @@ export class NeptuneFleetService {
         if (previous[0].service_id !== serviceId || previous[0].kind !== kind || previous[0].payload.version !== payload.version) throw new Error("Command request ID belongs to another operation");
         return;
       }
-      if (kind === "agent.update") {
-        const active = await sql<{ id: string }[]>`SELECT id FROM neptune_agent_commands WHERE service_id = ${serviceId} AND kind = 'agent.update' AND state = 'pending' AND created_at > now() - interval '7 days'`;
-        if (active.length) throw new Error("A remote Neptune update is already pending");
-      }
       if (kind === "mirror.run" && selected.mirror_root === null)
         throw new Error("Neptune identity has no mirror pipeline");
       await sql`
@@ -196,12 +248,6 @@ export class NeptuneFleetService {
         INSERT INTO neptune_agent_commands(id, service_id, kind, payload, created_at)
         VALUES (${id}, ${serviceId}, ${kind}, ${sql.json(payload as never)}, now())
       `;
-      if (kind === "agent.update" && typeof payload.version === "string") {
-        await sql`
-          UPDATE neptune_agents SET desired_version = ${payload.version}, desired_revision = desired_revision + 1, updated_at = now()
-          WHERE service_id = ${serviceId}
-        `;
-      }
     });
     return { id, kind, state: "pending" as const };
   }

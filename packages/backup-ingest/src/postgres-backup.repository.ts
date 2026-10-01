@@ -158,6 +158,7 @@ export class PostgresBackupRepository implements BackupRepository {
     const rows = await sql<{ service_id: string }[]>`UPDATE backup_enrollments SET consumed_at = ${now} WHERE code_hash = ${codeHash} AND consumed_at IS NULL AND expires_at > ${now} RETURNING service_id`;
     const id = rows[0]?.service_id; if (id === undefined) return undefined;
     const services = await sql<ServiceRow[]>`SELECT * FROM backup_services WHERE id = ${id} AND state = 'active' LIMIT 1`;
+    if (services[0] !== undefined) await sql`UPDATE neptune_agents SET disconnect_token_hash = NULL WHERE service_id = ${id}`;
     return services[0] === undefined ? undefined : service(services[0]);
   }); }
   attachMirrorDevice(serviceId: string, deviceId: string, now: Date, readerDeviceId?: string): Promise<BackupServiceRecord> { return this.database.withSql(async (sql) => {

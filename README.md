@@ -34,12 +34,14 @@ the complete target architecture is documented in
 
 После обычной установки создайте в Synchronization pipeline для namespace
 `saturn` и одноразовый Neptune setup code. В Settings → Backup нажмите
-**Initialize Neptune** и введите код. Updater установит отсутствующий агент
-или подключит существующий. Neptune и Gryphon также устанавливаются автоматически
+**Initialize Neptune** и введите код. Updater подключит профиль Saturn к
+установленному общему агенту; если тот отсутствует на старом или повреждённом
+хосте, восстановите его через установщик или `sudo updater tui`. Neptune и Gryphon также устанавливаются автоматически
 после регистрации Saturn, настройки Kernel Register и доверия к релизам. `sudo saturn-install backup` (старое имя `vaultctl backup` также
 поддерживается) устанавливает отсутствующий агент и остаётся резервным
-CLI-сценарием. После подключения расписание и ручной запуск резервного
-копирования задаются в Settings → Backup соответствующего сервиса.
+CLI-сценарием. После подключения переключатель и часовой интервал
+автоматического резервного копирования задаются в Settings → Backup
+соответствующего сервиса; ручной запуск удалённого backup не предлагается.
 Synchronization остаётся местом для подключения и наблюдения за агентами.
 Перед обновлением Neptune до версии с `policy_protocol: 1` установите
 совместимый Saturn: новый агент передаёт в него запросы политики.
@@ -199,8 +201,9 @@ The current six-service deployment, trust, recovery and acceptance contract is d
 
 See [Update protocol, saved ZIP and first migration](docs/UPDATE-PROTOCOL.md).
 The UI uses Updater **0.5.0**, an exact selected version, the standard ZIP saved
-on the operator PC, and durable status/progress. Helper updates use the same
-dialog without a backup. No update ZIP is retained on the application host.
+on the operator PC, and durable status/progress for Saturn releases. Shared
+Updater, Neptune and Gryphon release operations use `sudo updater tui` on the
+host. No update ZIP is retained on the application host.
 
 Release builds pin the published Updater 0.5.0 installer by the SHA-256 in
 `.release/updater.sha256` and verify it before extraction. This digest was
