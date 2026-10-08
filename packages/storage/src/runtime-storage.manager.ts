@@ -30,6 +30,7 @@ interface StoredStorageProfile {
   readonly operationTimeoutMs: number;
   readonly healthTimeoutMs: number;
   readonly maxConnections: number;
+  readonly requireFsync?: boolean;
 }
 
 export type StorageAdapterFactory = (config: SaturnConfig["storage"]) => StorageAdapter;
@@ -65,6 +66,7 @@ function parseStoredProfile(value: unknown, runtimeDirectory: string): StoredSto
   if (!isRecord(value) || value.version !== 1) throw new Error("Runtime storage profile is invalid");
   const authMode = value.authMode;
   if (authMode !== "password_file" && authMode !== "private_key_file") throw new Error("Runtime storage profile is invalid");
+  if (value.requireFsync !== undefined && typeof value.requireFsync !== "boolean") throw new Error("Runtime storage durability policy is invalid");
   const root = requiredString(value, "root");
   if (root.startsWith("/") || root.replaceAll("\\", "/").split("/").includes("..") || containsControlCharacter(root)) {
     throw new Error("Runtime storage profile root is invalid");
@@ -88,10 +90,11 @@ function parseStoredProfile(value: unknown, runtimeDirectory: string): StoredSto
     operationTimeoutMs: requiredInteger(value, "operationTimeoutMs", 1_000, 120_000),
     healthTimeoutMs: requiredInteger(value, "healthTimeoutMs", 500, 5_000),
     maxConnections: requiredInteger(value, "maxConnections", 1, 8),
+    ...(value.requireFsync === undefined ? {} : { requireFsync: value.requireFsync }),
   };
 }
 
-function storageConfig(profile: StoredStorageProfile): SaturnConfig["storage"] {
+function storageConfig(profile: StoredStorageProfile, requireFsync = false): SaturnConfig["storage"] {
   return {
     host: profile.host,
     port: profile.port,
@@ -103,6 +106,7 @@ function storageConfig(profile: StoredStorageProfile): SaturnConfig["storage"] {
     operationTimeoutMs: profile.operationTimeoutMs,
     healthTimeoutMs: profile.healthTimeoutMs,
     maxConnections: profile.maxConnections,
+    requireFsync: requireFsync || profile.requireFsync === true,
   };
 }
 
@@ -116,6 +120,7 @@ export class RuntimeStorageManager implements StorageAdapter {
   readonly #activePath: string;
   readonly #factory: StorageAdapterFactory;
   readonly #retired = new Set<StorageAdapter>();
+  readonly #requireFsync: boolean;
   #active: ActiveStorageProfile;
   #adapter: StorageAdapter;
   #refreshing: Promise<void> | undefined;
@@ -124,6 +129,7 @@ export class RuntimeStorageManager implements StorageAdapter {
     this.#runtimeDirectory = path.resolve(runtimeDirectory);
     this.#activePath = path.join(this.#runtimeDirectory, "active.json");
     this.#factory = factory;
+    this.#requireFsync = bootstrap.requireFsync === true;
     this.#active = { profileId: "bootstrap", revision: 1, activatedAt: new Date(0).toISOString(), source: "bootstrap", config: bootstrap };
     this.#adapter = factory(bootstrap);
   }
@@ -158,15 +164,16 @@ export class RuntimeStorageManager implements StorageAdapter {
       }
       const stored = parseStoredProfile(JSON.parse(raw) as unknown, this.#runtimeDirectory);
       if (stored.profileId === this.#active.profileId && stored.revision === this.#active.revision) return;
-      const next = this.#factory(storageConfig(stored));
+      const next = this.#factory(storageConfig(stored,this.#requireFsync));
       this.#retired.add(this.#adapter);
       this.#adapter = next;
-      this.#active = { profileId: stored.profileId, revision: stored.revision, activatedAt: stored.activatedAt, source: "runtime", config: storageConfig(stored) };
+      this.#active = { profileId: stored.profileId, revision: stored.revision, activatedAt: stored.activatedAt, source: "runtime", config: storageConfig(stored,this.#requireFsync) };
     })().finally(() => { this.#refreshing = undefined; });
     return this.#refreshing;
   }
 
   async activate(profile: Omit<ActiveStorageProfile, "source">, adapter?: StorageAdapter): Promise<void> {
+    if (this.#requireFsync && profile.config.requireFsync !== true) throw new Error("Runtime storage cannot downgrade the fsync requirement");
     const credentialFile = profile.config.authMode === "password_file" ? profile.config.passwordFile : profile.config.privateKeyFile;
     if (credentialFile === undefined || !withinDirectory(this.#runtimeDirectory, path.resolve(credentialFile))) {
       throw new Error("Runtime storage credential must be inside the protected storage directory");
@@ -186,6 +193,7 @@ export class RuntimeStorageManager implements StorageAdapter {
       operationTimeoutMs: profile.config.operationTimeoutMs,
       healthTimeoutMs: profile.config.healthTimeoutMs,
       maxConnections: profile.config.maxConnections,
+      ...(profile.config.requireFsync === undefined ? {} : { requireFsync: profile.config.requireFsync }),
     };
     await fs.mkdir(this.#runtimeDirectory, { recursive: true, mode: 0o700 });
     const temporary = path.join(this.#runtimeDirectory, `.active-${profile.profileId}.tmp`);

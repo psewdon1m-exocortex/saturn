@@ -5,6 +5,7 @@ import type { SaturnConfig } from "@saturn/config";
 
 export interface SftpLease {
   readonly sftp: SFTPWrapper;
+  readonly disconnected?: AbortSignal;
   release(broken?: boolean): Promise<void>;
 }
 
@@ -12,12 +13,16 @@ interface PooledConnection {
   readonly client: Client;
   readonly sftp: SFTPWrapper;
   healthy: boolean;
+  closed: boolean;
+  readonly disconnect: AbortController;
 }
 
 interface Waiter {
   readonly resolve: (lease: SftpLease) => void;
   readonly reject: (error: Error) => void;
 }
+
+const channelDisconnects = new WeakMap<SFTPWrapper,AbortSignal>();
 
 function fingerprintForKey(key: Buffer): string {
   return `SHA256:${createHash("sha256").update(key).digest("base64").replace(/=+$/, "")}`;
@@ -31,17 +36,21 @@ function hostVerifier(expectedFingerprint: string): (key: Buffer) => boolean {
   };
 }
 
-function withTimeout<T>(label: string, timeoutMs: number, register: (finish: (error?: Error, value?: T) => void) => void): Promise<T> {
+function withTimeout<T>(label: string, timeoutMs: number, register: (finish: (error?: Error, value?: T) => void) => void, signal?:AbortSignal): Promise<T> {
   return new Promise((resolve, reject) => {
+    if(signal?.aborted) {reject(new Error("SFTP transport disconnected"));return;}
     let settled = false;
     const finish = (error?: Error, value?: T): void => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      signal?.removeEventListener("abort",abort);
       if (error === undefined) resolve(value as T);
       else reject(error);
     };
     const timer = setTimeout(() => finish(new Error(`${label} timed out after ${String(timeoutMs)} ms`)), timeoutMs);
+    const abort=()=>finish(new Error("SFTP transport disconnected"));
+    signal?.addEventListener("abort",abort,{once:true});
     try { register(finish); }
     catch (error) { finish(error instanceof Error ? error : new Error(label)); }
   });
@@ -49,6 +58,7 @@ function withTimeout<T>(label: string, timeoutMs: number, register: (finish: (er
 
 async function closeConnection(connection: PooledConnection): Promise<void> {
   connection.healthy = false;
+  if (connection.closed) return;
   await new Promise<void>((resolve) => {
     let settled = false;
     const finish = (): void => {
@@ -85,10 +95,12 @@ export class SftpConnectionPool {
     return { privateKey: await fs.readFile(this.#storage.privateKeyFile) };
   }
 
-  async #connect(): Promise<PooledConnection> {
+  async #connectOnce(deadline: number): Promise<PooledConnection> {
     const client = new Client();
     const authentication = await this.#authentication();
-    await withTimeout<undefined>("SSH ready", this.#storage.operationTimeoutMs, (finish) => {
+    const remaining = Math.max(1,deadline-Date.now());
+    try {
+    await withTimeout<undefined>("SSH ready", remaining, (finish) => {
       client.once("ready", () => finish(undefined));
       client.once("error", (error) => finish(error));
       client.once("end", () => finish(new Error("SSH connection ended before ready")));
@@ -98,7 +110,7 @@ export class SftpConnectionPool {
         username: this.#storage.username,
         ...authentication,
         hostVerifier: hostVerifier(this.#storage.hostFingerprint),
-        readyTimeout: Math.min(this.#storage.operationTimeoutMs, 20_000),
+        readyTimeout: Math.min(remaining, 20_000),
         keepaliveInterval: 10_000,
         keepaliveCountMax: 3,
         algorithms: { serverHostKey: ["ssh-ed25519", "rsa-sha2-512", "rsa-sha2-256", "ssh-rsa"] },
@@ -107,19 +119,42 @@ export class SftpConnectionPool {
     // SFTP request/response traffic otherwise pays delayed-ACK latency for
     // small final packets, even on the same host.
     client.setNoDelay(true);
-    const sftp = await withTimeout<SFTPWrapper>("SFTP channel", this.#storage.operationTimeoutMs, (finish) => {
+    const sftp = await withTimeout<SFTPWrapper>("SFTP channel", Math.max(1, deadline-Date.now()), (finish) => {
       client.sftp((error, channel) => finish(error ?? undefined, channel));
     });
-    const connection: PooledConnection = { client, sftp, healthy: true };
-    client.on("error", () => { connection.healthy = false; });
-    client.on("end", () => { connection.healthy = false; });
+    const connection: PooledConnection = { client, sftp, healthy: true, closed: false, disconnect: new AbortController() };
+    channelDisconnects.set(sftp,connection.disconnect.signal);
+    const disconnected = () => { connection.healthy = false; connection.disconnect.abort(); };
+    client.on("error", disconnected);
+    client.on("end", disconnected);
+    client.on("close", () => { disconnected(); connection.closed = true; });
+    sftp.on("close", disconnected);
+    if (this.#closed) { await closeConnection(connection); throw new Error("SFTP pool is closed"); }
     return connection;
+    } catch (error) { client.destroy(); throw error; }
+  }
+
+  async #connect(): Promise<PooledConnection> {
+    const deadline = Date.now()+this.#storage.operationTimeoutMs;
+    for (let attempt=0;;attempt++) {
+      try { return await this.#connectOnce(deadline); }
+      catch (error) {
+        const code = error instanceof Error && "code" in error ? String(error.code) : "";
+        const transient = ["ETIMEDOUT","ECONNRESET","ECONNREFUSED","EPIPE","EAI_AGAIN"].includes(code)
+          || (error instanceof Error && /^(Timed out while waiting for handshake|SSH connection ended before ready|SSH ready timed out)/.test(error.message));
+        // Retry transport establishment only. No file operation or trust/auth
+        // failure is replayed, and both attempts share one original deadline.
+        if (!transient || attempt>=1 || this.#closed || Date.now()+100>=deadline) throw error;
+        await new Promise(resolve=>setTimeout(resolve,100));
+      }
+    }
   }
 
   #lease(connection: PooledConnection): SftpLease {
     let released = false;
     return {
       sftp: connection.sftp,
+      disconnected: connection.disconnect.signal,
       release: async (broken = false) => {
         if (released) return;
         released = true;
@@ -149,16 +184,53 @@ export class SftpConnectionPool {
       });
   }
 
-  async acquire(): Promise<SftpLease> {
+  #assertOpen(): void {
     if (this.#closed) throw new Error("SFTP pool is closed");
-    const idle = this.#idle.pop();
-    if (idle !== undefined) return this.#lease(idle);
+  }
+
+  async acquire(signal?: AbortSignal): Promise<SftpLease> {
+    if (signal?.aborted) throw new Error("SFTP acquisition was cancelled");
+    this.#assertOpen();
+    for (let idle = this.#idle.pop(); idle !== undefined; idle = this.#idle.pop()) {
+      if (idle.healthy) return this.#lease(idle);
+      await closeConnection(idle);
+      this.#total -= 1;
+      this.#wakeWaiter();
+    }
+    this.#assertOpen();
     if (this.#total < this.#storage.maxConnections) {
       this.#total += 1;
-      try { return this.#lease(await this.#connect()); }
-      catch (error) { this.#total -= 1; throw error; }
+      try {
+        const lease=this.#lease(await this.#connect());
+        if(signal?.aborted) {await lease.release(true);throw new Error("SFTP acquisition was cancelled");}
+        return lease;
+      }
+      catch (error) {
+        // release above already returned a cancelled connection's capacity.
+        if (!(error instanceof Error && error.message === "SFTP acquisition was cancelled")) {this.#total -= 1;this.#wakeWaiter();}
+        throw error;
+      }
     }
-    return new Promise((resolve, reject) => this.#waiters.push({ resolve, reject }));
+    if (this.#waiters.length >= this.#storage.maxConnections * 16) throw new Error("SFTP waiting queue is full");
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const clean = () => { clearTimeout(timer); signal?.removeEventListener("abort", abort); };
+      const fail = (error: Error) => {
+        if (settled) return;
+        settled = true; clean();
+        const index = this.#waiters.indexOf(waiter);
+        if (index >= 0) this.#waiters.splice(index, 1);
+        reject(error);
+      };
+      const waiter: Waiter = {
+        resolve: lease => { if (settled) { void lease.release(); return; } settled = true; clean(); resolve(lease); },
+        reject: fail,
+      };
+      const abort = () => fail(new Error("SFTP acquisition was cancelled"));
+      const timer = setTimeout(() => fail(new Error("SFTP queue wait timed out")), this.#storage.operationTimeoutMs);
+      signal?.addEventListener("abort", abort, { once: true });
+      this.#waiters.push(waiter);
+    });
   }
 
   async close(): Promise<void> {
@@ -185,5 +257,5 @@ export function callSftp<T>(
       return;
     }
     callable.call(sftp, ...args, (error?: Error, value?: T) => finish(error, value));
-  });
+  },channelDisconnects.get(sftp));
 }

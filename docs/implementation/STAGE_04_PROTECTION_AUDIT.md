@@ -35,8 +35,10 @@ Evidence SHA-256: `e396bf55e631a3df2fd81e63929eb5615cb4cc2e205b040bcdf48f56de170
 - Overwrite and delete are reversible under their configured policies.
 - The current file is distinct from archived immutable versions.
 - Stable `resource_id` survives overwrite, version restore and trash restore.
-- Database/storage divergence is recorded as a typed reconciliation issue;
-  orphans are moved only into a run-specific `_system/orphans` namespace.
+- Database/storage divergence is recorded as a typed reconciliation issue.
+  Since the operator's 2026-10-05 request, unknown visible files remain in place
+  with resolution `awaiting_owner_catalog_analysis`; the owner reviews and applies
+  [storage catalog analysis](STORAGE_CATALOG_ANALYSIS.md) explicitly.
 - Audit is append-only, bounded on read/export and free of raw secrets.
 - Operational logs are bounded by container byte/count limits and audit/export
   queries are bounded by count and time window.
@@ -66,8 +68,8 @@ overwrite, version restore, trash restore and exact cleanup.
   journaled for reconciliation.
 - Restore uses the same lock/journal/rollback pattern and never deletes the
   previously current bytes before the transaction commits.
-- Reconciliation never destroys unknown bytes: it marks, alerts or moves an
-  orphan into a generated quarantine namespace.
+- Reconciliation never moves or destroys unknown bytes. It records the finding
+  for explicit owner catalog analysis; synchronization changes metadata atomically.
 - Purge defaults to disabled. Rollback of application code does not require
   destructive schema rollback after real Stage 4 metadata exists.
 

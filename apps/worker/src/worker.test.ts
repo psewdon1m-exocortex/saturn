@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { SaturnConfig } from "@saturn/config";
 import { buildWorker, type WorkerDatabasePort } from "./worker.js";
 
@@ -24,6 +24,18 @@ function database(overrides: Partial<WorkerDatabasePort> = {}): WorkerDatabasePo
 }
 
 describe("worker health", () => {
+  it("runs catalog tasks outside the outer shared barrier so their atomic commit can acquire exclusive maintenance", async () => {
+    const shared = vi.fn(async (action: () => Promise<unknown>) => action());
+    const task = vi.fn(async () => undefined);
+    const runtime = buildWorker({ ...config, worker: { ...config.worker, reconciliationIntervalMs: 60_000 } },
+      database({ withSharedMaintenance: shared as NonNullable<WorkerDatabasePort["withSharedMaintenance"]> }),
+      { check: async () => ({ state: "pass" }) }, { reconcile: async () => undefined, storageCatalog: task });
+    openApps.push(runtime.app);
+    runtime.startBackgroundJobs();
+    await Promise.resolve();
+    expect(task).toHaveBeenCalledOnce();
+    expect(shared).not.toHaveBeenCalled();
+  });
   it("exposes independent liveness and readiness", async () => {
     const runtime = buildWorker(config, database(), { check: async () => ({ state: "pass" }) });
     openApps.push(runtime.app);

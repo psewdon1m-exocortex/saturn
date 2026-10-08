@@ -1,6 +1,7 @@
 import type { Readable } from "node:stream";
 
 export type BackupServiceState = "active" | "revoked";
+export type BackupPipelineKind = "host_service" | "service" | "volt" | "mastermind";
 export type BackupRunState = "pending" | "uploading" | "appending" | "verifying" | "complete" | "failed";
 
 export interface BackupRetentionPolicy {
@@ -15,6 +16,9 @@ export interface BackupServiceRecord {
   readonly slug: string;
   readonly namespaceSlug: string;
   readonly deploymentId: string;
+  readonly pipelineKind: BackupPipelineKind;
+  readonly archivePipeline: boolean;
+  readonly pipelineGroupId?: string;
   readonly mirrorRoot?: "volt" | "mastermind";
   readonly mirrorDeviceId?: string;
   readonly readerDeviceId?: string;
@@ -120,9 +124,12 @@ export interface BackupOptions {
 }
 
 export interface BackupServiceCreateInput {
+  readonly archivePipeline?: boolean;
   readonly slug: string;
   readonly namespaceSlug?: string;
   readonly deploymentId?: string;
+  readonly pipelineKind?: BackupPipelineKind;
+  readonly pipelineGroupId?: string;
   readonly mirrorRoot?: "volt" | "mastermind";
   readonly name: string;
   readonly requireEncryption?: boolean;
@@ -156,6 +163,9 @@ export interface BackupRunCreateInput {
 }
 
 export interface BackupRepository {
+  withRunLock?<T>(runId: string, action: () => Promise<T>): Promise<T>;
+  listRetentionCandidates?(serviceId: string, policy: BackupRetentionPolicy, limit: number): Promise<readonly BackupRunRecord[]>;
+  listMissingCatalogRuns?(serviceId: string, limit: number): Promise<readonly BackupRunRecord[]>;
   createService(value: BackupServiceRecord): Promise<void>;
   getService(id: string): Promise<BackupServiceRecord | undefined>;
   getActiveServiceByDeployment(namespaceSlug: string, deploymentId: string): Promise<BackupServiceRecord | undefined>;
@@ -173,6 +183,8 @@ export interface BackupRepository {
   releaseAppend(serviceId: string, runId: string, failureCode: string, terminal: boolean, now: Date): Promise<void>;
   claimComplete(serviceId: string, runId: string, now: Date): Promise<BackupRunRecord>;
   completeRun(serviceId: string, runId: string, receipt: BackupReceipt, now: Date): Promise<BackupRunRecord>;
+  releaseCompletion?(serviceId: string, runId: string, now: Date): Promise<void>;
+  listCompletedRuns?(serviceId: string, offset: number, limit: number): Promise<readonly BackupRunRecord[]>;
   failRun(serviceId: string, runId: string, failureCode: string, now: Date): Promise<void>;
   usage(serviceId: string, since: Date): Promise<BackupUsage>;
   recordRestoreTest(value: BackupRestoreTestRecord): Promise<void>;

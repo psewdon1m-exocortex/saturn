@@ -70,6 +70,31 @@ function overview() {
 }
 
 describe("owner Saturn UI", () => {
+  it("keeps the selected context-menu action focused across storage rerenders", async () => {
+    window.history.replaceState({}, "", "/files");
+    const now = new Date().toISOString();
+    const root = { id: "00000000-0000-7000-8000-000000000001", type: "folder", name: "root", storagePath: "", sizeBytes: 0, status: "active", createdAt: now, updatedAt: now };
+    const file = { ...root, id: "01900000-0000-7000-8000-000000000091", parentId: root.id, type: "file", name: "valuable.bin", storagePath: "valuable.bin", sizeBytes: 1024, mimeType: "application/octet-stream" };
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = requestUrl(input);
+      if (url === "/api/v1/public/reachability") return json({ status: "ready" });
+      if (url.endsWith("/auth/session")) return json({ state: "authenticated" });
+      if (url.endsWith("/auth/preferences")) return json(preferences());
+      if (url.includes("/folders/resolve?")) return json([root]);
+      if (url.includes("/children")) return json([file]);
+      if (url.includes("/resources/")) return json(root);
+      return json({});
+    }));
+    render(<App />);
+    fireEvent.contextMenu(await screen.findByRole("button", { name: file.name }));
+    const download = screen.getByRole("menuitem", { name: "Download" });
+    act(() => download.focus());
+    expect(document.activeElement).toBe(download);
+    fireEvent.change(screen.getByRole("searchbox", { name: "Search storage" }), { target: { value: "valuable" } });
+    expect(document.activeElement).toBe(download);
+    fireEvent.keyDown(download, { key: "Escape" });
+    expect(screen.queryByRole("menu")).toBeNull();
+  });
   it("renders an empty credential field and exchanges it for a session", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       void init;
@@ -87,11 +112,13 @@ describe("owner Saturn UI", () => {
     vi.stubGlobal("fetch", fetchMock);
     render(<App />);
     const field = await screen.findByLabelText("Access Key");
+    expect(document.querySelector(".login-brand__icon img")?.getAttribute("src")).toBe("/saturn-planet-on-black.png");
     expect(field).toHaveProperty("value", "");
     fireEvent.change(field, { target: { value: "temporary-owner-proof" } });
     expect(field).toHaveProperty("value", "temporary-owner-proof");
     fireEvent.click(screen.getByRole("button", { name: "Enter service" }));
     expect(await screen.findByRole("heading", { name: "dashboard" })).toBeTruthy();
+    expect(document.querySelector(".sidebar__planet")?.getAttribute("src")).toBe("/saturn-favicon.png");
     expect(await screen.findByRole("heading", { name: "Tasks" })).toBeTruthy();
     expect(await screen.findByText("archive.bin")).toBeTruthy();
     expect(screen.getByText("50.0%")).toBeTruthy();
@@ -106,6 +133,20 @@ describe("owner Saturn UI", () => {
     expect(window.localStorage.length).toBe(0);
   });
 
+  it.each(["a", " x\r\nключ!? " + "x".repeat(2048), "\r\n"])("submits pasted opaque key text exactly and clears rejected proof (%#)",async(key)=>{
+    const fetchMock=vi.fn(async(input:RequestInfo|URL,init?:RequestInit)=>{
+      void init;
+      const url=requestUrl(input);if(url.endsWith("/public/reachability"))return json({status:"ready"});
+      return json({code:"unauthorized"},401);
+    });vi.stubGlobal("fetch",fetchMock);render(<App/>);
+    const field=await screen.findByLabelText("Access Key");expect(field.getAttribute("maxlength")).toBeNull();
+    fireEvent.paste(field,{clipboardData:{getData:()=>key}});
+    fireEvent.click(screen.getByRole("button",{name:"Enter service"}));
+    await screen.findByText("The access key was not accepted.");
+    const call=fetchMock.mock.calls.find(item=>requestUrl(item[0]).endsWith("/auth/login"));
+    expect(jsonRequestBody(call?.[1])).toEqual({accessKey:key});expect(field).toHaveProperty("value","");
+    expect(window.localStorage.length).toBe(0);expect(window.sessionStorage.length).toBe(0);
+  });
   it("keeps the normative login composition stable and refocuses a rejected Access Key", async () => {
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       const url = requestUrl(input);
@@ -845,37 +886,252 @@ describe("owner Saturn UI", () => {
     expect(await screen.findByText("archive", { selector: ".breadcrumbs span" })).toBeTruthy();
   });
 
-  it("manages the three Neptune pipelines from the Synchronization tab", async () => {
+  it.each(["host_service", "service", "volt", "mastermind", "windows", "pluto"] as const)("requires confirmation before revoking a %s pipeline and preserves it on cancel", async (kind) => {
     window.history.replaceState({}, "", "/synchronization");
     const now = new Date().toISOString();
+    const id = crypto.randomUUID();
+    const name = `${kind} selected connection`;
+    const service = { id, name, namespaceSlug: kind === "host_service" ? "updater" : "chronos", deploymentId: "vps-1", pipelineKind: kind, state: "active", storedQuotaBytes: 1024, usage: { storedBytes: 0 } };
+    const isDevice = kind === "windows" || kind === "pluto";
+    const device = { id, name, deviceKind: kind === "pluto" ? "pluto" : "windows_sync", state: "active", scopeIds: [SYNC_RESOURCE_ID], rights: { read: true, write: true, move: true, delete: true }, createdAt: now, updatedAt: now };
+    let revoked = false;
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url = requestUrl(input);
+      const url = requestUrl(input).replace(/\?.*$/, "");
+      if (url.endsWith("/public/reachability")) return json({ status: "ready" });
+      if (url.endsWith("/auth/session")) return json({ state: "authenticated" });
+      if (url.endsWith("/auth/preferences")) return json(preferences({ updatedAt: now }));
+      if (url.endsWith("/operator/neptune/agents")) return json([]);
+      if (init?.method === "DELETE") { revoked = true; return json({ ...(isDevice ? device : service), state: "revoked" }); }
+      if (url.endsWith("/backup-services")) return json(isDevice ? [] : [{ ...service, state: revoked ? "revoked" : "active" }]);
+      if (url.endsWith("/devices")) return json(isDevice ? [{ ...device, state: revoked ? "revoked" : "active" }] : []);
+      return json([]);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<App />);
+
+    const connection = await screen.findByRole("article", { name });
+    if (!isDevice) expect(within(connection).getByText("Host name: vps-1")).toBeTruthy();
+    const deleteRequests = () => fetchMock.mock.calls.filter(call => call[1]?.method === "DELETE");
+    fireEvent.click(within(connection).getByRole("button", { name: "Revoke" }));
+    let dialog = screen.getByRole("dialog", { name: `Revoke ${name}?` });
+    expect(dialog.textContent).toContain("Stored files");
+    expect(deleteRequests()).toHaveLength(0);
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.getByRole("article", { name })).toBeTruthy();
+    expect(deleteRequests()).toHaveLength(0);
+
+    fireEvent.click(within(connection).getByRole("button", { name: "Revoke" }));
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(deleteRequests()).toHaveLength(0);
+
+    fireEvent.click(within(connection).getByRole("button", { name: "Revoke" }));
+    dialog = screen.getByRole("dialog", { name: `Revoke ${name}?` });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Revoke pipeline" }));
+    await waitFor(() => expect(screen.queryByRole("article", { name })).toBeNull());
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(deleteRequests()).toHaveLength(1);
+    expect(requestUrl(deleteRequests()[0]?.[0] ?? "")).toBe(`/api/v1/${isDevice ? "devices" : "backup-services"}/${id}`);
+  });
+
+  it("keeps pipeline confirmation open during revocation and allows retry after a failure", async () => {
+    window.history.replaceState({}, "", "/synchronization");
+    const id = crypto.randomUUID();
+    const service = { id, name: "Updater VPS", namespaceSlug: "updater", deploymentId: "vps-1", pipelineKind: "host_service", state: "active", storedQuotaBytes: 1024, usage: { storedBytes: 0 } };
+    let finishRequest: ((response: Response) => void) | undefined;
+    const failedRequest = new Promise<Response>(resolve => { finishRequest = resolve; });
+    let attempts = 0;
+    let revoked = false;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = requestUrl(input).replace(/\?.*$/, "");
+      if (url.endsWith("/public/reachability")) return json({ status: "ready" });
+      if (url.endsWith("/auth/session")) return json({ state: "authenticated" });
+      if (url.endsWith("/auth/preferences")) return json(preferences());
+      if (url.endsWith(`/backup-services/${id}`) && init?.method === "DELETE") {
+        attempts++;
+        if (attempts === 1) return failedRequest;
+        revoked = true;
+        return json({ ...service, state: "revoked" });
+      }
+      if (url.endsWith("/backup-services")) return json([{ ...service, state: revoked ? "revoked" : "active" }]);
+      return json([]);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<App />);
+
+    const connection = await screen.findByRole("article", { name: service.name });
+    fireEvent.click(within(connection).getByRole("button", { name: "Revoke" }));
+    const dialog = screen.getByRole("dialog", { name: `Revoke ${service.name}?` });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Revoke pipeline" }));
+    expect(within(dialog).getByRole("button", { name: "Working…" })).toHaveProperty("disabled", true);
+    expect(within(dialog).getByRole("button", { name: "Cancel" })).toHaveProperty("disabled", true);
+    expect(within(dialog).getByRole("button", { name: "Close dialog" })).toHaveProperty("disabled", true);
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.getByRole("dialog")).toBe(dialog);
+    expect(attempts).toBe(1);
+    if (finishRequest === undefined) throw new Error("Pending revoke request is missing");
+    finishRequest(json({ error: { code: "unavailable", message: "Try again" } }, 503));
+    await screen.findByText("Neptune identity could not be revoked.");
+    expect(screen.getByRole("article", { name: service.name })).toBeTruthy();
+    expect(within(dialog).getByRole("button", { name: "Revoke pipeline" })).toHaveProperty("disabled", false);
+    fireEvent.click(within(dialog).getByRole("button", { name: "Revoke pipeline" }));
+    await waitFor(() => expect(screen.queryByRole("article", { name: service.name })).toBeNull());
+    expect(attempts).toBe(2);
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("creates a Pluto pipeline using only its name and shows it separately in Neptune fleet", async () => {
+    window.history.replaceState({}, "", "/synchronization");
+    const now = new Date().toISOString();
+    const device = { id: crypto.randomUUID(), name: "Outside configs", deviceKind: "pluto", syncFolderName: "Outside configs", state: "active", lastSeenAt: now, plutoStatus: { enabled: false, intervalSeconds: 60, uploadedFiles: 0 }, rights: { read: true, write: true, move: false, delete: false }, createdAt: now, updatedAt: now };
+    let created = false;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = requestUrl(input).replace(/\?.*$/, "");
+      if (url.endsWith("/public/reachability")) return json({ status: "ready" });
+      if (url.endsWith("/auth/session")) return json({ state: "authenticated" });
+      if (url.endsWith("/auth/preferences")) return json(preferences());
+      if (url.endsWith("/devices/enrollments") && init?.method === "POST") { created = true; return json({ code: "pluto-setup-code", expiresAt: now, device }); }
+      if (url.endsWith("/devices")) return json(created ? [device] : []);
+      return json([]);
+    });
+    vi.stubGlobal("fetch", fetchMock); render(<App />);
+    await screen.findByRole("heading", { name: "synchronization" });
+    fireEvent.change(screen.getByLabelText("Type"), { target: { value: "pluto" } });
+    expect(screen.queryByLabelText("Host name")).toBeNull();
+    fireEvent.change(screen.getByLabelText("Connection name"), { target: { value: device.name } });
+    fireEvent.click(screen.getByRole("button", { name: "Create setup code" }));
+    await screen.findByText("pluto-setup-code");
+    const request = fetchMock.mock.calls.find(call => requestUrl(call[0]).endsWith("/devices/enrollments") && call[1]?.method === "POST");
+    expect(jsonRequestBody(request?.[1])).toEqual({ name: device.name, deviceKind: "pluto" });
+    const card = await screen.findByRole("article", { name: device.name });
+    expect(within(card).getByText("backups/pluto/Outside configs")).toBeTruthy();
+    expect(within(card).getByText(/Copying disabled/)).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Outdoor backups · Pluto" })).toBeTruthy();
+    expect(screen.getByText("Pluto agents").parentElement?.textContent).toContain("1 registered");
+  });
+
+  it("manages the six synchronization cards using one-time setup codes without another Access Key", async () => {
+    window.history.replaceState({}, "", "/synchronization");
+    const now = new Date().toISOString();
+    const serviceId = crypto.randomUUID();
+    const deviceId = crypto.randomUUID();
+    const service = { id: serviceId, name: "Chronos VPS", namespaceSlug: "chronos", deploymentId: "vps-1", pipelineKind: "service", state: "active", storedQuotaBytes: 1024, usage: { storedBytes: 0 } };
+    let serviceRevoked = false;
+    let deviceCreated = false;
+    let deviceRevoked = false;
+    const device = { id: deviceId, name: "Office PC", deviceKind: "windows_sync", scopeIds: [SYNC_RESOURCE_ID], rights: { read: true, write: true, move: true, delete: true }, createdAt: now, updatedAt: now };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = requestUrl(input).replace(/\?.*$/, "");
       if (url === "/api/v1/public/reachability") return json({ status: "ready" });
       if (url.endsWith("/auth/session")) return json({ state: "authenticated" });
       if (url.endsWith("/auth/preferences")) return json(preferences({ updatedAt: now }));
-      if (url.endsWith("/auth/reauthenticate")) return json({ state: "authenticated" });
       if (url.endsWith("/operator/neptune/status")) return json({ product: "neptune-linux", version: "0.2.0", client_instance_id: "linux-1", active: false, project: { enabled: false, interval_hours: 24, mirror: null }, mirror_active: false, mirror: { state: "idle", uploadedFiles: 0, deletedEntries: 0 } });
-      if (url.includes("/backup-services")) return json([]);
-      if (url.includes("/devices") && init?.method === "POST") return json({ token: "windows-token", device: { id: crypto.randomUUID(), name: "Office PC", state: "active", scopeIds: [SYNC_RESOURCE_ID], rights: { read: true, write: true, move: true, delete: true }, createdAt: now, updatedAt: now } });
-      if (url.includes("/devices")) return json([]);
+      if (url.endsWith("/operator/neptune/agents")) return json([]);
+      if (url.endsWith("/backup-services/enrollments")) return json({ code: "new-pipeline-code", expiresAt: now, service });
+      if (url.endsWith(`/backup-services/${serviceId}/enrollment`)) return json({ code: "replacement-setup-code", expiresAt: now, service });
+      if (url.endsWith(`/backup-services/${serviceId}`) && init?.method === "DELETE") { serviceRevoked = true; return json({ ...service, state: "revoked" }); }
+      if (url.includes(`/backup-services/${serviceId}/runs`)) return json([]);
+      if (url.endsWith("/backup-services")) return json([{ ...service, state: serviceRevoked ? "revoked" : "active" }]);
+      if (url.endsWith("/devices/enrollments") && init?.method === "POST") { deviceCreated = true; return json({ code: "windows-setup-code", expiresAt: now, device: { ...device, state: "active" } }); }
+      if (url.endsWith(`/devices/${deviceId}`) && init?.method === "DELETE") { deviceRevoked = true; return json({ ...device, state: "revoked" }); }
+      if (url.endsWith("/devices")) return json(deviceCreated ? [{ ...device, state: deviceRevoked ? "revoked" : "active" }] : []);
       return json({});
     });
     vi.stubGlobal("fetch", fetchMock);
     render(<App />);
 
     expect(await screen.findByRole("heading", { name: "synchronization" })).toBeTruthy();
-    for (const title of ["Linux · recovery archives", "Linux · dedicated mirrors", "Windows · folder synchronization"]) expect(screen.getByRole("heading", { name: title })).toBeTruthy();
-    fireEvent.change(screen.getByLabelText("Current Access Key"), { target: { value: "owner-key" } });
-    fireEvent.click(screen.getByRole("button", { name: "Unlock management" }));
-    await screen.findByText("Synchronization management unlocked.");
-    fireEvent.change(screen.getByLabelText("PC / client name"), { target: { value: "Office PC" } });
-    fireEvent.click(screen.getByRole("button", { name: "Create Windows client password" }));
-    expect(await screen.findByText("windows-token")).toBeTruthy();
-    const request = fetchMock.mock.calls.find((call) => requestUrl(call[0]).endsWith("/devices") && call[1]?.method === "POST");
-    expect(jsonRequestBody(request?.[1])).toMatchObject({ name: "Office PC", scopeIds: [SYNC_RESOURCE_ID] });
+    for (const title of ["Add pipeline", "Neptune fleet", "Host services", "Service pipelines", "Windows synchronization"]) expect(screen.getByRole("heading", { name: title })).toBeTruthy();
+    expect(screen.queryByLabelText("Current Access Key")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Unlock management" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Create setup code" })).toHaveProperty("disabled", false);
+    const windowsPipelineOption = screen.getByRole("option", { name: "Windows files · Neptune client" });
+    expect(windowsPipelineOption.classList.contains("pipeline-type-option--windows")).toBe(true);
+    expect(windowsPipelineOption.parentElement?.tagName).toBe("SELECT");
+    const hostCard = screen.getByRole("heading", { name: "Host services" }).closest("article");
+    if (hostCard === null) throw new Error("Host services card is missing");
+    expect(within(hostCard).getByText("No active host pipelines.")).toBeTruthy();
+    expect(within(hostCard).queryByRole("heading", { name: "Updater recovery" })).toBeNull();
+    const initialServiceCard = screen.getByRole("heading", { name: "Service pipelines" }).closest("article");
+    if (initialServiceCard === null) throw new Error("Service pipelines card is missing");
+    expect(await within(initialServiceCard).findByText("Connection name")).toBeTruthy();
+    expect(within(initialServiceCard).getByText("Chronos VPS")).toBeTruthy();
+    expect(within(initialServiceCard).getByText("Chronos")).toBeTruthy();
+    expect(within(initialServiceCard).getByText("Host name: vps-1")).toBeTruthy();
+    expect(screen.queryByLabelText("Connection name")).toBeNull();
+    expect(screen.queryByLabelText("Server ID")).toBeNull();
+    fireEvent.change(screen.getByLabelText("Host name"), { target: { value: "edge-1" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create setup code" }));
+    await screen.findByText("new-pipeline-code");
+    const hostRequest = fetchMock.mock.calls.find((call) => requestUrl(call[0]).endsWith("/backup-services/enrollments") && call[1]?.method === "POST");
+    expect(jsonRequestBody(hostRequest?.[1])).toMatchObject({ name: "updater · edge-1", namespaceSlug: "updater", deploymentId: "edge-1", pipelineKind: "host_service", requireEncryption: true });
+    fireEvent.change(screen.getByLabelText("Type"), { target: { value: "windows" } });
+    expect(screen.queryByLabelText("Host name")).toBeNull();
+    fireEvent.change(screen.getByLabelText("Connection name"), { target: { value: "Office PC" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create setup code" }));
+    expect(await screen.findByText("windows-setup-code")).toBeTruthy();
+    const request = fetchMock.mock.calls.find((call) => requestUrl(call[0]).endsWith("/devices/enrollments") && call[1]?.method === "POST");
+    expect(jsonRequestBody(request?.[1])).toEqual({ name: "Office PC" });
+
+    const windowsCard = screen.getByRole("heading", { name: "Windows synchronization" }).closest("article");
+    if (windowsCard === null) throw new Error("Windows synchronization card is missing");
+    fireEvent.click(within(windowsCard).getByRole("button", { name: "Revoke" }));
+    const windowsRevokeDialog = screen.getByRole("dialog", { name: "Revoke Office PC?" });
+    expect(deviceRevoked).toBe(false);
+    fireEvent.click(within(windowsRevokeDialog).getByRole("button", { name: "Revoke pipeline" }));
+    await screen.findByText("Windows synchronization access revoked.");
+    expect(deviceRevoked).toBe(true);
+
+    const serviceCard = screen.getByRole("heading", { name: "Service pipelines" }).closest("article");
+    if (serviceCard === null) throw new Error("Service pipelines card is missing");
+    fireEvent.click(within(serviceCard).getByRole("button", { name: "Setup code" }));
+    await screen.findByText("replacement-setup-code");
+    fireEvent.click(within(serviceCard).getByRole("button", { name: "Revoke" }));
+    const serviceRevokeDialog = screen.getByRole("dialog", { name: "Revoke Chronos VPS?" });
+    expect(serviceRevoked).toBe(false);
+    fireEvent.click(within(serviceRevokeDialog).getByRole("button", { name: "Revoke pipeline" }));
+    await screen.findByText("Neptune identity and its linked mirror access were revoked.");
+    expect(serviceRevoked).toBe(true);
+
+    expect(screen.queryByRole("option", { name: /Internal service/ })).toBeNull();
+    for (const [namespace, label] of [["kernel", "Kernel"], ["chronos", "Chronos"], ["saturn", "Saturn"], ["laboratory", "Laboratory"]] as const) {
+      expect(screen.getByRole("option", { name: label })).toBeTruthy();
+      fireEvent.change(screen.getByLabelText("Type"), { target: { value: namespace } });
+      expect(screen.queryByLabelText("Connection name")).toBeNull();
+      fireEvent.change(screen.getByLabelText("Host name"), { target: { value: "VPS-2" } });
+      fireEvent.click(screen.getByRole("button", { name: "Create setup code" }));
+      await waitFor(() => expect(screen.getByRole("button", { name: "Create setup code" })).toHaveProperty("disabled", false));
+      const enrollmentRequest = fetchMock.mock.calls.filter((call) => requestUrl(call[0]).endsWith("/backup-services/enrollments") && call[1]?.method === "POST").at(-1);
+      expect(jsonRequestBody(enrollmentRequest?.[1])).toMatchObject({ namespaceSlug: namespace, deploymentId: "vps-2", pipelineKind: "service", name: label });
+    }
+    for (const kind of ["volt", "mastermind"] as const) {
+      for (const [archive, mirror] of [[true, false], [false, true], [true, true]] as const) {
+        fireEvent.change(screen.getByLabelText("Type"), { target: { value: kind } });
+        expect(screen.queryByLabelText("Connection name")).toBeNull();
+        fireEvent.change(screen.getByLabelText("Host name"), { target: { value: "vps-selected" } });
+        const archiveSwitch = screen.getByRole("checkbox", { name: "Recovery archives" });
+        const mirrorSwitch = screen.getByRole("checkbox", { name: kind === "volt" ? "personal.volt mirror" : "Full vault tree mirror" });
+        if ((archiveSwitch as HTMLInputElement).checked !== archive) fireEvent.click(archiveSwitch);
+        if ((mirrorSwitch as HTMLInputElement).checked !== mirror) fireEvent.click(mirrorSwitch);
+        fireEvent.click(screen.getByRole("button", { name: "Create setup code" }));
+        await waitFor(() => expect(screen.getByRole("button", { name: "Create setup code" })).toHaveProperty("disabled", false));
+        const selected = fetchMock.mock.calls.filter(call => requestUrl(call[0]).endsWith("/backup-services/enrollments") && call[1]?.method === "POST").at(-1);
+        expect(jsonRequestBody(selected?.[1])).toMatchObject({ name: kind === "volt" ? "Volt" : "Mastermind", namespaceSlug: kind, deploymentId: "vps-selected", pipelineKind: kind, archivePipeline: archive });
+        expect(jsonRequestBody(selected?.[1]).mirrorRoot).toBe(mirror ? kind : undefined);
+      }
+      fireEvent.change(screen.getByLabelText("Host name"), { target: { value: "vps-empty" } });
+      fireEvent.click(screen.getByRole("checkbox", { name: "Recovery archives" }));
+      fireEvent.click(screen.getByRole("checkbox", { name: kind === "volt" ? "personal.volt mirror" : "Full vault tree mirror" }));
+      const count = fetchMock.mock.calls.filter(call => requestUrl(call[0]).endsWith("/backup-services/enrollments")).length;
+      fireEvent.click(screen.getByRole("button", { name: "Create setup code" }));
+      expect((await screen.findAllByText("Select at least one pipeline.")).length).toBeGreaterThan(0);
+      expect(fetchMock.mock.calls.filter(call => requestUrl(call[0]).endsWith("/backup-services/enrollments"))).toHaveLength(count);
+    }
+    expect(fetchMock.mock.calls.some((call) => requestUrl(call[0]).endsWith("/auth/reauthenticate"))).toBe(false);
   });
 
-  it("renders the six Saturn Settings cards and persists keyboard card order", async () => {
+  it("renders seven Settings cards with visible Security groups and persists keyboard card order", async () => {
     window.history.replaceState({}, "", "/settings");
     const now = new Date().toISOString();
     let gryphonConnected = false;
@@ -905,7 +1161,21 @@ describe("owner Saturn UI", () => {
     render(<App />);
 
     expect(await screen.findByRole("heading", { name: "settings" })).toBeTruthy();
-    for (const title of ["Appearance", "Security", "Backup", "Gryphon Connection", "Updates", "Logs"]) expect(screen.getByRole("heading", { name: title })).toBeTruthy();
+    for (const title of ["Appearance", "Security", "Storage connection", "Backup", "Gryphon Connection", "Updates", "Logs"]) expect(screen.getByRole("heading", { name: title })).toBeTruthy();
+    const securityElement = screen.getByRole("heading", { name: "Security" }).closest<HTMLElement>(".settings-card");
+    if (!securityElement) throw new Error("Security card is missing");
+    const securityCard = within(securityElement);
+    expect(securityCard.getByRole("heading", { name: "Drop upload buffer" })).toBeTruthy();
+    expect(securityCard.getByRole("heading", { name: "Trash retention" })).toBeTruthy();
+    expect(securityCard.getByLabelText("Upload buffer capacity, GiB").closest("details")).toBeNull();
+    expect(securityCard.getByLabelText("Trash retention, days").closest("details")).toBeNull();
+    expect(securityCard.queryByRole("button", { name: "Configure storage" })).toBeNull();
+    expect(screen.queryByText("Advanced security")).toBeNull();
+    expect(screen.queryByText("Advanced helper recovery")).toBeNull();
+    expect(screen.queryByRole("heading", { name: "Helper recovery" })).toBeNull();
+    expect(screen.queryByRole("heading", { name: "Sessions" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Revoke all sessions" })).toBeNull();
+    expect(screen.queryByText("Revoke every active browser session, including this one. Stored files remain unchanged.")).toBeNull();
     const linkFunction = screen.getByRole("button", { name: "Link Gryphon function" });
     await waitFor(() => expect(linkFunction).toHaveProperty("disabled", false));
     fireEvent.click(linkFunction);
@@ -927,6 +1197,14 @@ describe("owner Saturn UI", () => {
       expect(request).toBeTruthy();
     });
     document.querySelector<HTMLDialogElement>("dialog.exo-update")?.close();
+    const sidebarMode = screen.getByRole("checkbox", { name: "Auto-hide the left menu on wide screens" });
+    expect(sidebarMode).toHaveProperty("checked", false);
+    fireEvent.click(sidebarMode);
+    await waitFor(() => expect(sidebarMode).toHaveProperty("checked", true));
+    await waitFor(() => {
+      const request = fetchMock.mock.calls.find((call) => requestUrl(call[0]).endsWith("/auth/preferences") && call[1]?.method === "PUT" && jsonRequestBody(call[1]).sidebarMode === "auto-hide");
+      expect(request).toBeTruthy();
+    });
     const accentField = screen.getByLabelText("Accent color");
     fireEvent.change(accentField, { target: { value: "#111111" } });
     expect(accentField).toHaveProperty("value", "#111111");
@@ -936,7 +1214,6 @@ describe("owner Saturn UI", () => {
       const request = fetchMock.mock.calls.find((call) => requestUrl(call[0]).endsWith("/auth/preferences") && call[1]?.method === "PUT" && jsonRequestBody(call[1]).accentColor === "#111111");
       expect(request).toBeTruthy();
     });
-    fireEvent.click(screen.getByText("Advanced security"));
     const uploadBuffer = screen.getByLabelText("Upload buffer capacity, GiB");
     const maximumFile = screen.getByLabelText("Maximum upload file size, GiB");
     expect(uploadBuffer).toHaveProperty("value", "110");
@@ -971,7 +1248,7 @@ describe("owner Saturn UI", () => {
         const body = jsonRequestBody(call[1]);
         return Array.isArray(body.settingsOrder) && body.settingsOrder[0] === "security";
       });
-      expect(jsonRequestBody(request?.[1]).settingsOrder).toEqual(["security", "appearance", "backup", "gryphon", "updates", "logs"]);
+      expect(jsonRequestBody(request?.[1]).settingsOrder).toEqual(["security", "appearance", "storage", "backup", "gryphon", "updates", "logs"]);
     });
   });
 
@@ -1034,6 +1311,33 @@ describe("owner Saturn UI", () => {
     expect(screen.queryByText("I have saved the ZIP on my computer.")).toBeNull();
   });
 
+  it("preserves a legacy custom Settings order and reloads the independently reordered storage card", async () => {
+    window.history.replaceState({}, "", "/settings");
+    let saved = preferences({ settingsOrder: ["logs", "backup", "security", "updates", "appearance", "gryphon"] });
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = requestUrl(input);
+      if (url === "/api/v1/public/reachability") return json({ status: "ready" });
+      if (url.endsWith("/auth/session")) return json({ state: "authenticated" });
+      if (url.endsWith("/auth/preferences")) {
+        if (init?.method === "PUT") saved = preferences(jsonRequestBody(init));
+        return json(saved);
+      }
+      if (url.endsWith("/operator/updates")) return json({ installedVersion: "0.2.6", updater: { state: "unavailable" }, registry: { state: "unavailable" }, discoveryEnabled: false });
+      if (url.includes("/activity")) return json([]);
+      return json({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const cardTitles = () => Array.from(document.querySelectorAll(".settings-card .universal-card__head h2"), (element) => element.textContent);
+    render(<App />);
+    await waitFor(() => expect(cardTitles()).toEqual(["Logs", "Backup", "Security", "Storage connection", "Updates", "Appearance", "Gryphon Connection"]));
+    fireEvent.keyDown(screen.getByRole("button", { name: "Reorder storage settings card" }), { key: "ArrowUp", altKey: true });
+    await waitFor(() => expect(saved.settingsOrder).toEqual(["logs", "backup", "storage", "security", "updates", "appearance", "gryphon"]));
+    cleanup();
+    render(<App />);
+    await waitFor(() => expect(cardTitles()).toEqual(["Logs", "Backup", "Storage connection", "Security", "Updates", "Appearance", "Gryphon Connection"]));
+    expect(document.querySelector(".settings-card--storage .universal-card__ordinal")?.textContent).toBe("03");
+  });
+
   it("keeps storage credentials write-only and requires a fresh connection test", async () => {
     window.history.replaceState({}, "", "/settings");
     const now = new Date().toISOString();
@@ -1057,8 +1361,10 @@ describe("owner Saturn UI", () => {
     render(<App />);
 
     expect(await screen.findByText(/sub1@old\.example:22/)).toBeTruthy();
-    fireEvent.click(screen.getByText("Advanced security"));
-    const configure = screen.getByRole("button", { name: "Configure storage" });
+    const storageElement = screen.getByRole("heading", { name: "Storage connection" }).closest<HTMLElement>(".settings-card");
+    if (!storageElement) throw new Error("Storage connection card is missing");
+    const storageCard = within(storageElement);
+    const configure = storageCard.getByRole("button", { name: "Configure storage" });
     expect(configure).toHaveProperty("disabled", false);
     fireEvent.click(configure);
     const dialog = within(screen.getByRole("dialog", { name: "Configure storage" }));
@@ -1075,6 +1381,44 @@ describe("owner Saturn UI", () => {
     expect(dialog.getByRole("button", { name: "Switch without migration" })).toHaveProperty("disabled", true);
     fireEvent.click(dialog.getByRole("checkbox"));
     expect(dialog.getByRole("button", { name: "Switch without migration" })).toHaveProperty("disabled", false);
+    fireEvent.change(dialog.getByLabelText("Root"), { target: { value: "another-root" } });
+    expect(dialog.queryByText(/Connection verified/)).toBeNull();
+    expect(dialog.getByRole("button", { name: "Switch without migration" })).toHaveProperty("disabled", true);
+    fireEvent.click(dialog.getByRole("button", { name: "Cancel and discard credential" }));
+    fireEvent.click(configure);
+    expect(within(screen.getByRole("dialog", { name: "Configure storage" })).getByLabelText("New storage password")).toHaveProperty("value", "");
+  });
+
+  it.each([
+    { state: "linked", installed: true, linked: true, reachable: true, action: "Unlink Neptune agent" },
+    { state: "unlinked", installed: true, linked: false, reachable: true, action: "Link Neptune agent" },
+    { state: "unavailable", installed: true, linked: false, reachable: false, action: "Link Neptune agent" },
+  ])("distinguishes Neptune reachability from enrollment in the Backup card: $state", async (availability) => {
+    window.history.replaceState({}, "", "/settings");
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = requestUrl(input);
+      if (url === "/api/v1/public/reachability") return json({ status: "ready" });
+      if (url.endsWith("/auth/session")) return json({ state: "authenticated" });
+      if (url.endsWith("/auth/preferences")) return json(preferences());
+      if (url.endsWith("/operator/neptune/availability")) return json(availability);
+      if (url.endsWith("/operator/neptune/policy")) return json({ code: "NEPTUNE_NOT_CONFIGURED" }, 404);
+      if (url.endsWith("/operator/updates")) return json({ installedVersion: "0.2.6", updater: { state: "unavailable" }, registry: { state: "unavailable" }, discoveryEnabled: false });
+      if (url.includes("/activity")) return json([]);
+      return json({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<App />);
+    const action = await screen.findByRole("button", { name: availability.action });
+    const card = action.closest<HTMLElement>(".settings-card");
+    if (!card) throw new Error("Backup card is missing");
+    await waitFor(() => expect(action).toHaveProperty("disabled", false));
+    expect(within(card).getAllByRole("heading", { level: 3 }).map(heading => heading.textContent))
+      .toEqual(["Manual snapshot", "Automatic backup to Saturn", "Restore snapshot"]);
+    expect(card.querySelector(".backup-neptune-group > .status-row .semantic-status")?.classList.contains("semantic-status--ready"))
+      .toBe(availability.reachable);
+    if (availability.linked) expect(action.classList.contains("button--danger")).toBe(true);
+    await waitFor(() => expect(within(card).getByRole("checkbox", { name: "Enable automatic backups" })).toHaveProperty("disabled", true));
+    expect(fetchMock.mock.calls.some(call => requestUrl(call[0]).includes("/policy/runs"))).toBe(false);
   });
 
   it("creates a snapshot in one action and validates a local ZIP before confirmed restore", async () => {
@@ -1326,13 +1670,13 @@ describe("public Share UI", () => {
       return json({});
     }));
     render(<App />);
-    expect(await screen.findByRole("heading", { name: "saturn shared link" })).toBeTruthy();
-    expect(screen.getByText("View only Gateway")).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: "report.pdf" })).toBeTruthy();
+    expect(screen.getByText("View only")).toBeTruthy();
     expect(screen.getByText(/can still be copied/i)).toBeTruthy();
-    expect(screen.getByText("Shared link expires:").parentElement?.textContent).toContain("none");
-    expect(screen.getByRole("status", { name: "Service Reachability: Available" })).toBeTruthy();
+    expect(screen.getByText("No expiration")).toBeTruthy();
+    expect(screen.queryByRole("status", { name: "Service Reachability: Available" })).toBeNull();
     expect(screen.getByRole("link", { name: "Open report.pdf" }).getAttribute("href")).toContain(token);
-    expect(screen.getByRole("link", { name: /Open file - 1.00 KiB/i }).getAttribute("href")).toContain(token);
+    expect(screen.getByRole("link", { name: "Open file" }).getAttribute("href")).toContain(token);
     expect(window.localStorage.length + window.sessionStorage.length).toBe(0);
   });
 
@@ -1349,15 +1693,15 @@ describe("public Share UI", () => {
     vi.stubGlobal("fetch", fetchMock);
     render(<App />);
 
-    expect(await screen.findByText(/Please enter/)).toBeTruthy();
-    expect(screen.queryByRole("heading", { name: "saturn shared link" })).toBeNull();
-    expect(screen.getByRole("status", { name: "Service Reachability: Available" })).toBeTruthy();
-    const password = screen.getByLabelText("Shared link password");
-    expect(password.getAttribute("placeholder")).toBe("Password...");
+    expect(await screen.findByRole("heading", { name: "This link is protected" })).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "secure.zip" })).toBeNull();
+    expect(screen.queryByRole("status", { name: "Service Reachability: Available" })).toBeNull();
+    const password = screen.getByLabelText("Password");
+    expect(password.getAttribute("placeholder")).toBe("Enter password");
     fireEvent.change(password, { target: { value: "correct-share-password" } });
-    fireEvent.click(screen.getByRole("button", { name: "Enter" }));
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
 
-    expect(await screen.findByRole("heading", { name: "saturn shared link" })).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: "secure.zip" })).toBeTruthy();
     const unlockCall = fetchMock.mock.calls.find((call) => requestUrl(call[0]).endsWith("/unlock"));
     expect(jsonRequestBody(unlockCall?.[1])).toEqual({ password: "correct-share-password" });
     expect(window.localStorage.length + window.sessionStorage.length).toBe(0);
@@ -1376,7 +1720,7 @@ describe("public Share UI", () => {
       if (url.endsWith("/package") && init?.method === "POST") return json({ state: "ready", sizeBytes: 2304 });
       if (url.includes("/children")) return json([
         { id: "folder-1", type: "folder", name: "folder_1", sizeBytes: 2048, updatedAt: "2026-09-01T00:00:00.000Z" },
-        { id: "file-1", type: "file", name: "notes.txt", sizeBytes: 256, updatedAt: "2026-09-01T00:00:00.000Z" },
+        { id: "file-1", type: "file", name: "cover.jpg", sizeBytes: 256, mimeType: "image/jpeg", updatedAt: "2026-09-01T00:00:00.000Z" },
       ]);
       if (url.includes("/public/shares/")) return json({ id: "share", resourceId: "folder-root", resourceType: "folder", resourceName: "archive", resourceSize: 2304, mode: "download_folder", state: "active", locked: false, downloadCount: 0, createdAt: "2026-09-01T00:00:00.000Z", updatedAt: "2026-09-01T00:00:00.000Z" });
       return json({});
@@ -1384,13 +1728,18 @@ describe("public Share UI", () => {
     vi.stubGlobal("fetch", fetchMock);
     render(<App />);
 
-    expect(await screen.findByRole("button", { name: "folder_1" })).toBeTruthy();
-    expect(screen.getByText("2.00 KiB")).toBeTruthy();
-    expect(screen.getByRole("link", { name: "Download notes.txt" }).getAttribute("href")).toContain("file-1");
-    fireEvent.click(screen.getByRole("button", { name: /Download all - 2.25 KiB/i }));
-    await waitFor(() => expect(downloadedHref).toBe(`/api/v1/public/shares/${token}/package`));
-    expect(screen.getByRole("button", { name: /Download all - 2.25 KiB/i })).toBeTruthy();
-    expect(screen.queryByRole("link", { name: /Download all - 2.25 KiB/i })).toBeNull();
+    expect(await screen.findByRole("button", { name: "Open folder folder_1" })).toBeTruthy();
+    expect(screen.getByText(/2\.00 KiB/)).toBeTruthy();
+    expect(screen.getByRole("link", { name: "Download cover.jpg" }).getAttribute("href")).toContain("file-1");
+    expect(document.querySelector<HTMLImageElement>(".share-client-file__thumbnail")?.getAttribute("src")).toBe(`/api/v1/public/shares/${token}/thumbnail/file-1`);
+    fireEvent.click(screen.getByRole("button", { name: "Download all" }));
+    await waitFor(() => {
+      const download = new URL(downloadedHref, "https://saturn.test");
+      expect(download.pathname).toBe(`/api/v1/public/shares/${token}/package`);
+      expect(download.searchParams.get("transferId")).toMatch(/^[a-f0-9-]{36}$/);
+    });
+    expect(screen.getByRole("button", { name: "Download all" })).toBeTruthy();
+    expect(screen.queryByRole("link", { name: "Download all" })).toBeNull();
     expect(fetchMock.mock.calls.filter((call) => requestUrl(call[0]).endsWith("/package") && call[1]?.method === "POST")).toHaveLength(1);
   });
 
@@ -1402,19 +1751,54 @@ describe("public Share UI", () => {
       if (url.endsWith("/auth/public-appearance")) return json({ accentColor: "#ff4d00" });
       if (url === "/api/v1/public/reachability") return json({ status: "ready" });
       if (url.includes("/children")) return json([
-        { id: "file-2", type: "file", name: "readme.txt", sizeBytes: 512, updatedAt: "2026-09-01T00:00:00.000Z" },
+        { id: "file-2", type: "file", name: "readme.jpg", sizeBytes: 512, mimeType: "image/jpeg", updatedAt: "2026-09-01T00:00:00.000Z" },
       ]);
       if (url.includes("/public/shares/")) return json({ id: "share", resourceId: "folder-root", resourceType: "folder", resourceName: "archive", resourceSize: 512, mode: "browse", state: "active", locked: false, downloadCount: 0, createdAt: "2026-09-01T00:00:00.000Z", updatedAt: "2026-09-01T00:00:00.000Z" });
       return json({});
     }));
     render(<App />);
 
-    expect(await screen.findByText("readme.txt")).toBeTruthy();
+    expect(await screen.findByText("readme.jpg")).toBeTruthy();
     await waitFor(() => expect(document.documentElement.style.getPropertyValue("--accent")).toBe("#ff4d00"));
-    expect(document.querySelector(".share-public-notice p")?.textContent).toContain("Download permission is not granted for this link.");
-    expect(screen.queryByRole("link", { name: "Download readme.txt" })).toBeNull();
-    const downloadAll = screen.getByRole("button", { name: "Download all - 512 B" });
+    expect(screen.getByText(/Download permission is not granted for this link/i)).toBeTruthy();
+    expect(screen.queryByRole("link", { name: "Download readme.jpg" })).toBeNull();
+    expect(document.querySelector<HTMLImageElement>(".share-client-file__thumbnail")?.getAttribute("src")).toBe(`/api/v1/public/shares/${token}/thumbnail/file-2`);
+    const downloadAll = screen.getByRole("button", { name: "Download unavailable" });
     expect(downloadAll).toHaveProperty("disabled", true);
     expect(screen.queryByRole("link", { name: /Download all/i })).toBeNull();
+  });
+
+  it("keeps the complete previous opened layout available through the legacy query", async () => {
+    const token = "E".repeat(43);
+    window.history.replaceState({}, "", `/s/${token}?legacy=1`);
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = requestUrl(input);
+      if (url === "/api/v1/public/reachability") return json({ status: "ready" });
+      if (url.includes("/public/shares/")) return json({ id: "share", resourceId: "file", resourceType: "file", resourceName: "legacy.pdf", resourceSize: 1024, resourceMimeType: "application/pdf", mode: "view", state: "active", locked: false, downloadCount: 0, createdAt: "2026-09-01T00:00:00.000Z", updatedAt: "2026-09-01T00:00:00.000Z" });
+      return json({});
+    }));
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "saturn shared link" })).toBeTruthy();
+    expect(screen.getByText("View only Gateway")).toBeTruthy();
+    expect(screen.getByText("Shared link expires:").parentElement?.textContent).toContain("none");
+    expect(screen.getByRole("status", { name: "Service Reachability: Available" })).toBeTruthy();
+  });
+
+  it("keeps the complete previous password gate available through the legacy query", async () => {
+    const token = "F".repeat(43);
+    window.history.replaceState({}, "", `/s/${token}?legacy=1`);
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = requestUrl(input);
+      if (url === "/api/v1/public/reachability") return json({ status: "ready" });
+      if (url.includes("/public/shares/")) return json({ id: "share", resourceId: "file", resourceType: "file", resourceName: "legacy.zip", resourceSize: 2048, mode: "download", state: "active", locked: true, downloadCount: 0, createdAt: "2026-09-01T00:00:00.000Z", updatedAt: "2026-09-01T00:00:00.000Z" });
+      return json({});
+    }));
+    render(<App />);
+
+    expect(await screen.findByText(/Please enter/)).toBeTruthy();
+    expect(screen.getByLabelText("Shared link password").getAttribute("placeholder")).toBe("Password...");
+    expect(screen.getByRole("button", { name: "Enter" })).toBeTruthy();
+    expect(screen.getByRole("status", { name: "Service Reachability: Available" })).toBeTruthy();
   });
 });

@@ -5,7 +5,7 @@ import { Transform, type Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { Inject, Injectable, type OnApplicationShutdown, type OnModuleInit } from "@nestjs/common";
 import type { AuditService } from "@saturn/audit";
-import { publicConfig, type SaturnConfig } from "@saturn/config";
+import { publicConfig, readOwnerAccessKey, type SaturnConfig } from "@saturn/config";
 import { Database, migrate } from "@saturn/database";
 import { createStorageRecoveryParticipant, type RuntimeStorageManager } from "@saturn/storage";
 import {
@@ -150,9 +150,11 @@ export class RecoveryWorkflowService implements OnModuleInit, OnApplicationShutd
       pgRestorePrefixArgs: this.#config.recovery.pgRestorePrefixArgs,
       ...(this.#config.recovery.pgCommandConnectionArgs.length === 0 ? {} : { commandConnectionArgs: this.#config.recovery.pgCommandConnectionArgs }),
       maximumDumpBytes: this.#config.recovery.limits.maxMemberBytes,
+      ...(this.#config.recovery.commandTimeoutMs === undefined ? {} : { commandTimeoutMs: this.#config.recovery.commandTimeoutMs }),
+      ...(this.#config.recovery.dumpIdleTimeoutMs === undefined ? {} : { dumpIdleTimeoutMs: this.#config.recovery.dumpIdleTimeoutMs }),
     });
     const knownSecrets = [
-      await fs.readFile(this.#config.ownerBootstrapTokenFile, "utf8").then((value) => value.trim()),
+      readOwnerAccessKey(this.#config.ownerBootstrapTokenFile),
       new URL(this.#config.databaseUrl).password ? decodeURIComponent(new URL(this.#config.databaseUrl).password) : "",
       this.#config.storage.passwordFile === undefined
         ? ""
@@ -333,6 +335,7 @@ export class RecoveryWorkflowService implements OnModuleInit, OnApplicationShutd
         configuration: {
           prepare: value => storageParticipant.prepare(value),
           apply: async () => { await storageParticipant.apply(); await this.#pauseRestoredPolicies(); },
+          verifyFiles: async () => { await this.#toolchain?.verifyStorage(this.#storage); },
           rollback: () => storageParticipant.rollback(),
         },
       }, () => migrate(this.#config.databaseUrl, this.#requireInputs().migrationsDirectory), (action) => this.#database.withExclusiveMaintenance(action));
@@ -359,7 +362,7 @@ export class RecoveryWorkflowService implements OnModuleInit, OnApplicationShutd
       this.#uploads.delete(id);
       await Promise.all([
         fs.rm(record.archivePath, { force: true }),
-        fs.rm(this.#journalPath(id), { force: true }),
+        ...(record.state === "failed" ? [] : [fs.rm(this.#journalPath(id), { force: true })]),
         fs.rm(snapshotOutputPath, { force: true }),
       ]);
     }
@@ -459,14 +462,21 @@ export class RecoveryWorkflowService implements OnModuleInit, OnApplicationShutd
       }
     }
     const entries = await fs.readdir(this.#config.recovery.spoolDirectory).catch(() => [] as string[]);
+    const guarded = await this.#recoveryDatabase?.withSql(async sql => (await sql<{pending:boolean}[]>`SELECT to_regnamespace('_saturn_restore_guard') IS NOT NULL AS pending`)[0]?.pending === true) ?? false;
+    const failures: { filename: string; modified: number }[] = [];
     for (const name of entries.filter(name => /^web-restore-[0-9a-f-]+\.json$/.test(name))) {
       const filename = path.join(this.#config.recovery.spoolDirectory, name);
       if ((await fs.stat(filename)).size > 65536) throw new Error("Oversized restore journal");
       const journal = JSON.parse(await fs.readFile(filename, "utf8")) as { state?: string };
+      if (journal.state === "applying" && guarded) continue;
       if (journal.state === "applying") await this.#pauseRestoredPolicies();
+      if (journal.state === "failed") failures.push({filename,modified:(await fs.stat(filename)).mtimeMs});
+      else await fs.rm(filename,{force:true});
     }
+    failures.sort((a,b)=>b.modified-a.modified);
+    await Promise.all(failures.filter((item,index)=>index>=20 || Date.now()-item.modified>30*86400000).map(item=>fs.rm(item.filename,{force:true})));
     await Promise.all(entries
-      .filter((name) => /^web-(restore|validation)-[0-9a-f-]+\.(zip|json)$/.test(name) || /^web-validation-[0-9a-f-]+$/.test(name))
+      .filter((name) => /^web-(restore|validation)-[0-9a-f-]+\.zip$/.test(name) || /^web-validation-[0-9a-f-]+$/.test(name))
       .map((name) => fs.rm(path.join(this.#config.recovery.spoolDirectory, name), { recursive: true, force: true })));
   }
 

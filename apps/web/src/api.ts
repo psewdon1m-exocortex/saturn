@@ -1,4 +1,4 @@
-import type { ArchiveJobInfo, AuditEventInfo, BackupRunInfo, BackupServiceInfo, DeviceInfo, DropSessionInfo, DropUploadStatus, FileVersion, GryphonBot, GryphonStatus, KernelStatus, NeptuneAgentInfo, NeptuneAvailability, NeptuneReleaseCheck, NeptuneStatus, OperatorOverview, OwnerPreferences, RecoveryRestoreCandidate, RecoveryRestoreResult, RecoveryStatus, Resource, ShareChild, ShareInfo, StorageConnectionInput, StorageConnectionStatus, UpdateStatus } from "./types.js";
+import type { ArchiveJobInfo, AuditEventInfo, BackupRunInfo, BackupServiceInfo, DeviceInfo, DropSessionInfo, DropUploadStatus, FileVersion, GryphonBot, GryphonStatus, KernelStatus, NeptuneAgentInfo, NeptuneAvailability, NeptuneReleaseCheck, NeptuneStatus, OperatorOverview, OwnerPreferences, RecoveryRestoreCandidate, RecoveryRestoreResult, RecoveryStatus, Resource, ShareChild, ShareInfo, StorageConnectionInput, StorageConnectionStatus, StorageAnalysisJob, StorageAnalysisReport, UpdateStatus } from "./types.js";
 
 export class ApiError extends Error {
   readonly status: number;
@@ -103,7 +103,6 @@ export const api = {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(input),
   }),
-  revokeSessions: () => request<{ readonly revoked: number }>("/auth/sessions", { method: "DELETE" }),
   preferences: () => request<OwnerPreferences>("/auth/preferences"),
   updatePreferences: (input: Omit<OwnerPreferences, "updatedAt">) => request<OwnerPreferences>("/auth/preferences", {
     method: "PUT",
@@ -111,19 +110,14 @@ export const api = {
     body: JSON.stringify(input),
   }),
   overview: () => request<OperatorOverview>("/operator/overview"),
-  controlTransferTask: (id: string, action: "pause" | "resume" | "cancel") => request<{ readonly id: string; readonly state: "running" | "paused" | "cancelled" }>(`/operator/tasks/${encodeURIComponent(id)}`, {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ action }),
-  }),
-  updateStatus: () => request<UpdateStatus>("/operator/updates"),
-  exportHelpers: async (passphrase: string): Promise<Blob> => {
-    const headers = new Headers({ "Content-Type": "application/json" }); const csrf = csrfToken(); if (csrf !== undefined) headers.set("X-Vault-CSRF", csrf);
-    const response = await fetch("/api/v1/operator/helper-recovery/export", { method: "POST", headers, credentials: "same-origin", body: JSON.stringify({ passphrase }) });
-    if (!response.ok) throw new ApiError(response.status, await response.json().catch(() => undefined) as unknown);
-    return response.blob();
+  controlTransferTask: async (id: string, action: "pause" | "resume" | "cancel") => {
+    const result = await request<{ readonly id: string; readonly state: "running" | "paused" | "cancelled" }>(`/operator/tasks/${encodeURIComponent(id)}`, {
+      method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action }),
+    });
+    if (action === "cancel") { ownerUploadControllers.get(id)?.abort(); ownerUploadChannel()?.postMessage({ action: "cancel", id }); }
+    return result;
   },
-  restoreHelpers: (passphrase: string, archive_base64: string, confirmation: string) => request<{ id: string; state: string }>("/operator/helper-recovery/restore", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ passphrase, archive_base64, confirmation }) }),
+  updateStatus: () => request<UpdateStatus>("/operator/updates"),
   checkSaturnUpdate: () => request<{ update_available: boolean; available_version?: string; installed_version: string }>("/operator/updates/check", { method: "POST" }),
   installSaturnUpdate: (version: string) => request<{ id: string; state: string; message?: string }>("/operator/updates/install", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ version }) }),
   agentJob: (id: string) => request<{ id: string; state: string; message?: string; rollback_available?: boolean }>(`/operator/updates/jobs/${encodeURIComponent(id)}`),
@@ -156,6 +150,11 @@ export const api = {
   changeKernelUrl: (url: string) => request<KernelStatus>("/operator/kernel/url", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url }) }),
   rotateKernelToken: (token: string) => request<KernelStatus>("/operator/kernel/token", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ token }) }),
   storageStatus: () => request<StorageConnectionStatus>("/operator/storage"),
+  storageAnalysis: (offset = 0) => request<StorageAnalysisReport>(`/operator/storage/analysis?offset=${String(offset)}`),
+  analyzeStorage: () => request<StorageAnalysisJob>("/operator/storage/analysis", { method: "POST" }),
+  synchronizeStorageCatalog: (id: string) => request<StorageAnalysisJob>(`/operator/storage/analysis/${encodeURIComponent(id)}/synchronize`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ confirmation: "SYNCHRONIZE CATALOG" }),
+  }),
   testStorage: (input: StorageConnectionInput) => request<Omit<StorageConnectionStatus, "profileId" | "revision" | "activatedAt" | "source">>("/operator/storage/test", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) }),
   switchStorage: (input: StorageConnectionInput) => request<StorageConnectionStatus>("/operator/storage/switch", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...input, confirmation: "SWITCH WITHOUT MIGRATION" }) }),
   activity: (before?: number, limit = 100) => request<readonly AuditEventInfo[]>(`/activity?limit=${String(limit)}${before === undefined ? "" : `&before=${String(before)}`}`),
@@ -233,10 +232,14 @@ export const api = {
   createDevice: (input: { readonly name: string; readonly scopeIds: readonly string[]; readonly rights: DeviceInfo["rights"] }) => request<{ readonly token: string; readonly device: DeviceInfo }>("/devices", {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input),
   }),
+  createDeviceEnrollment: (name: string, deviceKind?: "pluto") => request<{ readonly code: string; readonly expiresAt: string; readonly device: DeviceInfo }>("/devices/enrollments", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name, ...(deviceKind === undefined ? {} : { deviceKind }) }),
+  }),
+  createDeviceReplacementEnrollment: (id: string) => request<{ readonly code: string; readonly expiresAt: string; readonly device: DeviceInfo }>(`/devices/${encodeURIComponent(id)}/enrollment`, { method: "POST" }),
   revokeDevice: (id: string) => request<DeviceInfo>(`/devices/${encodeURIComponent(id)}`, { method: "DELETE" }),
   backupServices: () => request<readonly BackupServiceInfo[]>("/backup-services?limit=200"),
   backupRuns: (serviceId: string, limit = 10) => request<readonly BackupRunInfo[]>(`/backup-services/${encodeURIComponent(serviceId)}/runs?limit=${String(limit)}`),
-  createBackupEnrollment: (input: { readonly namespaceSlug: string; readonly deploymentId: string; readonly name: string; readonly requireEncryption: boolean; readonly maxConcurrentRuns: number; readonly mirrorRoot?: "volt" | "mastermind" }) => request<{ readonly code: string; readonly expiresAt: string; readonly service: BackupServiceInfo }>("/backup-services/enrollments", {
+  createBackupEnrollment: (input: { readonly namespaceSlug: string; readonly deploymentId: string; readonly name: string; readonly requireEncryption: boolean; readonly maxConcurrentRuns: number; readonly pipelineKind: BackupServiceInfo["pipelineKind"]; readonly archivePipeline?: boolean; readonly mirrorRoot?: "volt" | "mastermind" }) => request<{ readonly code: string; readonly expiresAt: string; readonly service: BackupServiceInfo }>("/backup-services/enrollments", {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input),
   }),
   rotateBackupService: (id: string) => request<{ readonly token: string; readonly service: BackupServiceInfo }>(`/backup-services/${encodeURIComponent(id)}/rotate-token`, { method: "POST" }),
@@ -307,12 +310,14 @@ export const publicShareApi = {
   unlock: (token: string, password: string) => publicShareRequest<ShareInfo>(token, "/unlock", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ password }) }),
   children: (token: string, parentId?: string) => publicShareRequest<readonly ShareChild[]>(token, `/children${parentId === undefined ? "" : `?parentId=${encodeURIComponent(parentId)}`}`),
   preparePackage: (token: string) => publicShareRequest<{ readonly state: string; readonly sizeBytes: number }>(token, "/package", { method: "POST" }),
-  contentUrl: (token: string, resourceId?: string) => `/api/v1/public/shares/${encodeURIComponent(token)}/content${resourceId === undefined ? "" : `/${encodeURIComponent(resourceId)}`}`,
-  packageUrl: (token: string) => `/api/v1/public/shares/${encodeURIComponent(token)}/package`,
+  packageStatus: (token: string) => publicShareRequest<{ readonly state: string; readonly sizeBytes: number }>(token, "/package/status"),
+  thumbnailUrl: (token: string, resourceId: string) => `/api/v1/public/shares/${encodeURIComponent(token)}/thumbnail/${encodeURIComponent(resourceId)}`,
+  contentUrl: (token: string, resourceId?: string, download = false) => `/api/v1/public/shares/${encodeURIComponent(token)}/content${resourceId === undefined ? "" : `/${encodeURIComponent(resourceId)}`}${download ? `?transferId=${crypto.randomUUID()}` : ""}`,
+  packageUrl: (token: string) => `/api/v1/public/shares/${encodeURIComponent(token)}/package?transferId=${crypto.randomUUID()}`,
 };
 
 export function folderDownloadUrl(id: string): string {
-  return `/api/v1/folders/${encodeURIComponent(id)}/archive`;
+  return `/api/v1/folders/${encodeURIComponent(id)}/archive?transferId=${crypto.randomUUID()}`;
 }
 
 export const dropApi = {
@@ -343,12 +348,14 @@ export const dropApi = {
   logout: () => dropRequest<{ readonly state: string }>("/logout", { method: "POST" }),
 };
 
-export async function uploadDropFile(file: File, onProgress: (progress: number) => void): Promise<DropUploadStatus> {
+export async function uploadDropFile(file: File, onProgress: (progress: number) => void, options: { readonly signal?: AbortSignal; readonly onCreated?: (upload: DropUploadStatus) => void } = {}): Promise<DropUploadStatus> {
   const created = await dropRequest<DropUploadStatus>("/uploads", {
     method: "POST",
     headers: { "Content-Type": "application/json", "Idempotency-Key": `drop-web-${crypto.randomUUID()}` },
     body: JSON.stringify({ filename: file.name, expectedSize: file.size }),
   });
+  options.onCreated?.(created);
+  options.signal?.throwIfAborted();
   const chunkBytes = 8 * 1024 * 1024;
   let offset = created.receivedSize;
   let failures = 0;
@@ -359,24 +366,39 @@ export async function uploadDropFile(file: File, onProgress: (progress: number) 
         method: "PATCH",
         headers: { "Content-Type": "application/offset+octet-stream", "Upload-Offset": String(offset) },
         body: chunk,
+        ...(options.signal === undefined ? {} : { signal: options.signal }),
       });
       offset += chunk.size;
       failures = 0;
     } catch (error) {
+      options.signal?.throwIfAborted();
       failures += 1;
       if (failures > 3) throw error;
       const status = await dropApi.status(created.id);
+      if (status.state !== "uploading" || !Number.isSafeInteger(status.receivedSize) || status.receivedSize < offset || status.receivedSize > file.size) throw error;
       offset = status.receivedSize;
+      await new Promise((resolve) => window.setTimeout(resolve, 200 * failures));
     }
     onProgress(file.size === 0 ? 1 : offset / file.size);
   }
-  const completed = await dropRequest<{ readonly upload: DropUploadStatus }>("/complete", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ uploadId: created.id }),
-  });
-  onProgress(1);
-  return completed.upload;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    options.signal?.throwIfAborted();
+    try {
+      const completed = await dropRequest<{ readonly upload: DropUploadStatus }>("/complete", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ uploadId: created.id }),
+        ...(options.signal === undefined ? {} : { signal: options.signal }),
+      });
+      onProgress(1);
+      return completed.upload;
+    } catch (error) {
+      options.signal?.throwIfAborted();
+      const remote = await dropApi.status(created.id).catch(() => undefined);
+      if (remote !== undefined && ["buffered", "transferring", "verifying", "stored", "completed"].includes(remote.state)) { onProgress(1); return remote; }
+      if (attempt === 2 || (error instanceof ApiError && error.status < 500)) throw error;
+      await new Promise((resolve) => window.setTimeout(resolve, 500 * 2 ** attempt));
+    }
+  }
+  throw new Error("Drop upload completion did not return a result.");
 }
 
 interface RecoverableOwnerUpload {
@@ -390,6 +412,19 @@ interface RecoverableOwnerUpload {
 
 const OWNER_UPLOAD_RECOVERY_KEY = "saturnOwnerUploadsV1";
 const liveOwnerUploads = new Set<string>();
+const ownerUploadControllers = new Map<string, AbortController>();
+let ownerTransferChannel: BroadcastChannel | undefined;
+function ownerUploadChannel(): BroadcastChannel | undefined {
+  if (typeof BroadcastChannel === "undefined") return undefined;
+  if (ownerTransferChannel === undefined) {
+    ownerTransferChannel = new BroadcastChannel("saturn-owner-transfer-controls");
+    ownerTransferChannel.addEventListener("message", (event: MessageEvent<unknown>) => {
+      const value = event.data;
+      if (typeof value === "object" && value !== null && "action" in value && value.action === "cancel" && "id" in value && typeof value.id === "string") ownerUploadControllers.get(value.id)?.abort();
+    });
+  }
+  return ownerTransferChannel;
+}
 
 function recoverableOwnerUploads(): readonly RecoverableOwnerUpload[] {
   try {
@@ -433,8 +468,8 @@ export function forgetRecoverableOwnerUpload(id: string): void {
   }
 }
 
-async function ownerUploadOffset(id: string): Promise<{ readonly offset: number; readonly length: number; readonly status: string }> {
-  const response = await fetch(`/api/v1/uploads/${encodeURIComponent(id)}`, { method: "HEAD", credentials: "same-origin" });
+async function ownerUploadOffset(id: string, signal?: AbortSignal): Promise<{ readonly offset: number; readonly length: number; readonly status: string }> {
+  const response = await fetch(`/api/v1/uploads/${encodeURIComponent(id)}`, { method: "HEAD", credentials: "same-origin", ...(signal === undefined ? {} : { signal }) });
   if (!response.ok) {
     const body = await response.json().catch(() => undefined) as unknown;
     throw new ApiError(response.status, body);
@@ -445,8 +480,8 @@ async function ownerUploadOffset(id: string): Promise<{ readonly offset: number;
   return { offset, length, status: response.headers.get("Upload-Status") ?? "unknown" };
 }
 
-async function continueOwnerUpload(id: string, file: File, onProgress: (progress: number) => void): Promise<Resource> {
-  const status = await ownerUploadOffset(id);
+async function continueOwnerUpload(id: string, file: File, onProgress: (progress: number) => void, signal: AbortSignal): Promise<Resource> {
+  const status = await ownerUploadOffset(id, signal);
   if (status.length !== file.size) throw new Error("Select the original file with the same size.");
   if (!["created", "uploading", "failed_retryable"].includes(status.status)) throw new Error("This upload can no longer be resumed.");
   const chunkBytes = 8 * 1024 * 1024;
@@ -460,13 +495,19 @@ async function continueOwnerUpload(id: string, file: File, onProgress: (progress
         method: "PATCH",
         headers: { "Content-Type": "application/offset+octet-stream", "Upload-Offset": String(offset) },
         body: chunk,
+        signal,
       });
       offset += chunk.size;
       failures = 0;
     } catch (error) {
+      signal.throwIfAborted();
       failures += 1;
       if (failures > 5) throw error;
-      const remote = await ownerUploadOffset(id);
+      const remote = await ownerUploadOffset(id, signal);
+      if (!["created", "uploading", "failed_retryable"].includes(remote.status)) {
+        if (remote.status === "abandoned") forgetRecoverableOwnerUpload(id);
+        throw error;
+      }
       if (remote.length !== file.size || remote.offset < offset || remote.offset > file.size) throw error;
       offset = remote.offset;
       await new Promise((resolve) => window.setTimeout(resolve, Math.min(2_000, 200 * 2 ** (failures - 1))));
@@ -475,8 +516,9 @@ async function continueOwnerUpload(id: string, file: File, onProgress: (progress
   }
   let completed: { readonly resource: Resource } | undefined;
   for (let attempt = 0; attempt < 3 && completed === undefined; attempt += 1) {
-    try { completed = await request<{ readonly resource: Resource }>(`/uploads/${encodeURIComponent(id)}/complete`, { method: "POST" }); }
+    try { completed = await request<{ readonly resource: Resource }>(`/uploads/${encodeURIComponent(id)}/complete`, { method: "POST", signal }); }
     catch (error) {
+      signal.throwIfAborted();
       if (attempt === 2) throw error;
       await new Promise((resolve) => window.setTimeout(resolve, 500 * 2 ** attempt));
     }
@@ -487,15 +529,17 @@ async function continueOwnerUpload(id: string, file: File, onProgress: (progress
   return completed.resource;
 }
 
-export async function resumeOwnerUpload(id: string, file: File, onProgress: (progress: number) => void): Promise<Resource> {
+export async function resumeOwnerUpload(id: string, file: File, onProgress: (progress: number) => void, beforeTransfer?: () => Promise<void>): Promise<Resource> {
   const recovery = recoverableOwnerUpload(id);
   if (recovery === undefined) throw new Error("Upload source is not recoverable in this browser tab.");
   if (file.name !== recovery.filename || file.size !== recovery.expectedSize || file.lastModified !== recovery.lastModified) {
     throw new Error(`Select the original ${recovery.filename} file without modifications.`);
   }
+  await beforeTransfer?.();
   liveOwnerUploads.add(id);
-  try { return await continueOwnerUpload(id, file, onProgress); }
-  finally { liveOwnerUploads.delete(id); }
+  const controller = new AbortController(); ownerUploadControllers.set(id, controller); ownerUploadChannel();
+  try { return await continueOwnerUpload(id, file, onProgress, controller.signal); }
+  finally { liveOwnerUploads.delete(id); ownerUploadControllers.delete(id); }
 }
 
 export async function uploadFile(file: File, parentId: string, overwriteResourceId: string | undefined, onProgress: (progress: number) => void): Promise<Resource> {
@@ -511,10 +555,11 @@ export async function uploadFile(file: File, parentId: string, overwriteResource
   });
   storeRecoverableOwnerUpload({ id: created.id, filename: file.name, expectedSize: file.size, lastModified: file.lastModified, parentId, ...(overwriteResourceId === undefined ? {} : { overwriteResourceId }) });
   liveOwnerUploads.add(created.id);
-  try { return await continueOwnerUpload(created.id, file, onProgress); }
-  finally { liveOwnerUploads.delete(created.id); }
+  const controller = new AbortController(); ownerUploadControllers.set(created.id, controller); ownerUploadChannel();
+  try { return await continueOwnerUpload(created.id, file, onProgress, controller.signal); }
+  finally { liveOwnerUploads.delete(created.id); ownerUploadControllers.delete(created.id); }
 }
 
 export function downloadUrl(resourceId: string, preview = false): string {
-  return `/api/v1/files/${encodeURIComponent(resourceId)}/${preview ? "preview" : "content"}`;
+  return `/api/v1/files/${encodeURIComponent(resourceId)}/${preview ? "preview" : `content?transferId=${crypto.randomUUID()}`}`;
 }

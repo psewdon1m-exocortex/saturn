@@ -2,7 +2,6 @@ import { createHash } from "node:crypto";
 import type { Readable } from "node:stream";
 import type { AuditSink } from "@saturn/audit";
 import type { StorageAdapter } from "@saturn/storage";
-import { joinStoragePath } from "@saturn/storage";
 import { v7 as uuidv7 } from "uuid";
 import type {
   ReconciliationIssue,
@@ -70,30 +69,34 @@ export class ReconciliationService {
         resourcePageSize = page.length;
         for (const tracked of page) {
           scannedResources += 1;
+          const inspect = async () => {
           if (!(await this.#storage.exists(tracked.storagePath))) {
-            await this.#repository.setResourceStatus(tracked.id, "missing");
+            if (!(await this.#repository.setResourceStatus(tracked.id, "missing", tracked))) return;
             await addIssue("missing", tracked.storagePath, "resource_marked_missing", { sizeBytes: tracked.sizeBytes, sha256: tracked.sha256 }, {}, tracked.id);
-            continue;
+            return;
           }
           const attributes = await this.#storage.stat(tracked.storagePath);
           if (attributes.type !== "file" || attributes.size !== tracked.sizeBytes) {
-            await this.#repository.setResourceStatus(tracked.id, "error");
+            if (!(await this.#repository.setResourceStatus(tracked.id, "error", tracked))) return;
             await addIssue("size_mismatch", tracked.storagePath, "resource_marked_error", { sizeBytes: tracked.sizeBytes }, {
               type: attributes.type,
               sizeBytes: attributes.size,
             }, tracked.id);
-            continue;
+            return;
           }
           if (mode === "full_hash" && tracked.sha256 !== undefined) {
             const actual = await hash(await this.#storage.openRead(tracked.storagePath));
             if (actual.bytes !== tracked.sizeBytes || actual.sha256 !== tracked.sha256) {
-              await this.#repository.setResourceStatus(tracked.id, "quarantined");
+              if (!(await this.#repository.setResourceStatus(tracked.id, "quarantined", tracked))) return;
               await addIssue("checksum_mismatch", tracked.storagePath, "resource_quarantined", {
                 sizeBytes: tracked.sizeBytes,
                 sha256: tracked.sha256,
               }, actual, tracked.id);
             }
           }
+          };
+          if (this.#repository.withTrackedFile !== undefined) await this.#repository.withTrackedFile(tracked, inspect);
+          else await inspect();
         }
         afterId = page.at(-1)?.id;
       } while (resourcePageSize === 100);
@@ -113,10 +116,7 @@ export class ReconciliationService {
               continue;
             }
             if (await this.#repository.hasResourceAtPath(entry.path)) continue;
-            const orphanPath = joinStoragePath(`_system/orphaned/${runId}`, entry.path);
-            await this.#ensureParent(orphanPath);
-            await this.#storage.rename(entry.path, orphanPath);
-            await addIssue("orphaned", entry.path, "moved_to_orphan_namespace", {}, { orphanPath, sizeBytes: entry.size });
+            await addIssue("orphaned", entry.path, "awaiting_owner_catalog_analysis", {}, { sizeBytes: entry.size });
           }
         } while (cursor !== undefined);
       }
@@ -177,12 +177,4 @@ export class ReconciliationService {
     return this.#repository.listIssues(runId, limit);
   }
 
-  async #ensureParent(storagePath: string): Promise<void> {
-    const parts = storagePath.split("/").slice(0, -1);
-    let current = "";
-    for (const part of parts) {
-      current = current ? `${current}/${part}` : part;
-      if (!(await this.#storage.exists(current))) await this.#storage.mkdir(current);
-    }
-  }
 }

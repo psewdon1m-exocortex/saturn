@@ -12,6 +12,7 @@ export interface WorkerDatabasePort {
     readonly seenAt?: Date;
   }): Promise<void>;
   withSharedMaintenance?<T>(action: () => Promise<T>): Promise<T>;
+  withAdvisoryLock?<T>(key: string, action: () => Promise<T>, waitMs?: number): Promise<T>;
   close(): Promise<void>;
 }
 
@@ -21,11 +22,14 @@ export interface WorkerStorageHealthPort {
 
 export interface WorkerJobsPort {
   reconcile(): Promise<void>;
+  scrub?(): Promise<void>;
   purge?(): Promise<void>;
   backup?(): Promise<void>;
   maintain?(): Promise<void>;
   drain?(): Promise<unknown>;
   archive?(): Promise<unknown>;
+  sharePackage?(): Promise<unknown>;
+  storageCatalog?(): Promise<void>;
   close?(): Promise<void>;
 }
 
@@ -64,6 +68,21 @@ export function buildWorker(
   let backupTimer: NodeJS.Timeout | undefined;
   let dropDrainTimer: NodeJS.Timeout | undefined;
   let dropDrainRunning = false;
+  let storageCatalogTimer: NodeJS.Timeout | undefined;
+  let storageCatalogRunning = false;
+  let reconciliationRunning = false;
+  let backupRunning = false;
+  let closing = false;
+  const activeJobs = new Set<Promise<unknown>>();
+  const track = <T>(pending: Promise<T>): Promise<T> => {
+    activeJobs.add(pending);
+    void pending.then(() => activeJobs.delete(pending), () => activeJobs.delete(pending));
+    return pending;
+  };
+  const runJob = <T>(key: string, action: () => Promise<T>, maintenance = true): Promise<T> => {
+    const run = () => maintenance ? runMutation(action) : action();
+    return track(database.withAdvisoryLock?.(`saturn-worker:${key}`, run, 1000) ?? run());
+  };
 
   const runMutation = <T>(action: () => Promise<T>): Promise<T> => database.withSharedMaintenance?.(action) ?? action();
 
@@ -94,10 +113,13 @@ export function buildWorker(
   });
 
   app.addHook("onClose", async () => {
+    closing = true;
     if (heartbeatTimer !== undefined) clearInterval(heartbeatTimer);
     if (reconciliationTimer !== undefined) clearInterval(reconciliationTimer);
     if (backupTimer !== undefined) clearInterval(backupTimer);
     if (dropDrainTimer !== undefined) clearInterval(dropDrainTimer);
+    if (storageCatalogTimer !== undefined) clearInterval(storageCatalogTimer);
+    await Promise.allSettled([...activeJobs]);
     await jobs?.close?.();
     await database.close();
   });
@@ -107,7 +129,7 @@ export function buildWorker(
     startHeartbeat: async () => {
       await heartbeat();
       heartbeatTimer = setInterval(() => {
-        void heartbeat().catch((error: unknown) => {
+        void track(heartbeat()).catch((error: unknown) => {
           app.log.error({ error }, "worker heartbeat failed");
         });
       }, config.worker.heartbeatIntervalMs);
@@ -115,25 +137,41 @@ export function buildWorker(
     },
     startBackgroundJobs: () => {
       if (jobs === undefined) return;
+      if (jobs.storageCatalog !== undefined) {
+        const analyze = () => {
+          if (closing || storageCatalogRunning) return;
+          storageCatalogRunning = true;
+          void runJob("storage-catalog", async () => jobs.storageCatalog?.(), false).catch((error: unknown) => {
+            app.log.error({ error }, "Storage catalog analysis failed");
+          }).finally(() => { storageCatalogRunning = false; });
+        };
+        analyze();
+        storageCatalogTimer = setInterval(analyze, 2_000);
+        storageCatalogTimer.unref();
+      }
       reconciliationTimer = setInterval(() => {
-        void runMutation(async () => { await jobs.reconcile(); await jobs.purge?.(); await jobs.maintain?.(); }).catch((error: unknown) => {
+        if (closing || reconciliationRunning) return;
+        reconciliationRunning = true;
+        void runJob("reconciliation", async () => { await jobs.reconcile(); await jobs.scrub?.(); await jobs.purge?.(); await jobs.maintain?.(); }).catch((error: unknown) => {
           app.log.error({ error }, "scheduled reconciliation failed");
-        });
+        }).finally(() => { reconciliationRunning = false; });
       }, config.worker.reconciliationIntervalMs);
       reconciliationTimer.unref();
       if (jobs.backup !== undefined) {
         backupTimer = setInterval(() => {
-          void runMutation(async () => jobs.backup?.()).catch((error: unknown) => {
+          if (closing || backupRunning) return;
+          backupRunning = true;
+          void runJob("backup", async () => jobs.backup?.()).catch((error: unknown) => {
             app.log.error({ error }, "scheduled Saturn backup failed");
-          });
+          }).finally(() => { backupRunning = false; });
         }, config.recovery.backupIntervalMs);
         backupTimer.unref();
       }
-      if (jobs.drain !== undefined || jobs.archive !== undefined) {
+      if (jobs.drain !== undefined || jobs.archive !== undefined || jobs.sharePackage !== undefined) {
         const drain = () => {
-          if (dropDrainRunning) return;
+          if (closing || dropDrainRunning) return;
           dropDrainRunning = true;
-          void runMutation(async () => { await jobs.drain?.(); await jobs.archive?.(); }).catch((error: unknown) => {
+          void runJob("transfers", async () => { await jobs.drain?.(); await jobs.archive?.(); await jobs.sharePackage?.(); }).catch((error: unknown) => {
             app.log.error({ error }, "Background transfer worker failed");
           }).finally(() => { dropDrainRunning = false; });
         };

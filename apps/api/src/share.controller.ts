@@ -1,12 +1,12 @@
-import { Body, Controller, Delete, Get, Headers, HttpCode, Inject, Param, Patch, Post, Query, Req, Res, UnauthorizedException, UseFilters, UseGuards } from "@nestjs/common";
+import { BadRequestException, Body, Controller, Delete, Get, Head, Headers, HttpCode, Inject, Param, Patch, Post, Query, Req, Res, UnauthorizedException, UseFilters, UseGuards } from "@nestjs/common";
 import type { SaturnConfig } from "@saturn/config";
-import type { ShareService } from "@saturn/shares";
+import type { ShareService, ShareThumbnailService } from "@saturn/shares";
 import { fastifyCookie } from "@fastify/cookie";
 import type { FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { OwnerTokenGuard, RequireRecentReauthentication } from "./owner-token.guard.js";
 import { ShareApiExceptionFilter } from "./share-api-exception.filter.js";
-import { APP_CONFIG, SHARE_SERVICE } from "./tokens.js";
+import { APP_CONFIG, SHARE_SERVICE, SHARE_THUMBNAIL_SERVICE } from "./tokens.js";
 import { TransferMonitorService } from "./transfer-monitor.service.js";
 
 const mode = z.enum(["view", "download", "browse", "download_folder"]);
@@ -146,6 +146,7 @@ export class PublicShareController {
   constructor(
     @Inject(APP_CONFIG) private readonly config: SaturnConfig,
     @Inject(SHARE_SERVICE) private readonly shares: ShareService,
+    @Inject(SHARE_THUMBNAIL_SERVICE) private readonly thumbnails: ShareThumbnailService,
     @Inject(TransferMonitorService) private readonly transfers: TransferMonitorService,
   ) {}
 
@@ -170,11 +171,42 @@ export class PublicShareController {
     return this.shares.listChildren(token, parentId, accessInput(this.config, request));
   }
 
+  @Get(":token/thumbnail/:resourceId")
+  async thumbnail(@Param("token") token: string, @Param("resourceId") resourceId: string, @Req() request: FastifyRequest, @Res() reply: FastifyReply): Promise<void> {
+    const opened = await this.thumbnails.open(token, resourceId, accessInput(this.config, request));
+    if (opened.session !== undefined) setSessionCookie(this.config, reply, opened.session);
+    reply
+      .header("Content-Type", "image/webp")
+      .header("Content-Length", opened.sizeBytes)
+      .header("Content-Disposition", "inline")
+      .header("Cache-Control", "private, no-cache")
+      .header("ETag", `"${opened.etag}"`)
+      .header("X-Content-Type-Options", "nosniff")
+      .send(opened.stream);
+  }
+
+  @Head(":token/content")
+  async contentHead(@Param("token") token: string, @Headers("range") rawRange: string | undefined, @Req() request: FastifyRequest, @Res() reply: FastifyReply): Promise<void> {
+    const opened = await this.shares.contentMetadata(token, accessInput(this.config, request));
+    if (opened.newSession !== undefined) setSessionCookie(this.config, reply, opened.newSession);
+    let selectedRange: ReturnType<typeof range>;
+    try { selectedRange = range(rawRange, opened.resource.sizeBytes); }
+    catch { reply.status(416).header("Content-Range", `bytes */${String(opened.resource.sizeBytes)}`).send(); return; }
+    const contentLength = selectedRange.length ?? opened.resource.sizeBytes;
+    reply.header("Accept-Ranges", "bytes").header("Content-Length", contentLength)
+      .header("Content-Type", opened.resource.mimeType ?? "application/octet-stream")
+      .header("Content-Disposition", disposition(opened.share.mode === "view" ? "inline" : "attachment", opened.resource.name));
+    if (selectedRange.partial) reply.status(206).header("Content-Range", `bytes ${String(selectedRange.offset)}-${String(selectedRange.offset + contentLength - 1)}/${String(opened.resource.sizeBytes)}`);
+    reply.send();
+  }
+
   @Get(":token/content")
-  async content(@Param("token") token: string, @Headers("range") rawRange: string | undefined, @Req() request: FastifyRequest, @Res() reply: FastifyReply): Promise<void> {
+  async content(@Param("token") token: string, @Headers("range") rawRange: string | undefined, @Req() request: FastifyRequest, @Res() reply: FastifyReply, @Query("transferId") rawTransferId?: string): Promise<void> {
     const metadata = await this.shares.metadata(token, accessInput(this.config, request));
     if (metadata.share.locked) throw new UnauthorizedException({ code: "share_locked" });
     if (metadata.session !== undefined) setSessionCookie(this.config, reply, metadata.session);
+    const transferId = z.uuid().optional().parse(rawTransferId);
+    if (transferId !== undefined) this.transfers.assertDownloadAvailable(transferId);
     let selectedRange: ReturnType<typeof range>;
     try { selectedRange = range(rawRange, metadata.share.resourceSize); }
     catch { reply.status(416).header("Content-Range", `bytes */${String(metadata.share.resourceSize)}`).send({ code: "range_not_satisfiable" }); return; }
@@ -186,13 +218,31 @@ export class PublicShareController {
       .header("Content-Type", opened.resource.mimeType ?? "application/octet-stream")
       .header("Content-Disposition", disposition(opened.share.mode === "view" ? "inline" : "attachment", opened.resource.name));
     if (selectedRange.partial) reply.status(206).header("Content-Range", `bytes ${String(selectedRange.offset)}-${String(selectedRange.offset + contentLength - 1)}/${String(metadata.share.resourceSize)}`);
-    reply.send(this.transfers.trackDownload(opened.stream, { filename: opened.resource.name, totalBytes: contentLength }));
+    reply.send(this.transfers.trackDownload(opened.stream, { ...(transferId === undefined ? {} : { id: transferId }), filename: opened.resource.name, totalBytes: contentLength }));
+  }
+
+  @Head(":token/content/:resourceId")
+  async childContentHead(@Param("token") token: string, @Param("resourceId") resourceId: string, @Headers("range") rawRange: string | undefined, @Req() request: FastifyRequest, @Res() reply: FastifyReply): Promise<void> {
+    const metadata = await this.shares.childMetadata(token, resourceId, accessInput(this.config, request));
+    if (metadata.share.mode !== "download_folder") throw new BadRequestException({ code: "invalid_mode" });
+    if (metadata.session !== undefined) setSessionCookie(this.config, reply, metadata.session);
+    let selectedRange: ReturnType<typeof range>;
+    try { selectedRange = range(rawRange, metadata.resource.sizeBytes); }
+    catch { reply.status(416).header("Content-Range", `bytes */${String(metadata.resource.sizeBytes)}`).send(); return; }
+    const contentLength = selectedRange.length ?? metadata.resource.sizeBytes;
+    reply.header("Accept-Ranges", "bytes").header("Content-Length", contentLength)
+      .header("Content-Type", metadata.resource.mimeType ?? "application/octet-stream")
+      .header("Content-Disposition", disposition("attachment", metadata.resource.name));
+    if (selectedRange.partial) reply.status(206).header("Content-Range", `bytes ${String(selectedRange.offset)}-${String(selectedRange.offset + contentLength - 1)}/${String(metadata.resource.sizeBytes)}`);
+    reply.send();
   }
 
   @Get(":token/content/:resourceId")
-  async childContent(@Param("token") token: string, @Param("resourceId") resourceId: string, @Headers("range") rawRange: string | undefined, @Req() request: FastifyRequest, @Res() reply: FastifyReply): Promise<void> {
+  async childContent(@Param("token") token: string, @Param("resourceId") resourceId: string, @Headers("range") rawRange: string | undefined, @Req() request: FastifyRequest, @Res() reply: FastifyReply, @Query("transferId") rawTransferId?: string): Promise<void> {
     const metadata = await this.shares.childMetadata(token, resourceId, accessInput(this.config, request));
     if (metadata.session !== undefined) setSessionCookie(this.config, reply, metadata.session);
+    const transferId = z.uuid().optional().parse(rawTransferId);
+    if (transferId !== undefined) this.transfers.assertDownloadAvailable(transferId);
     let selectedRange: ReturnType<typeof range>;
     try { selectedRange = range(rawRange, metadata.resource.sizeBytes); }
     catch { reply.status(416).header("Content-Range", `bytes */${String(metadata.resource.sizeBytes)}`).send({ code: "range_not_satisfiable" }); return; }
@@ -204,7 +254,7 @@ export class PublicShareController {
       .header("Content-Type", opened.resource.mimeType ?? "application/octet-stream")
       .header("Content-Disposition", disposition("attachment", opened.resource.name));
     if (selectedRange.partial) reply.status(206).header("Content-Range", `bytes ${String(selectedRange.offset)}-${String(selectedRange.offset + contentLength - 1)}/${String(metadata.resource.sizeBytes)}`);
-    reply.send(this.transfers.trackDownload(opened.stream, { filename: opened.resource.name, totalBytes: contentLength }));
+    reply.send(this.transfers.trackDownload(opened.stream, { ...(transferId === undefined ? {} : { id: transferId }), filename: opened.resource.name, totalBytes: contentLength }));
   }
 
   @Post(":token/package")
@@ -213,13 +263,33 @@ export class PublicShareController {
     return this.shares.preparePackage(token, accessInput(this.config, request));
   }
 
-  @Get(":token/package")
-  async packageContent(@Param("token") token: string, @Headers("range") rawRange: string | undefined, @Req() request: FastifyRequest, @Res() reply: FastifyReply): Promise<void> {
+  @Head(":token/package")
+  async packageHead(@Param("token") token: string, @Headers("range") rawRange: string | undefined, @Req() request: FastifyRequest, @Res() reply: FastifyReply): Promise<void> {
     const metadata = await this.shares.metadata(token, accessInput(this.config, request));
     if (metadata.share.locked) throw new UnauthorizedException({ code: "share_locked" });
     if (metadata.session !== undefined) setSessionCookie(this.config, reply, metadata.session);
+    const prepared = (await this.shares.packageMetadata(token, accessInput(this.config, request, metadata.session?.token))).package;
+    if (prepared.state !== "ready") throw new BadRequestException({ code: "package_unavailable" });
+    let selectedRange: ReturnType<typeof range>;
+    try { selectedRange = range(rawRange, prepared.sizeBytes); }
+    catch { reply.status(416).header("Content-Range", `bytes */${String(prepared.sizeBytes)}`).send(); return; }
+    const contentLength = selectedRange.length ?? prepared.sizeBytes;
+    reply.header("Accept-Ranges", "bytes").header("Content-Length", contentLength).header("Content-Type", "application/zip")
+      .header("Content-Disposition", disposition("attachment", `${metadata.share.resourceName}.zip`));
+    if (selectedRange.partial) reply.status(206).header("Content-Range", `bytes ${String(selectedRange.offset)}-${String(selectedRange.offset + contentLength - 1)}/${String(prepared.sizeBytes)}`);
+    reply.send();
+  }
+
+  @Get(":token/package")
+  async packageContent(@Param("token") token: string, @Headers("range") rawRange: string | undefined, @Req() request: FastifyRequest, @Res() reply: FastifyReply, @Query("transferId") rawTransferId?: string): Promise<void> {
+    const metadata = await this.shares.metadata(token, accessInput(this.config, request));
+    if (metadata.share.locked) throw new UnauthorizedException({ code: "share_locked" });
+    if (metadata.session !== undefined) setSessionCookie(this.config, reply, metadata.session);
+    const transferId = z.uuid().optional().parse(rawTransferId);
+    if (transferId !== undefined) this.transfers.assertDownloadAvailable(transferId);
     const preparedAccess = await this.shares.packageMetadata(token, accessInput(this.config, request, metadata.session?.token));
     const prepared = preparedAccess.package;
+    if (prepared.state !== "ready") throw new BadRequestException({ code: "package_unavailable" });
     let selectedRange: ReturnType<typeof range>;
     try { selectedRange = range(rawRange, prepared.sizeBytes); }
     catch { reply.status(416).header("Content-Range", `bytes */${String(prepared.sizeBytes)}`).send({ code: "range_not_satisfiable" }); return; }
@@ -227,6 +297,12 @@ export class PublicShareController {
     const contentLength = selectedRange.length ?? prepared.sizeBytes;
     reply.header("Accept-Ranges", "bytes").header("Content-Length", contentLength).header("Content-Type", "application/zip").header("Content-Disposition", disposition("attachment", `${metadata.share.resourceName}.zip`));
     if (selectedRange.partial) reply.status(206).header("Content-Range", `bytes ${String(selectedRange.offset)}-${String(selectedRange.offset + contentLength - 1)}/${String(prepared.sizeBytes)}`);
-    reply.send(this.transfers.trackDownload(opened.stream, { filename: `${metadata.share.resourceName}.zip`, totalBytes: contentLength }));
+    reply.send(this.transfers.trackDownload(opened.stream, { ...(transferId === undefined ? {} : { id: transferId }), filename: `${metadata.share.resourceName}.zip`, totalBytes: contentLength }));
+  }
+
+  @Get(":token/package/status")
+  async packageStatus(@Param("token") token: string, @Req() request: FastifyRequest) {
+    const value = (await this.shares.packageMetadata(token, accessInput(this.config, request))).package;
+    return { state: value.state, sizeBytes: value.sizeBytes };
   }
 }

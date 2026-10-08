@@ -1,7 +1,7 @@
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { Readable } from "node:stream";
 import type { AuditSink } from "@saturn/audit";
-import { ROOT_RESOURCE_ID, type FileService, type Resource } from "@saturn/file-core";
+import { ROOT_RESOURCE_ID, BACKUPS_RESOURCE_ID, UploadPreconditionError, type FileService, type Resource } from "@saturn/file-core";
 import {logicalResourcePath, readerMetadata, readerRange} from "./resource-reader.js";
 import { v7 as uuidv7 } from "uuid";
 import {
@@ -16,6 +16,7 @@ import {
   type DeviceRepository,
   type DeviceRights,
   type PublicDevice,
+  type PlutoStatus,
 } from "./types.js";
 
 const scopeAliases: ReadonlyMap<string, string> = new Map<string, string>([
@@ -33,7 +34,7 @@ export class DeviceServiceError extends Error {
 }
 
 function publicDevice(value: DeviceRecord): PublicDevice {
-  return { id: value.id, name: value.name, state: value.state, scopeIds: value.scopeIds, rights: value.rights, ...(value.expiresAt === undefined ? {} : { expiresAt: value.expiresAt }), ...(value.lastUsedAt === undefined ? {} : { lastUsedAt: value.lastUsedAt }), createdAt: value.createdAt, updatedAt: value.updatedAt, ...(value.revokedAt === undefined ? {} : { revokedAt: value.revokedAt }) };
+  return { id: value.id, name: value.name, deviceKind: value.deviceKind, ...(value.plutoStatus === undefined ? {} : { plutoStatus: value.plutoStatus }), ...(value.syncRootId === undefined ? {} : { syncRootId: value.syncRootId }), state: value.state, scopeIds: value.scopeIds, rights: value.rights, ...(value.expiresAt === undefined ? {} : { expiresAt: value.expiresAt }), ...(value.lastUsedAt === undefined ? {} : { lastUsedAt: value.lastUsedAt }), ...(value.lastSeenAt === undefined ? {} : { lastSeenAt: value.lastSeenAt }), ...(value.clientPlatform === undefined ? {} : { clientPlatform: value.clientPlatform }), ...(value.clientVersion === undefined ? {} : { clientVersion: value.clientVersion }), createdAt: value.createdAt, updatedAt: value.updatedAt, ...(value.revokedAt === undefined ? {} : { revokedAt: value.revokedAt }) };
 }
 
 export function resourceEtag(resource: Resource): string {
@@ -80,8 +81,91 @@ export class DeviceService {
   }
 
   #hash(token: string): string { return createHmac("sha256", this.#pepper).update("device-capability-token\0").update(token).digest("hex"); }
+  #enrollmentHash(code: string): string { return createHmac("sha256", this.#pepper).update("device-enrollment-code\0").update(code).digest("hex"); }
 
-  async createDevice(value: { readonly name: string; readonly scopeIds: readonly string[]; readonly rights: DeviceRights; readonly expiresAt?: Date }, now = new Date()) {
+  async #windowsRoot(device: DeviceRecord): Promise<Resource> {
+    if (!device.syncRootId || device.scopeIds.length !== 1 || device.scopeIds[0] !== device.syncRootId) throw new DeviceServiceError("forbidden");
+    const root = await this.input.files.getResource(device.syncRootId).catch(() => undefined);
+    if (!root || root.type !== "folder" || root.status !== "active" || root.parentId !== SYNC_RESOURCE_ID) throw new DeviceServiceError("forbidden");
+    return root;
+  }
+
+  async #publicDevice(device: DeviceRecord): Promise<PublicDevice> {
+    const root = (device.deviceKind === "windows_sync" || device.deviceKind === "pluto") && device.syncRootId
+      ? await this.input.files.getResource(device.syncRootId).catch(() => undefined) : undefined;
+    return { ...publicDevice(device), ...(root?.status === "active" && (device.deviceKind === "pluto" || root.parentId === SYNC_RESOURCE_ID) ? { syncFolderName: root.name } : {}) };
+  }
+
+  async #createWindowsRoot(value: string): Promise<Resource> {
+    const name = cleanName(value).normalize("NFC");
+    if (name === "." || name === ".." || /[\\/]/.test(name)) throw new DeviceServiceError("invalid_path");
+    if (await this.#child(SYNC_RESOURCE_ID, name)) throw new DeviceServiceError("conflict");
+    return this.input.files.createFolder(SYNC_RESOURCE_ID, name);
+  }
+
+  async #plutoRoot(device: DeviceRecord): Promise<Resource> {
+    if (device.deviceKind !== "pluto" || !device.syncRootId || device.scopeIds.length !== 1 || device.scopeIds[0] !== device.syncRootId) throw new DeviceServiceError("forbidden");
+    const root = await this.input.files.getResource(device.syncRootId).catch(() => undefined);
+    const parent = root?.parentId ? await this.input.files.getResource(root.parentId).catch(() => undefined) : undefined;
+    if (!root || root.type !== "folder" || root.status !== "active" || !parent || parent.status !== "active" || parent.name !== "pluto" || parent.parentId !== BACKUPS_RESOURCE_ID) throw new DeviceServiceError("forbidden");
+    return root;
+  }
+
+  async plutoPath(context: DeviceContext, relative: string): Promise<string> {
+    const root = await this.#plutoRoot(context.device);
+    const segments = relative === "" ? [] : relative.split("/");
+    if (relative.length > 4096 || relative.includes("\\") || containsControl(relative) || segments.length > 126 || segments.some(segment => !segment || segment === "." || segment === ".." || segment.length > 255)) throw new DeviceServiceError("invalid_path");
+    return ["pluto", root.name, ...segments].map(encodeURIComponent).join("/");
+  }
+  async enforcePlutoRetention(context: DeviceContext, logical: string): Promise<void> {
+    await this.#plutoRoot(context.device);
+    const target = await this.#resolve(context, normalizeDavPath(logical));
+    if (target.resource.type === "file") await this.input.files.limitVersions(target.resource.id, 10);
+  }
+
+  async createPlutoEnrollment(value: string, now = new Date()) {
+    if (!this.input.options.enabled) throw new DeviceServiceError("forbidden");
+    const name = cleanName(value).normalize("NFC");
+    if (name === "." || name === ".." || /[\\/]/.test(name)) throw new DeviceServiceError("invalid_path");
+    let parent = await this.#child(BACKUPS_RESOURCE_ID, "pluto");
+    if (!parent) {
+      try { parent = await this.input.files.createFolder(BACKUPS_RESOURCE_ID, "pluto"); }
+      catch (error) { parent = await this.#child(BACKUPS_RESOURCE_ID, "pluto"); if (!parent) throw error; }
+    }
+    if (parent.type !== "folder" || await this.#child(parent.id, name)) throw new DeviceServiceError("conflict");
+    const root = await this.input.files.createFolder(parent.id, name);
+    const record = await this.input.repository.create({ id: uuidv7(), name, deviceKind: "pluto", syncRootId: root.id, tokenHash: this.#hash(randomBytes(32).toString("base64url")), scopeIds: [root.id], rights: { read: true, write: true, move: false, delete: false }, createdAt: now });
+    return this.createPlutoEnrollmentForDevice(record.id, now);
+  }
+
+  async createPlutoEnrollmentForDevice(id: string, now = new Date()) {
+    const record = await this.input.repository.getById(id);
+    if (!record || record.state !== "active" || record.deviceKind !== "pluto") throw new DeviceServiceError("not_found");
+    await this.#plutoRoot(record);
+    const code = randomBytes(24).toString("base64url"), expiresAt = new Date(now.getTime() + 15 * 60_000);
+    await this.input.repository.createEnrollment({ id: uuidv7(), deviceId: id, codeHash: this.#enrollmentHash(code), expiresAt, createdAt: now });
+    await this.#audit("pluto.enrollment.created", id, {});
+    return { code, expiresAt: expiresAt.toISOString(), device: await this.#publicDevice(record) };
+  }
+
+  async redeemPlutoEnrollment(code: string, version: string, now = new Date()) {
+    if (!/^[A-Za-z0-9_-]{32}$/.test(code) || !version.trim() || version.length > 100) throw new DeviceServiceError("unauthorized");
+    const token = randomBytes(32).toString("base64url");
+    const record = await this.input.repository.redeemEnrollment(this.#enrollmentHash(code), this.#hash(token), now, "pluto");
+    if (!record || record.deviceKind !== "pluto") throw new DeviceServiceError("unauthorized");
+    await this.#plutoRoot(record);
+    const device = await this.input.repository.recordPresence(record.id, "linux", version, now, { enabled: false, intervalSeconds: 86400, uploadedFiles: 0 });
+    await this.#audit("pluto.enrollment.redeemed", record.id, {});
+    return { token, device: await this.#publicDevice(device) };
+  }
+
+  async plutoHeartbeat(authorization: string | undefined, version: string, status: PlutoStatus, now = new Date()) {
+    const context = await this.authenticate(authorization, now);
+    await this.#plutoRoot(context.device);
+    return this.#publicDevice(await this.input.repository.recordPresence(context.device.id, "linux", version, now, status));
+  }
+
+  async createDevice(value: { readonly name: string; readonly scopeIds: readonly string[]; readonly rights: DeviceRights; readonly expiresAt?: Date; readonly deviceKind?: DeviceRecord["deviceKind"] }, now = new Date()) {
     if (!this.input.options.enabled) throw new DeviceServiceError("forbidden");
     const scopeIds = [...new Set(value.scopeIds)];
     if (scopeIds.length < 1 || scopeIds.length > 3 || scopeIds.some((id) => !idAliases.has(id)) || !validRights(value.rights)) throw new Error("Device scope or rights are invalid");
@@ -89,27 +173,74 @@ export class DeviceService {
       throw new Error("Root resource capabilities are read-only");
     if (value.expiresAt !== undefined && value.expiresAt <= now) throw new Error("Device expiry is invalid");
     const token = randomBytes(32).toString("base64url");
-    const record = await this.input.repository.create({ id: uuidv7(), name: cleanName(value.name), tokenHash: this.#hash(token), scopeIds, rights: value.rights, ...(value.expiresAt === undefined ? {} : { expiresAt: value.expiresAt }), createdAt: now });
+    const record = await this.input.repository.create({ id: uuidv7(), name: cleanName(value.name), deviceKind: value.deviceKind ?? "generic", tokenHash: this.#hash(token), scopeIds, rights: value.rights, ...(value.expiresAt === undefined ? {} : { expiresAt: value.expiresAt }), createdAt: now });
     await this.#audit("device.created", record.id, { name: record.name, scopeIds: record.scopeIds, rights: record.rights });
     return { token, device: publicDevice(record) };
   }
 
+  async createWindowsEnrollment(name: string, now = new Date()) {
+    if (!this.input.options.enabled) throw new DeviceServiceError("forbidden");
+    const root = await this.#createWindowsRoot(name);
+    const placeholder = randomBytes(32).toString("base64url");
+    const record = await this.input.repository.create({
+      id: uuidv7(), name: root.name, deviceKind: "windows_sync", syncRootId: root.id, tokenHash: this.#hash(placeholder),
+      scopeIds: [root.id], rights: { read: true, write: true, move: true, delete: true }, createdAt: now,
+    });
+    return this.createWindowsEnrollmentForDevice(record.id, now);
+  }
+
+  async createWindowsEnrollmentForDevice(id: string, now = new Date()) {
+    let record = await this.input.repository.getById(id);
+    if (record === undefined) throw new DeviceServiceError("not_found");
+    if (record.deviceKind === "pluto") return this.createPlutoEnrollmentForDevice(id, now);
+    if (record.state !== "active" || record.deviceKind !== "windows_sync") throw new DeviceServiceError("conflict");
+    if (!record.syncRootId) {
+      const root = await this.#createWindowsRoot(record.name);
+      record = await this.input.repository.update(id, { syncRootId: root.id, scopeIds: [root.id], tokenHash: this.#hash(randomBytes(32).toString("base64url")) }, now);
+    }
+    await this.#windowsRoot(record);
+    const code = randomBytes(24).toString("base64url");
+    const expiresAt = new Date(now.getTime() + 15 * 60_000);
+    await this.input.repository.createEnrollment({ id: uuidv7(), deviceId: record.id, codeHash: this.#enrollmentHash(code), expiresAt, createdAt: now });
+    await this.#audit("device.enrollment.created", record.id, { expiresAt: expiresAt.toISOString() });
+    return { code, expiresAt: expiresAt.toISOString(), device: await this.#publicDevice(record) };
+  }
+
+  async redeemWindowsEnrollment(code: string, version: string, now = new Date()) {
+    if (!/^[A-Za-z0-9_-]{32}$/.test(code) || version.trim().length < 1 || version.length > 100) throw new DeviceServiceError("unauthorized");
+    const token = randomBytes(32).toString("base64url");
+    const record = await this.input.repository.redeemEnrollment(this.#enrollmentHash(code), this.#hash(token), now);
+    if (record === undefined) throw new DeviceServiceError("unauthorized");
+    if (record.deviceKind !== "windows_sync") throw new DeviceServiceError("unauthorized");
+    await this.#windowsRoot(record);
+    const present = await this.input.repository.recordPresence(record.id, "windows", version.trim(), now);
+    await this.#audit("device.enrollment.redeemed", record.id, { platform: "windows", version: version.trim() }, { type: "device_token", id: record.id });
+    return { token, device: await this.#publicDevice(present) };
+  }
+
+  async heartbeat(authorization: string | undefined, platform: "windows" | "linux", version: string, now = new Date()) {
+    if (version.trim().length < 1 || version.length > 100) throw new DeviceServiceError("unauthorized");
+    const context = await this.authenticate(authorization, now);
+    return this.#publicDevice(await this.input.repository.recordPresence(context.device.id, platform, version.trim(), now));
+  }
+
   async listDevices(offset = 0, limit = 100): Promise<readonly PublicDevice[]> {
     if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 500) throw new Error("Device page is invalid");
-    return (await this.input.repository.list(offset, limit)).map(publicDevice);
+    return Promise.all((await this.input.repository.list(offset, limit)).map(device => this.#publicDevice(device)));
   }
 
   async updateDevice(id: string, value: { readonly name?: string; readonly scopeIds?: readonly string[]; readonly rights?: DeviceRights; readonly expiresAt?: Date | null }, now = new Date()): Promise<PublicDevice> {
-    if (value.scopeIds !== undefined && (value.scopeIds.length < 1 || value.scopeIds.length > 3 || value.scopeIds.some((item) => !idAliases.has(item)))) throw new Error("Device scopes are invalid");
     if (value.rights !== undefined && !validRights(value.rights)) throw new Error("Device rights are invalid");
     const previous=await this.input.repository.getById(id);
     if(previous===undefined)throw new DeviceServiceError("not_found");
+    if (value.scopeIds !== undefined && (value.scopeIds.length < 1 || value.scopeIds.length > 3 || value.scopeIds.some(item => previous.deviceKind === "windows_sync" || previous.deviceKind === "pluto" ? item !== previous.syncRootId : !idAliases.has(item)))) throw new DeviceServiceError("forbidden");
+    if (previous.deviceKind === "pluto" && value.rights !== undefined && (!value.rights.read || !value.rights.write || value.rights.move || value.rights.delete)) throw new DeviceServiceError("forbidden");
     const selectedScope=value.scopeIds??previous.scopeIds,selectedRights=value.rights??previous.rights;
     if(selectedScope.includes(ROOT_RESOURCE_ID)&&(selectedScope.length!==1||!selectedRights.read||selectedRights.write||selectedRights.move||selectedRights.delete))
       throw new Error("Root resource capabilities are read-only");
     const updated = await this.input.repository.update(id, { ...(value.name === undefined ? {} : { name: cleanName(value.name) }), ...(value.scopeIds === undefined ? {} : { scopeIds: [...new Set(value.scopeIds)] }), ...(value.rights === undefined ? {} : { rights: value.rights }), ...(value.expiresAt === undefined ? {} : { expiresAt: value.expiresAt }) }, now);
     await this.#audit("device.updated", updated.id, { scopeIds: updated.scopeIds, rights: updated.rights });
-    return publicDevice(updated);
+    return this.#publicDevice(updated);
   }
 
   async revokeDevice(id: string, now = new Date()): Promise<PublicDevice> {
@@ -132,6 +263,8 @@ export class DeviceService {
     if (!/^[A-Za-z0-9_-]{43}$/.test(token)) throw new DeviceServiceError("unauthorized");
     const device = await this.input.repository.authenticate(this.#hash(token), now);
     if (device === undefined) throw new DeviceServiceError("unauthorized");
+    if (device.deviceKind === "windows_sync") await this.#windowsRoot(device);
+    if (device.deviceKind === "pluto") await this.#plutoRoot(device);
     return { device };
   }
 
@@ -139,6 +272,10 @@ export class DeviceService {
     this.#right(context, "read");
     const segments = normalizeDavPath(rawPath);
     if (segments.length === 0) {
+      if (context.device.deviceKind === "windows_sync") {
+        const root = await this.#windowsRoot(context.device);
+        return [{ path: `sync/${root.name}`, resource: root }];
+      }
       const entries: DavEntry[] = [];
       for (const id of context.device.scopeIds) {
         const alias = idAliases.get(id);
@@ -177,7 +314,7 @@ export class DeviceService {
     return { resource: opened.resource, stream: opened.stream, offset, length, partial: selected !== undefined };
   }
 
-  async put(context: DeviceContext, rawPath: string, source: Readable, size: number, conditions: { readonly ifMatch?: string; readonly ifNoneMatch?: string }): Promise<{ readonly resource: Resource; readonly created: boolean; readonly conflict: boolean }> {
+  async put(context: DeviceContext, rawPath: string, source: Readable, size: number, conditions: { readonly ifMatch?: string; readonly ifNoneMatch?: string; readonly expectedSha256?: string }): Promise<{ readonly resource: Resource; readonly created: boolean; readonly conflict: boolean }> {
     this.#right(context, "write");
     if (!Number.isSafeInteger(size) || size < 0) throw new DeviceServiceError("limit");
     const segments = normalizeDavPath(rawPath);
@@ -187,23 +324,96 @@ export class DeviceService {
     const filename = segments.at(-1) ?? "";
     const current = await this.#child(parent.resource.id, filename);
     if (current === undefined) {
-      if (conditions.ifMatch !== undefined && conditions.ifMatch !== "*") throw new DeviceServiceError("precondition_failed");
-      const resource = await this.#upload(context, parent.resource.id, filename, source, size);
+      if (conditions.ifMatch !== undefined) throw new DeviceServiceError("precondition_failed");
+      const resource = await this.#upload(context, parent.resource.id, filename, source, size, undefined, conditions.expectedSha256, undefined, true);
       return { resource, created: true, conflict: false };
     }
     if (current.type !== "file") throw new DeviceServiceError("conflict");
     const currentEtag = resourceEtag(current);
     if (conditions.ifMatch === undefined) throw new DeviceServiceError("precondition_required");
     if (conditions.ifMatch !== "*" && conditions.ifMatch !== currentEtag) {
+      if (context.device.deviceKind === "pluto") throw new DeviceServiceError("precondition_failed");
       const conflictName = this.#conflictName(filename, context.device);
-      const conflict = await this.#upload(context, parent.resource.id, conflictName, source, size);
+      const conflict = await this.#upload(context, parent.resource.id, conflictName, source, size, undefined, conditions.expectedSha256);
       await this.input.repository.recordConflict({ id: uuidv7(), deviceId: context.device.id, resourceId: current.id, conflictResourceId: conflict.id, baseEtag: conditions.ifMatch, currentEtag, state: "open", createdAt: new Date() });
       await this.#audit("sync.conflict.created", context.device.id, { resourceId: current.id, conflictResourceId: conflict.id, baseEtag: conditions.ifMatch, currentEtag }, this.#actor(context));
       return { resource: conflict, created: true, conflict: true };
     }
     if (conditions.ifNoneMatch === "*") throw new DeviceServiceError("precondition_failed");
-    const resource = await this.#upload(context, parent.resource.id, filename, source, size, current.id);
+    const resource = await this.#upload(context, parent.resource.id, filename, source, size, current.id, conditions.expectedSha256,
+      conditions.ifMatch === "*" ? undefined : current.currentVersionId);
     return { resource, created: false, conflict: false };
+  }
+
+  async createResumableUpload(context: DeviceContext, input: { path: string; expectedSize: number; expectedSha256: string; idempotencyKey: string; ifMatch?: string; ifNoneMatch?: string }) {
+    this.#right(context, "write");
+    if (context.device.deviceKind !== "windows_sync") throw new DeviceServiceError("forbidden");
+    if (!/^[a-f0-9]{64}$/.test(input.expectedSha256) || !/^[a-f0-9]{64}$/.test(input.idempotencyKey)) throw new DeviceServiceError("invalid_path");
+    const segments = normalizeDavPath(input.path);
+    if (segments.length < 3) throw new DeviceServiceError("forbidden");
+    const parent = (await this.#resolve(context, segments.slice(0, -1))).resource;
+    const filename = segments.at(-1) ?? "";
+    const key = `sync-resume-${createHmac("sha256", this.#pepper).update(context.device.id).update("\0").update(input.idempotencyKey).digest("hex")}`;
+    const existing = await this.input.files.findUploadByIdempotencyKey(key);
+    if (existing !== undefined) {
+      if (existing.parentId !== parent.id || existing.filename !== filename || existing.expectedSize !== input.expectedSize || existing.expectedSha256 !== input.expectedSha256) throw new DeviceServiceError("conflict");
+      return this.inspectResumableUpload(context, existing.id);
+    }
+    const current = await this.#child(parent.id, filename);
+    if (current !== undefined && (current.type !== "file" || input.ifNoneMatch === "*" || input.ifMatch !== resourceEtag(current))) throw new DeviceServiceError("precondition_failed");
+    if (current === undefined && input.ifMatch !== undefined) throw new DeviceServiceError("precondition_failed");
+    const upload = await this.input.files.createUpload({ parentId: parent.id, filename, expectedSize: input.expectedSize, expectedSha256: input.expectedSha256, idempotencyKey: key, requireAbsent: current === undefined,
+      ...(current === undefined ? {} : { overwriteResourceId: current.id, expectedVersionId: current.currentVersionId }), auditActor: this.#actor(context) });
+    return this.inspectResumableUpload(context, upload.id);
+  }
+
+  async #scopedUpload(context: DeviceContext, id: string, allowExpired = false) {
+    this.#right(context, "write");
+    if (context.device.deviceKind !== "windows_sync") throw new DeviceServiceError("forbidden");
+    const upload = await this.input.files.getUpload(id);
+    if (upload.auditActorType !== "device_token" || upload.auditActorId !== context.device.id) throw new DeviceServiceError("not_found");
+    const parent = await this.input.files.getResource(upload.parentId);
+    if (parent.status !== "active") throw new DeviceServiceError("not_found");
+    const resolved = await this.#resolve(context, parent.storagePath.split("/"));
+    if (resolved.resource.id !== upload.parentId) throw new DeviceServiceError("forbidden");
+    if (!allowExpired && upload.status !== "active" && upload.expiresAt <= new Date()) throw new DeviceServiceError("conflict");
+    return upload;
+  }
+
+  async inspectResumableUpload(context: DeviceContext, id: string) {
+    const upload = await this.#scopedUpload(context, id);
+    return { id: upload.id, status: upload.status, receivedSize: upload.receivedSize, expectedSize: upload.expectedSize,
+      ...(upload.status === "active" && upload.resourceId !== undefined ? { etag: resourceEtag(await this.input.files.getResource(upload.resourceId)) } : {}) };
+  }
+
+  async cancelResumableUpload(context: DeviceContext, idempotencyKey: string) {
+    this.#right(context, "write");
+    if (context.device.deviceKind !== "windows_sync") throw new DeviceServiceError("forbidden");
+    if (!/^[a-f0-9]{64}$/.test(idempotencyKey)) throw new DeviceServiceError("invalid_path");
+    const key = `sync-resume-${createHmac("sha256", this.#pepper).update(context.device.id).update("\0").update(idempotencyKey).digest("hex")}`;
+    const existing = await this.input.files.findUploadByIdempotencyKey(key);
+    if (existing === undefined) return { status: "absent" };
+    const upload = await this.#scopedUpload(context, existing.id, true);
+    // A lost completion acknowledgement is already a durable file. Superseding
+    // its checkpoint must never delete that file or any retained version.
+    if (upload.status === "active") return { id: upload.id, status: "active" };
+    await this.input.files.abandonUpload(upload.id);
+    return { id: upload.id, status: "abandoned" };
+  }
+
+  async appendResumableUpload(context: DeviceContext, id: string, offset: number, length: number, source: Readable) {
+    await this.#scopedUpload(context, id);
+    await this.input.files.appendUpload(id, offset, length, source);
+    return this.inspectResumableUpload(context, id);
+  }
+
+  async completeResumableUpload(context: DeviceContext, id: string) {
+    await this.#scopedUpload(context, id);
+    const fresh = await this.input.repository.getById(context.device.id);
+    if (fresh?.state !== "active" || fresh.tokenHash !== context.device.tokenHash || (fresh.expiresAt !== undefined && fresh.expiresAt <= new Date())) throw new DeviceServiceError("unauthorized");
+    try { await this.input.files.completeUpload(id); }
+    catch (error) { if (error instanceof UploadPreconditionError) throw new DeviceServiceError("precondition_failed"); throw error; }
+    return this.inspectResumableUpload(context, id);
   }
 
   async createCollection(context: DeviceContext, rawPath: string): Promise<Resource> {
@@ -221,6 +431,7 @@ export class DeviceService {
     const destinationSegments = normalizeDavPath(destinationPath);
     if (sourceSegments.length < 2 || destinationSegments.length < 2 || sourceSegments[0] !== destinationSegments[0]) throw new DeviceServiceError("forbidden");
     const source = await this.#resolve(context, sourceSegments);
+    if (source.resource.id === context.device.syncRootId) throw new DeviceServiceError("forbidden");
     const parent = await this.#resolve(context, destinationSegments.slice(0, -1));
     const name = destinationSegments.at(-1) ?? "";
     const existing = await this.#child(parent.resource.id, name);
@@ -237,12 +448,23 @@ export class DeviceService {
     const segments = normalizeDavPath(rawPath);
     if (segments.length < 2) throw new DeviceServiceError("forbidden");
     const target = await this.#resolve(context, segments);
+    if (target.resource.id === context.device.syncRootId) throw new DeviceServiceError("forbidden");
     const count = await this.#treeCount(target.resource);
     if (!(await this.input.repository.reserveDelete({ deviceId: context.device.id, itemCount: count, since: new Date(now.getTime() - this.input.options.deleteWindowMs), limit: this.input.options.deleteMaxItems, occurredAt: now }))) throw new DeviceServiceError("rate_limited");
     return this.input.files.trashResource(target.resource.id, { idempotencyKey: `dav-delete-${uuidv7()}`, auditActor: this.#actor(context) });
   }
 
   async #resolve(context: DeviceContext, segments: readonly string[]): Promise<{ readonly resource: Resource; readonly scopeId: string }> {
+    if (context.device.deviceKind === "windows_sync" || context.device.deviceKind === "pluto") {
+      let resource = context.device.deviceKind === "pluto" ? await this.#plutoRoot(context.device) : await this.#windowsRoot(context.device);
+      if (segments[0] !== (context.device.deviceKind === "pluto" ? "pluto" : "sync") || segments[1] !== resource.name) throw new DeviceServiceError("not_found");
+      for (const name of segments.slice(2)) {
+        const child = await this.#child(resource.id, name);
+        if (!child || child.status !== "active") throw new DeviceServiceError("not_found");
+        resource = child;
+      }
+      return { resource, scopeId: context.device.syncRootId as string };
+    }
     const alias = segments[0];
     if (alias === undefined) throw new DeviceServiceError("not_found");
     const scopeId = scopeAliases.get(alias);
@@ -265,8 +487,9 @@ export class DeviceService {
     }
   }
 
-  async #upload(context: DeviceContext, parentId: string, filename: string, source: Readable, size: number, overwriteResourceId?: string): Promise<Resource> {
-    const upload = await this.input.files.createUpload({ parentId, filename, expectedSize: size, idempotencyKey: `dav-upload-${uuidv7()}`, ...(overwriteResourceId === undefined ? {} : { overwriteResourceId }), auditActor: this.#actor(context) });
+  async #upload(context: DeviceContext, parentId: string, filename: string, source: Readable, size: number, overwriteResourceId?: string, expectedSha256?: string, expectedVersionId?: string, requireAbsent = false): Promise<Resource> {
+    const upload = await this.input.files.createUpload({ parentId, filename, expectedSize: size, ...(expectedSha256 === undefined ? {} : { expectedSha256 }), idempotencyKey: `dav-upload-${uuidv7()}`, ...(overwriteResourceId === undefined ? {} : { overwriteResourceId }),
+      ...(expectedVersionId === undefined ? {} : { expectedVersionId }), requireAbsent, auditActor: this.#actor(context) });
     let offset = 0;
     // Network chunks are commonly 16-64 KiB. Each storage append opens an SFTP
     // handle and commits a database offset: coalesce them into bounded writes.
@@ -292,9 +515,16 @@ export class DeviceService {
       }
       await flush();
       if (offset !== size) throw new Error("WebDAV body length differs from Content-Length");
-      return (await this.input.files.completeUpload(upload.id)).resource;
+      if (context.device.deviceKind === "pluto") {
+        const currentDevice = await this.input.repository.getById(context.device.id);
+        if (currentDevice?.state !== "active" || currentDevice.tokenHash !== context.device.tokenHash || (currentDevice.expiresAt !== undefined && currentDevice.expiresAt <= new Date())) throw new DeviceServiceError("unauthorized");
+      }
+      const resource = (await this.input.files.completeUpload(upload.id)).resource;
+      if (context.device.deviceKind === "pluto") await this.input.files.limitVersions(resource.id, 10);
+      return resource;
     } catch (error) {
       await this.input.files.abandonUpload(upload.id).catch(() => undefined);
+      if (error instanceof UploadPreconditionError) throw new DeviceServiceError("precondition_failed");
       throw error;
     }
   }
@@ -320,6 +550,7 @@ export class DeviceService {
   #right(context: DeviceContext, right: keyof DeviceRights): void {
     // Enforce again at use, including concurrent administrative policy changes.
     if(right!=="read"&&context.device.scopeIds.includes(ROOT_RESOURCE_ID))throw new DeviceServiceError("forbidden");
+    if (context.device.deviceKind === "pluto" && (right === "move" || right === "delete")) throw new DeviceServiceError("forbidden");
     if (!context.device.rights[right]) throw new DeviceServiceError("forbidden");
   }
 

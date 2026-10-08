@@ -13,7 +13,7 @@ export default tseslint.config(
       "eslint.config.mjs",
       "scripts/**/*.mjs",
       "infra/production/*.mjs",
-      ".tmp/**",
+      "**/.tmp/**",
     ],
   },
   eslint.configs.recommended,
@@ -38,7 +38,7 @@ export default tseslint.config(
     },
   },
   {
-    files: ["apps/api/vitest.config.ts", "apps/web/src/*.js"],
+    files: ["apps/api/vitest.config.ts", "apps/web/src/*.js", "apps/web/integration/*.ts"],
     extends: [tseslint.configs.disableTypeChecked],
   },
 );

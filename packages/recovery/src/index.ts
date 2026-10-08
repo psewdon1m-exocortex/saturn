@@ -3,6 +3,7 @@ export { DatabaseMetadataExporter } from "./metadata-exporter.js";
 export { PostgresCommandToolchain } from "./postgres-toolchain.js";
 export { PostgresRecoveryRepository } from "./repository.js";
 export { SaturnBackupService } from "./service.js";
+export { RecoveryCommitUncertainError } from "./types.js";
 export type {
   BackupManifest,
   BackupMember,

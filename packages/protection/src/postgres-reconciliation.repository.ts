@@ -1,4 +1,6 @@
 import type { Database } from "@saturn/database";
+import { PostgresFileRepository } from "@saturn/file-core";
+import { v7 as uuidv7 } from "uuid";
 import { BACKUPS_RESOURCE_ID, LABORATORY_RESOURCE_ID, ROOT_RESOURCE_ID, type ResourceStatus } from "@saturn/file-core";
 import type {
   InterruptedOperation,
@@ -93,8 +95,8 @@ export class PostgresReconciliationRepository implements ReconciliationRepositor
 
   listActiveFiles(afterId: string | undefined, limit: number): Promise<readonly TrackedFile[]> {
     return this.#database.withSql(async (sql) => {
-      const rows = await sql<{ id: string; storage_path: string; size_bytes: string; sha256: string | null; status: ResourceStatus }[]>`
-        SELECT id, storage_path, size_bytes, sha256, status FROM resources
+      const rows = await sql<{ id: string; storage_path: string; size_bytes: string; sha256: string | null; status: ResourceStatus; current_version_id: string | null }[]>`
+        SELECT id, storage_path, size_bytes, sha256, status, current_version_id FROM resources
         WHERE type = 'file' AND status = 'active' AND (${afterId ?? null}::uuid IS NULL OR id > ${afterId ?? null})
         ORDER BY id LIMIT ${limit}
       `;
@@ -104,6 +106,7 @@ export class PostgresReconciliationRepository implements ReconciliationRepositor
         sizeBytes: Number(row.size_bytes),
         ...(row.sha256 === null ? {} : { sha256: row.sha256 }),
         status: row.status,
+        ...(row.current_version_id === null ? {} : { currentVersionId: row.current_version_id }),
       }));
     });
   }
@@ -129,10 +132,27 @@ export class PostgresReconciliationRepository implements ReconciliationRepositor
     });
   }
 
-  setResourceStatus(id: string, status: ResourceStatus): Promise<void> {
+  setResourceStatus(id: string, status: ResourceStatus, expected?: TrackedFile): Promise<boolean> {
     return this.#database.withSql(async (sql) => {
-      await sql`UPDATE resources SET status = ${status}, updated_at = now() WHERE id = ${id}`;
+      const rows = await sql`UPDATE resources SET status = ${status}, updated_at = now() WHERE id = ${id}
+        AND (${expected === undefined} OR (status = ${expected?.status ?? null} AND storage_path = ${expected?.storagePath ?? null}
+          AND current_version_id IS NOT DISTINCT FROM ${expected?.currentVersionId ?? null}::uuid
+          AND sha256 IS NOT DISTINCT FROM ${expected?.sha256 ?? null} AND size_bytes = ${expected?.sizeBytes ?? null})) RETURNING id`;
+      return rows.length > 0;
     });
+  }
+
+  async withTrackedFile(tracked: TrackedFile, action: () => Promise<void>): Promise<boolean> {
+    const files = new PostgresFileRepository(this.#database);
+    const lockId = uuidv7();
+    if (!await files.acquireLocks(lockId, [`resource:${tracked.id}`], new Date(Date.now() + 30 * 60_000))) return false;
+    try {
+      const current = await files.getResource(tracked.id);
+      if (current?.status !== tracked.status || current.storagePath !== tracked.storagePath || current.currentVersionId !== tracked.currentVersionId
+        || current.sizeBytes !== tracked.sizeBytes || current.sha256 !== tracked.sha256) return false;
+      await action();
+      return true;
+    } finally { await files.releaseLocks(lockId); }
   }
 
   listInterruptedOperations(): Promise<readonly InterruptedOperation[]> {

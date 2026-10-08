@@ -40,7 +40,7 @@ export interface OwnerPreferences {
   readonly sidebarMode: "fixed" | "auto-hide";
   readonly navigationOrder: readonly ("dashboard" | "files" | "inbox" | "shared" | "synchronization" | "trash" | "settings")[];
   readonly dashboardOrder: readonly ("cpu" | "ram" | "disk" | "uptime" | "storage" | "drop" | "reachability" | "tasks")[];
-  readonly settingsOrder: readonly ("appearance" | "security" | "backup" | "gryphon" | "updates" | "logs")[];
+  readonly settingsOrder: readonly ("appearance" | "security" | "storage" | "backup" | "gryphon" | "updates" | "logs")[];
   readonly trashRetentionDays: number;
   readonly uploadBufferGiB: number;
   readonly maximumUploadFileGiB: number;
@@ -103,20 +103,30 @@ export interface ShareChild {
 export interface DeviceInfo {
   readonly id: string;
   readonly name: string;
+  readonly deviceKind: "generic" | "mirror" | "windows_sync" | "pluto";
+  readonly plutoStatus?: { readonly enabled: boolean; readonly intervalSeconds: number; readonly uploadedFiles: number; readonly lastAttemptAt?: string; readonly lastSuccessAt?: string; readonly nextRunAt?: string; readonly error?: string };
+  readonly syncRootId?: string;
+  readonly syncFolderName?: string;
   readonly state: "active" | "revoked" | "expired";
   readonly scopeIds: readonly string[];
   readonly rights: { readonly read: boolean; readonly write: boolean; readonly move: boolean; readonly delete: boolean };
   readonly expiresAt?: string;
   readonly lastUsedAt?: string;
+  readonly lastSeenAt?: string;
+  readonly clientPlatform?: "windows" | "linux";
+  readonly clientVersion?: string;
   readonly createdAt: string;
   readonly updatedAt: string;
 }
 
 export interface BackupServiceInfo {
+  readonly archivePipeline?: boolean;
   readonly id: string;
   readonly slug: string;
   readonly namespaceSlug: string;
   readonly deploymentId: string;
+  readonly pipelineKind: "host_service" | "service" | "volt" | "mastermind";
+  readonly pipelineGroupId?: string;
   readonly mirrorRoot?: "volt" | "mastermind";
   readonly mirrorDeviceId?: string;
   readonly name: string;
@@ -183,6 +193,7 @@ export interface TransferTaskInfo {
   readonly state: "queued" | "uploading" | "scanning" | "compressing" | "extracting" | "verifying" | "committing" | "waiting_retry" | "downloading" | "paused" | "cancelled" | "completed" | "failed";
   readonly transferredBytes: number;
   readonly totalBytes: number;
+  readonly sizeKnown?: boolean;
   readonly percent: number;
   readonly bytesPerSecond?: number;
   readonly queuePosition?: number;
@@ -390,4 +401,27 @@ export interface StorageConnectionInput {
   readonly hostFingerprint: string;
   readonly authMode: "password_file" | "private_key_file";
   readonly credential: string;
+}
+
+export interface StorageAnalysisJob {
+  readonly id: string;
+  readonly profileId: string;
+  readonly profileRevision: number;
+  readonly state: "queued" | "analyzing" | "ready" | "sync_queued" | "syncing" | "synchronized" | "stale" | "failed";
+  readonly scannedEntries: number;
+  readonly scannedBytes: number;
+  readonly currentPath: string | null;
+  readonly counts: { readonly added: number; readonly changed: number; readonly missing: number; readonly blocked: number };
+  readonly failureCode: string | null;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+  readonly completedAt: string | null;
+  readonly canSynchronize: boolean;
+}
+export interface StorageAnalysisReport {
+  readonly job: StorageAnalysisJob | null;
+  readonly items: readonly { readonly kind: "added" | "changed" | "missing" | "blocked"; readonly storagePath: string;
+    readonly reason: string; readonly previousBytes: number | null; readonly actualBytes: number | null }[];
+  readonly offset: number;
+  readonly hasMore: boolean;
 }

@@ -28,6 +28,13 @@ This document specializes [Part 00 — system unification specification](https:/
 | ADR-020 | Keep public ingress and TLS in the server-managed Nginx, outside Saturn | A service-owned proxy would contend for host ports 80/443 and duplicate the server ingress authority | Saturn publishes API/web only on validated IPv4 loopback ports; its web image is a non-proxy static Node process; the signed bundle carries an Nginx example and deployment requires `nginx -t` before traffic switch |
 | ADR-021 | Keep the 16 MiB Nginx body limit globally but disable it in the two WebDAV locations | WebDAV clients such as Neptune send one complete file per PUT, while Saturn already owns the configured file-size policy | Only `/dav` and `/dav/` set `client_max_body_size 0` and disable request buffering; Stage 13 sends, verifies and deletes a PUT larger than 16 MiB through Nginx, while unknown Host/SNI values fail closed |
 
+On 2026-10-05 the operator requested forced storage analysis and explicit catalog
+synchronization in Settings. Unknown visible files now remain at their original
+paths during background reconciliation. The owner reviews a durable report and
+confirms a verified, transactional metadata update that preserves existing IDs;
+external bytes are never moved or deleted. This replaces automatic orphan
+quarantine and is specified in [storage catalog analysis](STORAGE_CATALOG_ANALYSIS.md).
+
 ## Environment topology
 
 ```text

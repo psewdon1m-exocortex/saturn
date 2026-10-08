@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { Readable } from "node:stream";
 import { ROOT_RESOURCE_ID } from "@saturn/file-core";
 import { Body, Controller, Delete, Get, Head, Headers, Inject, Param, Patch, Post, Query, Req, Res, UseFilters, UseGuards } from "@nestjs/common";
@@ -22,7 +22,8 @@ const serviceFields = {
 };
 const storageSlug = z.string().regex(/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/);
 const createServiceSchema = z.object({ slug: z.string().min(1).max(63), namespaceSlug: z.string().min(1).max(63).optional(), deploymentId: z.string().min(1).max(63).optional(), ...serviceFields }).strict();
-const createEnrollmentSchema = z.object({ namespaceSlug: storageSlug, deploymentId: storageSlug.refine((value) => value !== "default"), mirrorRoot: z.enum(["volt", "mastermind"]).optional(), ...serviceFields }).strict();
+const pipelineKind = z.enum(["host_service", "service", "volt", "mastermind"]);
+const createEnrollmentSchema = z.object({ namespaceSlug: storageSlug, deploymentId: storageSlug.refine((value) => value !== "default"), pipelineKind: pipelineKind.optional(), archivePipeline: z.boolean().optional(), pipelineGroupId: z.uuid().optional(), mirrorRoot: z.enum(["volt", "mastermind"]).optional(), ...serviceFields }).strict();
 const updateServiceSchema = z.object({ ...serviceFields, name: serviceFields.name.optional() }).strict();
 const redeemEnrollmentSchema = z.object({ code: z.string().regex(/^[A-Za-z0-9_-]{32}$/) }).strict();
 const runSchema = z.object({ filename: z.string().min(1).max(255), createdAt: z.iso.datetime({ offset: true }), backupType: z.string().min(1).max(32), expectedSize: z.number().int().positive(), sha256: z.string().regex(/^[a-fA-F0-9]{64}$/), sourceVersion: z.string().min(1).max(200), encrypted: z.boolean() }).strict();
@@ -31,7 +32,7 @@ const restoreSchema = z.object({ method: z.literal("isolated_restore"), outcome:
 function nonnegative(value: string | undefined, name: string): number { const parsed = Number(value); if (!Number.isSafeInteger(parsed) || parsed < 0) throw new Error(`${name} is invalid`); return parsed; }
 function bodyStream(request: FastifyRequest): Readable { if (request.body instanceof Readable) return request.body; if (Buffer.isBuffer(request.body)) return Readable.from(request.body); throw new Error("Backup request body is invalid"); }
 function enrollmentSlug(namespaceSlug: string, deploymentId: string): string {
-  const identity = `${namespaceSlug.trim().toLowerCase()}\0${deploymentId.trim().toLowerCase()}`;
+  const identity = `${namespaceSlug.trim().toLowerCase()}\0${deploymentId.trim().toLowerCase()}\0${randomUUID()}`;
   const prefix = `${namespaceSlug}-${deploymentId}`.toLowerCase().slice(0, 49).replace(/-+$/, "");
   return `${prefix}-${createHash("sha256").update(identity).digest("hex").slice(0, 13)}`;
 }
@@ -42,12 +43,12 @@ function enrollmentSlug(namespaceSlug: string, deploymentId: string): string {
 export class BackupOwnerController {
   constructor(@Inject(BACKUP_INGEST_SERVICE) private readonly backups: BackupIngestService) {}
   @Post() @RequireRecentReauthentication() create(@Body() body: unknown) { return this.backups.createService(createServiceSchema.parse(body) as BackupServiceCreateInput); }
-  @Post("enrollments") @RequireRecentReauthentication() createEnrollment(@Body() body: unknown) { const input = createEnrollmentSchema.parse(body); return this.backups.createEnrollment({ ...input, slug: enrollmentSlug(input.namespaceSlug, input.deploymentId) } as BackupServiceCreateInput); }
+  @Post("enrollments") createEnrollment(@Body() body: unknown) { const input = createEnrollmentSchema.parse(body); return this.backups.createEnrollment({ ...input, pipelineKind: input.pipelineKind ?? input.mirrorRoot ?? "service", pipelineGroupId: input.pipelineGroupId ?? randomUUID(), slug: enrollmentSlug(input.namespaceSlug, input.deploymentId) } as BackupServiceCreateInput); }
   @Get() list(@Query("offset") offset?: string, @Query("limit") limit?: string) { return this.backups.listServices(offset === undefined ? 0 : Number(offset), limit === undefined ? 100 : Number(limit)); }
   @Patch(":id") @RequireRecentReauthentication() update(@Param("id") id: string, @Body() body: unknown) { return this.backups.updateService(id, updateServiceSchema.parse(body) as Partial<Omit<BackupServiceCreateInput, "slug">>); }
-  @Post(":id/rotate-token") @RequireRecentReauthentication() rotate(@Param("id") id: string) { return this.backups.rotateToken(id); }
-  @Post(":id/enrollment") @RequireRecentReauthentication() enrollment(@Param("id") id: string) { return this.backups.createEnrollmentForService(id); }
-  @Delete(":id") @RequireRecentReauthentication() revoke(@Param("id") id: string) { return this.backups.revokeService(id); }
+  @Post(":id/rotate-token") rotate(@Param("id") id: string) { return this.backups.rotateToken(id); }
+  @Post(":id/enrollment") enrollment(@Param("id") id: string) { return this.backups.createEnrollmentForService(id); }
+  @Delete(":id") revoke(@Param("id") id: string) { return this.backups.revokeService(id); }
   @Get(":id/runs") runs(@Param("id") id: string, @Query("offset") offset?: string, @Query("limit") limit?: string) { return this.backups.listRunsForOwner(id, offset === undefined ? 0 : Number(offset), limit === undefined ? 100 : Number(limit)); }
   @Get(":id/retention-preview") retentionPreview(@Param("id") id: string) { return this.backups.retentionPreview(id); }
 }
@@ -64,13 +65,14 @@ export class BackupEnrollmentController {
     if (redeemed.mirrorRoot === undefined) return redeemed;
     const device = await this.devices.createDevice({
       name: `Neptune ${redeemed.namespaceSlug}/${redeemed.deploymentId} mirror`,
+      deviceKind: "mirror",
       scopeIds: [redeemed.mirrorRoot === "volt" ? VOLT_RESOURCE_ID : MASTERMIND_RESOURCE_ID],
       rights: { read: true, write: true, move: true, delete: true },
     });
     let reader: Awaited<ReturnType<DeviceService["createDevice"]>> | undefined;
     try {
       if(redeemed.mirrorRoot==="mastermind")reader=await this.devices.createDevice({
-        name:`Neptune ${redeemed.namespaceSlug}/${redeemed.deploymentId} reader`,scopeIds:[ROOT_RESOURCE_ID],
+        name:`Neptune ${redeemed.namespaceSlug}/${redeemed.deploymentId} reader`,deviceKind:"mirror",scopeIds:[ROOT_RESOURCE_ID],
         rights:{read:true,write:false,move:false,delete:false},
       });
       await this.backups.attachMirrorDevice(redeemed.serviceId, device.device.id, new Date(), reader?.device.id);

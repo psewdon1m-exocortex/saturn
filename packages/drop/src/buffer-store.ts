@@ -61,7 +61,8 @@ export class DropBufferStore {
   async create(relativePath: string): Promise<void> {
     await this.initialize();
     const handle = await open(this.#absolute(relativePath), "wx", 0o600);
-    await handle.close();
+    try { await handle.sync(); } finally { await handle.close(); }
+    await this.#syncDirectory();
   }
 
   async append(relativePath: string, offset: number, contentLength: number, source: Readable): Promise<number> {
@@ -106,6 +107,20 @@ export class DropBufferStore {
 
   async delete(relativePath: string): Promise<void> {
     await rm(this.#absolute(relativePath), { force: true });
+    await this.#syncDirectory();
+  }
+
+  async #syncDirectory(): Promise<void> {
+    if (process.platform === "win32") return;
+    const handle = await open(this.#options.root, "r");
+    try { await handle.sync(); } finally { await handle.close(); }
+  }
+
+  async truncate(relativePath: string, size: number): Promise<void> {
+    if (!Number.isSafeInteger(size) || size < 0) throw new Error("Drop buffer size is invalid");
+    const handle = await open(this.#absolute(relativePath), "r+");
+    try { await handle.truncate(size); await handle.sync(); }
+    finally { await handle.close(); }
   }
 
   async #maximumBytes(): Promise<number> {

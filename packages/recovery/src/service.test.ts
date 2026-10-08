@@ -7,6 +7,7 @@ import { pipeline } from "node:stream/promises";
 import { afterEach, describe, expect, it } from "vitest";
 import yazl from "yazl";
 import { SaturnBackupService } from "./service.js";
+import { RecoveryCommitUncertainError } from "./types.js";
 import type { BackupManifest, LogicalDatabaseToolchain, MetadataExporter, RecoveryLimits, RestoreInput } from "./types.js";
 
 const roots: string[] = [];
@@ -97,6 +98,27 @@ function fakeMetadata(): MetadataExporter {
 }
 
 describe("SaturnBackupService restore boundary", () => {
+  it("preserves the active storage profile when final commit cannot be inspected", async () => {
+    const directory = await root();
+    const input = path.join(directory, "target.zip");
+    await archive(input, "target");
+    const database = new FakeDatabase();
+    let rollbacks = 0;
+    const toolchain = Object.assign(database, {
+      beginReplacement: () => Promise.resolve(),
+      commitReplacement: () => Promise.reject(new RecoveryCommitUncertainError(new Error("database unavailable"))),
+      rollbackReplacement: () => { rollbacks++; return Promise.resolve(); },
+    });
+    const service = new SaturnBackupService({ spoolRoot: path.join(directory, "spool"), limits, database: toolchain, metadata: fakeMetadata() });
+    let settings = "original";
+    await expect(service.restore({ archivePath: input, mode: "replace", configuration: {
+      prepare: () => Promise.resolve(),
+      apply: () => { settings = "target"; return Promise.resolve(); },
+      rollback: () => { settings = "original"; return Promise.resolve(); },
+    } })).rejects.toBeInstanceOf(RecoveryCommitUncertainError);
+    expect(settings).toBe("target");
+    expect(rollbacks).toBe(0);
+  });
   it("validates configuration before mutation and rolls back database and settings together", async () => {
     const directory = await root();
     const input = path.join(directory, "target.zip");
@@ -163,13 +185,15 @@ describe("SaturnBackupService restore boundary", () => {
     }, undefined, async (action) => {
       barrierCalls += 1;
       barrierActive = true;
+      // Acknowledged writes immediately before the barrier belong in the rollback snapshot.
+      database.value = "latest-confirmed";
       try { return await action(); }
       finally { barrierActive = false; }
     })).rejects.toThrow(/injected post-restore failure/);
     expect(barrierCalls).toBe(1);
     expect(barrierActive).toBe(false);
     expect(database.restores).toBe(2);
-    expect(database.value).toBe("original");
+    expect(database.value).toBe("latest-confirmed");
     await expect(fs.stat(path.join(directory, "snapshot.zip"))).resolves.toBeDefined();
   });
 });

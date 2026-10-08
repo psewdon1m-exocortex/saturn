@@ -2,6 +2,7 @@ import { argon2, createCipheriv, createDecipheriv, createHash, createHmac, rando
 import { Readable, Transform } from "node:stream";
 import type { AuditSink } from "@saturn/audit";
 import type { Resource, SecurityClassification } from "@saturn/file-core";
+import { ensureStorageDirectory } from "@saturn/storage";
 import { v7 as uuidv7 } from "uuid";
 import { ZipFile } from "yazl";
 import type {
@@ -297,6 +298,7 @@ export class ShareService {
 
   async openChildContent(token: string, resourceId: string, range: { readonly offset: number; readonly length?: number }, input: { readonly sourceIp: string; readonly userAgent: string; readonly sessionToken?: string }, now = new Date()) {
     const access = await this.#authorize(token, input, now, false);
+    if (access.share.mode !== "download_folder") throw new ShareServiceError("invalid_mode");
     const resource = await this.#sharedChild(access.share, resourceId);
     await this.#repository.claimDownload(access.share.id, access.session.id, now).catch(() => { throw new ShareServiceError("denied"); });
     const opened = await this.#files.openDownload(resource.id, range.offset, range.length);
@@ -304,11 +306,32 @@ export class ShareService {
     return { share: access.share, resource: opened.resource, stream: this.#guardStream(access.share.id, opened.stream), session: access.session };
   }
 
-  async openContent(token: string, range: { readonly offset: number; readonly length?: number }, input: { readonly sourceIp: string; readonly userAgent: string; readonly sessionToken?: string }, now = new Date()) {
+  async thumbnailSource(token: string, resourceId: string, input: { readonly sourceIp: string; readonly userAgent: string; readonly sessionToken?: string }, now = new Date()) {
+    const access = await this.#authorize(token, input, now, false);
+    const resource = access.share.resourceType === "file"
+      ? access.share.resourceId === resourceId && ["view", "download"].includes(access.share.mode)
+        ? access.resource
+        : undefined
+      : await this.#sharedChild(access.share, resourceId);
+    if (resource === undefined || resource.type !== "file") throw new ShareServiceError("not_found");
+    await this.#access(access.share.id, input.sourceIp, "thumbnail", "success", 200, now);
+    return {
+      resource,
+      open: async () => this.#guardStream(access.share.id, (await this.#files.openDownload(resource.id)).stream),
+      ...(access.newSession === undefined ? {} : { session: access.newSession }),
+    };
+  }
+
+  async contentMetadata(token: string, input: { readonly sourceIp: string; readonly userAgent: string; readonly sessionToken?: string }, now = new Date()) {
     const access = await this.#authorize(token, input, now, false);
     if (access.locked) throw new ShareServiceError("locked");
     if (access.share.resourceType !== "file" || !["view", "download"].includes(access.share.mode)) throw new ShareServiceError("invalid_mode");
     if (access.share.mode === "view" && !inlineTypes.has(access.resource.mimeType ?? "application/octet-stream")) throw new ShareServiceError("invalid_mode");
+    return access;
+  }
+
+  async openContent(token: string, range: { readonly offset: number; readonly length?: number }, input: { readonly sourceIp: string; readonly userAgent: string; readonly sessionToken?: string }, now = new Date()) {
+    const access = await this.contentMetadata(token, input, now);
     await this.#repository.claimDownload(access.share.id, access.session.id, now).catch(() => { throw new ShareServiceError("denied"); });
     const opened = await this.#files.openDownload(access.resource.id, range.offset, range.length);
     await this.#access(access.share.id, input.sourceIp, "content", "success", range.length === undefined && range.offset === 0 ? 200 : 206, now, range);
@@ -322,11 +345,43 @@ export class ShareService {
     const storagePath = `_system/packages/${access.share.id}/${id}.zip`;
     const expiry = access.share.expiresAt ?? new Date(now.getTime() + this.#options.defaultExpiryMs);
     const reservation = await this.#repository.createPackage({ id, shareId: access.share.id, storagePath, createdAt: now, expiresAt: expiry });
-    if (!reservation.created) return reservation.value;
+    if (!reservation.created) {
+      if (reservation.value.state === "ready") {
+        try { await this.#validatePackage(access.share, access.resource, reservation.value); }
+        catch (error) { if (error instanceof ShareServiceError && error.code === "package_unavailable") return this.preparePackage(token, input, now); throw error; }
+      }
+      return reservation.value;
+    }
+    if (this.#repository.claimPendingPackage !== undefined) return reservation.value;
+    const ready = await this.#buildPackage(access.share, access.resource, reservation.value, now);
+    await this.#access(access.share.id, input.sourceIp, "package_create", "success", 201, now);
+    return ready;
+  }
+
+  async runNextPackage(): Promise<boolean> {
+    const item = await this.#repository.claimPendingPackage?.(new Date());
+    if (item === undefined) return false;
+    const share = await this.#repository.getShareById(item.shareId);
+    try {
+      if (share === undefined || !(await this.#repository.validateActive(share.id, new Date()))) throw new ShareServiceError("denied");
+      const root = await this.#files.getResource(share.resourceId);
+      await this.#buildPackage(share, root, item, new Date());
+    } catch (error) {
+      await this.#repository.setPackageFailed(item.id, error instanceof ShareServiceError ? error.code : "package_failed");
+    }
+    return true;
+  }
+
+  async #buildPackage(share: ShareRecord, resource: Resource, value: SharePackage, now: Date): Promise<SharePackage> {
+    const access = { share, resource };
+    const { id, storagePath } = value;
     try {
       const entries = await this.#packageEntries(access.share, access.resource, now);
+      const sourceFingerprint = this.#entryFingerprint(entries);
       const directory = `_system/packages/${access.share.id}`;
-      if (!(await this.#storage.exists(directory))) await this.#storage.mkdir(directory);
+      await ensureStorageDirectory(this.#storage, "_system/packages");
+      await ensureStorageDirectory(this.#storage, directory);
+      if (await this.#storage.exists(storagePath)) await this.#storage.delete(storagePath);
       const zip = new ZipFile();
       for (const entry of entries) {
         if (entry.resource.type === "folder") zip.addEmptyDirectory(entry.path, { mtime: entry.resource.updatedAt, mode: 0o700 });
@@ -351,8 +406,8 @@ export class ShareService {
       const stat = await this.#storage.stat(storagePath);
       const digest = await streamHash(await this.#storage.openRead(storagePath));
       if (digest.bytes !== stat.size) throw new Error("Share package size verification failed");
-      const ready = await this.#repository.setPackageReady(id, { fileCount: entries.filter((entry) => entry.resource.type === "file").length, sizeBytes: stat.size, sha256: digest.sha256, readyAt: new Date() });
-      await this.#access(access.share.id, input.sourceIp, "package_create", "success", 201, now);
+      if (this.#entryFingerprint(await this.#packageEntries(access.share, access.resource, new Date())) !== sourceFingerprint) throw new ShareServiceError("package_unavailable");
+      const ready = await this.#repository.setPackageReady(id, { fileCount: entries.filter((entry) => entry.resource.type === "file").length, sizeBytes: stat.size, sha256: digest.sha256, readyAt: new Date(), sourceFingerprint });
       return ready;
     } catch (error) {
       await this.#storage.delete(storagePath).catch(() => undefined);
@@ -366,17 +421,20 @@ export class ShareService {
     if (access.locked || access.share.mode !== "download_folder") throw new ShareServiceError(access.locked ? "locked" : "invalid_mode");
     const value = await this.#repository.getCurrentPackage(access.share.id);
     if (value === undefined || value.state !== "ready" || value.expiresAt <= now) throw new ShareServiceError("package_unavailable");
+    await this.#validatePackage(access.share, access.resource, value);
     await this.#repository.claimDownload(access.share.id, access.session.id, now).catch(() => { throw new ShareServiceError("denied"); });
     const stream = await this.#storage.openRead(value.storagePath, { offset: range.offset, ...(range.length === undefined ? {} : { length: range.length }) });
     await this.#access(access.share.id, input.sourceIp, "package_content", "success", range.length === undefined && range.offset === 0 ? 200 : 206, now, range);
-    return { share: access.share, package: value, stream: this.#guardStream(access.share.id, stream), session: access.session };
+    return { share: access.share, package: value, stream: this.#guardStream(access.share.id, stream, () => this.#validatePackage(access.share, access.resource, value)), session: access.session };
   }
 
   async packageMetadata(token: string, input: { readonly sourceIp: string; readonly userAgent: string; readonly sessionToken?: string }, now = new Date()) {
     const access = await this.#authorize(token, input, now, false);
     if (access.locked || access.share.mode !== "download_folder") throw new ShareServiceError(access.locked ? "locked" : "invalid_mode");
     const value = await this.#repository.getCurrentPackage(access.share.id);
-    if (value === undefined || value.state !== "ready" || value.expiresAt <= now) throw new ShareServiceError("package_unavailable");
+    if (value === undefined || !["preparing", "ready"].includes(value.state) || value.expiresAt <= now) throw new ShareServiceError("package_unavailable");
+    if (value.state === "preparing") return { share: access.share, resource: access.resource, package: value, session: access.newSession };
+    await this.#validatePackage(access.share, access.resource, value);
     return { share: access.share, resource: access.resource, package: value, session: access.newSession };
   }
 
@@ -491,7 +549,19 @@ export class ShareService {
     return entries;
   }
 
-  #guardStream(shareId: string, source: Readable): Readable {
+  #entryFingerprint(entries: readonly { readonly resource: Resource; readonly path: string }[]): string {
+    return createHash("sha256").update(JSON.stringify(entries.map(({ resource: r, path: p }) => [r.id, p, r.currentVersionId, r.sha256, r.sizeBytes, r.securityClassification ?? "internal"]).sort((a, b) => String(a[0]).localeCompare(String(b[0]))))).digest("hex");
+  }
+
+  async #validatePackage(share: ShareRecord, root: Resource, value: SharePackage): Promise<void> {
+    const entries = await this.#packageEntries(share, root, new Date());
+    if (value.sourceFingerprint === undefined || value.sourceFingerprint !== this.#entryFingerprint(entries)) {
+      await this.#repository.markPackageExpired(value.id);
+      throw new ShareServiceError("package_unavailable");
+    }
+  }
+
+  #guardStream(shareId: string, source: Readable, validate?: () => Promise<void>): Readable {
     let bytes = 0;
     let checking = false;
     const threshold = this.#options.streamRevalidateBytes;
@@ -501,14 +571,21 @@ export class ShareService {
         if (bytes < threshold || checking) { callback(null, chunk); return; }
         bytes = 0;
         checking = true;
-        void this.#repository.validateActive(shareId, new Date()).then((active) => {
+        void this.#repository.validateActive(shareId, new Date()).then(async (active) => {
+          if (active) await validate?.();
           checking = false;
           if (!active) callback(new Error("Share was revoked during streaming"));
           else callback(null, chunk);
-        }, callback);
+        }).catch(callback);
       },
     });
     source.once("error", (error) => guard.destroy(error));
+    // The public controller may still be recording access before attaching HTTP.
+    guard.on("error", () => undefined);
+    source.once("close", () => {
+      if (!source.readableEnded && !guard.destroyed) guard.destroy(new Error("Share source closed before completion"));
+    });
+    guard.once("close", () => { if (!source.destroyed) source.destroy(); });
     return source.pipe(guard);
   }
 

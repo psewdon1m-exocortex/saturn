@@ -22,8 +22,8 @@ generic padded panel, so the visible composition, hierarchy and control geometry
 were materially different.
 
 The operator explicitly requested adoption of the updated Part 01 login contract.
-Saturn therefore uses its real planet asset in the `100x100px` brand box, keeps
-the wordmark and icon outside the panel, and leaves only reachability, one empty
+Saturn therefore uses its beige watercolor planet on black in the `100x100px`
+brand box, keeps the wordmark and icon outside the panel, and leaves only reachability, one empty
 masked Access Key control and one submit action inside the panel. The change is
 limited to web presentation and focus/error handling: owner-authentication API,
 cookie sessions, rate limiting and storage boundaries are unchanged. Rollback is
@@ -57,12 +57,20 @@ Telegram is presentation-separated from Saturn's internal Drop-code issuer:
 the card displays Gryphon reachability and selects a bot already connected by
 the Gryphon CLI; no bot credential enters Saturn. Telegram-user authorization
 remains a separate Gryphon CLI action. The bot may activate the Gateway-owned
-Drop-code capability but does not own that capability. Drop-buffer health remains an operational status under Security's
-collapsed advanced controls.
+Drop-code capability but does not own that capability.
 
-The same advanced Security disclosure owns the storage profile, helper recovery,
-session revocation and runtime upload limits. These controls are available to an
-already authenticated owner session without a second global unlock form. The
+By the operator's decision of 2026-10-02, Storage connection is a separate
+full-width, reorderable Settings card. Migration `0040_storage_settings_section`
+inserts it after Security while preserving the relative order of every existing
+card; older clients' six-card submissions are normalized the same way.
+Security directly contains Access Key, Kernel connection, Drop upload buffer
+and Trash retention groups, without an Advanced security disclosure. The
+Sessions group and its revoke-all action are removed from Settings. Shared-host
+recovery belongs to the root-only `sudo updater tui`; Saturn exposes no helper
+recovery form or proxy route. Updater publishes independently encrypted files
+through Gateway under `backups/updater`, `backups/neptune`, `backups/gryphon`
+and `backups/wyvern`. Storage configuration and upload limits remain available
+to an already authenticated owner session. The
 Access Key rotation dialog remains the narrow exception: it always asks for the
 exact current key inside the operation, rotates the session and revokes the
 other owner sessions.
@@ -100,7 +108,7 @@ fallbacks only.
   divider and persisted order.
 - Dashboard cards in CPU, RAM, Disk and Uptime logical order. Unknown or stale
   telemetry is named as unavailable and is never rendered as zero.
-- Settings cards in Appearance, Security, Bot connection, Backup, Updates and
+- Settings cards in Appearance, Security, Storage connection, Backup, Gryphon Connection, Updates and
   Logs logical order, with no page-level save action.
 - Access Key only authentication. Credential fields always open empty and no
   credential is persisted in browser storage. The key is required only as an
@@ -141,7 +149,7 @@ responsive browser checks.
 
 Input: Appearance mixed with Telegram, WebDAV, producer and session controls.
 
-Output: six full-width universal cards. Appearance changes only accent;
+Output: seven full-width universal cards. Appearance changes only accent;
 sidebar mode commits immediately. Telegram connection is a separate Saturn
 section. Existing auxiliary access management remains inside Security without
 displacing the five universal sections.
@@ -233,3 +241,45 @@ rather than simulated.
   and preserves the relative order of the five pre-existing cards.
 - `pnpm verify` passes: lint, monorepo typecheck, 114 tests and all production
   builds.
+
+## Security and Storage Settings verification — 2026-10-02
+
+- Storage connection uses the existing universal-card header, full-width body,
+  pointer/keyboard reorder and persisted adaptive ordinal. Security directly
+  exposes Drop upload buffer and Trash retention; Advanced security and Sessions
+  are absent.
+- Component and API regression tests cover legacy/custom order preservation,
+  independent Storage reorder across reload, upload/retention saves, empty
+  storage credentials and invalidation of a connection test after input changes.
+- Migration `0040_storage_settings_section` passed real PostgreSQL apply,
+  repeat-apply and rollback tests using a temporary table, including defaults
+  for new preferences and preservation of other settings.
+- Isolated Chromium QA passed at widths 1919, 1100, 960, 720, 390 and 320 px
+  with no page/control overflow. Security and Storage passed axe checks on
+  desktop and mobile. Invalid pinned fingerprints prevent form submission;
+  valid fingerprints submit without browser console errors.
+- Lint, workspace type checking, web/API builds and targeted web, API, auth and
+  database tests passed. Browser/API fixtures and a separate PostgreSQL instance
+  kept verification independent of concurrent service-backup work.
+
+## Backup Settings reference alignment — 2026-10-04
+
+- The Saturn Backup card follows the basic connected, unlinked and error
+  references in `.docs/src/example - settings - backups/`: Manual snapshot,
+  Automatic backup to Saturn, then Restore snapshot. Desktop groups use a
+  54 px gap, full-width paired status rows and matching half-width snapshot
+  actions; narrow layouts use full-width actions and stack status labels.
+- The hourly field uses the normalized 80 × 40 px control from Part 01 rather
+  than the smaller source raster. The checkbox has a 20 px visual square with
+  a 40 px labeled target; coarse-pointer controls grow to 44 px.
+- Unlink is visibly destructive. A reachable Neptune daemon without a Saturn
+  registration shows healthy agent reachability separately from the unavailable
+  archive pipeline. Unknown/loading reachability uses a neutral indicator.
+- Schedule observations, desired/applied state, retry, initialization and the
+  existing snapshot/restore flows remain visible. No mirror pipeline or helper
+  updater action is introduced into Saturn's basic card.
+- All 43 web tests, lint, workspace type checking and the web production build
+  pass. Isolated Chromium checks cover three states at 1919, 1100, 960, 720,
+  390 and 320 px without overflow; desktop/mobile axe checks pass. Interval
+  Enter/blur commits once, and Unlink confirmation and Restore opening work.
+  Browser fixtures perform no live backup or restore operations.

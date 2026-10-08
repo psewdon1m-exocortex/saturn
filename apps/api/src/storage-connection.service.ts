@@ -382,6 +382,7 @@ export class StorageConnectionService {
       operationTimeoutMs: this.#config.storage.operationTimeoutMs,
       healthTimeoutMs: this.#config.storage.healthTimeoutMs,
       maxConnections: this.#config.storage.maxConnections,
+      ...(this.#config.storage.requireFsync === undefined ? {} : { requireFsync: this.#config.storage.requireFsync }),
     };
     return { adapter: new SftpStorageAdapter(config), config, credentialPath };
   }

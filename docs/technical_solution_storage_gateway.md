@@ -669,7 +669,8 @@ Resource получает статус `TRASHED` и `purge_after`.
 
 Фоновая задача сравнивает БД и Storage Box:
 
-- файлы в Storage Box без Resource → `orphaned`;
+- файлы в Storage Box без Resource → `orphaned`, остаются на исходном месте
+  с `awaiting_owner_catalog_analysis`;
 - Resource без файла → alert и статус `MISSING`;
 - несовпадение размера → alert;
 - несовпадение хеша → incident;
@@ -681,6 +682,13 @@ Resource получает статус `TRASHED` и `purge_after`.
 - размер/mtime проверяются ежедневно;
 - выборочный hash scrub — еженедельно;
 - полный hash scrub — по запросу или перед миграцией.
+
+По запросу оператора от 2026-10-05 в Settings → Storage connection добавлен
+Analyze storage: полный анализ видимого дерева с SHA-256 и сохранённым отчётом.
+Synchronize catalog после явного подтверждения повторно проверяет отчёт и
+транзакционно импортирует новые файлы, обновляет метаданные изменённых и помечает
+отсутствующие как `missing`. Существующие ID и байты сохраняются; затронутые
+публичные ссылки отзываются. См. [контракт анализа](implementation/STORAGE_CATALOG_ANALYSIS.md).
 
 ---
 

@@ -2,7 +2,7 @@ import { createHash, sign, verify } from "node:crypto";
 import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
-import { loadEnvironment, type SaturnConfig } from "@saturn/config";
+import { loadEnvironment, readOwnerAccessKey, type SaturnConfig } from "@saturn/config";
 import { parse } from "dotenv";
 
 const digest = /^sha256:[a-f0-9]{64}$/;
@@ -71,16 +71,16 @@ function hostSecretPath(containerPath: string, secretRoot: string): string {
   return path.join(secretRoot, path.posix.basename(normalized));
 }
 
-function inspectSecret(file: string, privateKey: boolean): string {
+function inspectSecret(file: string, privateKey: boolean, ownerKey = false): string {
   const attributes = fs.lstatSync(file);
   if (!attributes.isFile() || attributes.isSymbolicLink()) throw new Error("Production secret must be a regular non-symlink file");
   if (process.platform !== "win32" && (attributes.mode & 0o077) !== 0) throw new Error("Production secret file is readable by group or others");
-  const value = fs.readFileSync(file, "utf8").replace(/[\r\n]+$/, "");
+  const value = ownerKey ? readOwnerAccessKey(file) : fs.readFileSync(file, "utf8").replace(/[\r\n]+$/, "");
   if (privateKey) {
     if (!value.startsWith("-----BEGIN OPENSSH PRIVATE KEY-----") || !value.includes("-----END OPENSSH PRIVATE KEY-----")) {
       throw new Error("Storage private key file is not an OpenSSH private key");
     }
-  } else if (value.length < 32 || /[\r\n]/.test(value)) throw new Error("Production secret is too short or malformed");
+  } else if (!ownerKey && (value.length < 32 || /[\r\n]/.test(value))) throw new Error("Production secret is too short or malformed");
   return createHash("sha256").update(value).digest("hex");
 }
 
@@ -103,11 +103,12 @@ export function validateProductionDeployment(
     const containerPath = required(input, field);
     const file = hostSecretPath(containerPath, secretRoot);
     mapped[field] = file;
-    const valueHash = inspectSecret(file, field === "STORAGE_PRIVATE_KEY_FILE");
+    const valueHash = inspectSecret(file, field === "STORAGE_PRIVATE_KEY_FILE", field === "OWNER_BOOTSTRAP_TOKEN_FILE");
     if (hashes.has(valueHash)) throw new Error("Production secret files must contain distinct values");
     hashes.add(valueHash);
   }
   const config = loadEnvironment(mapped, baseDirectory);
+  if (!config.storage.requireFsync) throw new Error("Production storage must support and require remote file fsync");
   if (required(input, "SATURN_API_BIND_ADDRESS") !== "127.0.0.1" || required(input, "SATURN_WEB_BIND_ADDRESS") !== "127.0.0.1") {
     throw new Error("Saturn production listeners must bind to IPv4 loopback for server Nginx");
   }

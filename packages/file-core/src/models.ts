@@ -79,6 +79,8 @@ export interface UploadSession {
   readonly status: UploadStatus;
   readonly resourceId?: string;
   readonly overwriteResourceId?: string;
+  readonly expectedVersionId?: string;
+  readonly requireAbsent?: boolean;
   readonly auditActorType?: string;
   readonly auditActorId?: string;
   readonly expiresAt: Date;
@@ -93,6 +95,8 @@ export interface CreateUploadInput {
   readonly expectedSha256?: string;
   readonly idempotencyKey: string;
   readonly overwriteResourceId?: string;
+  readonly expectedVersionId?: string;
+  readonly requireAbsent?: boolean;
   readonly auditActor?: { readonly type: string; readonly id: string };
 }
 

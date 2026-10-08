@@ -2,8 +2,8 @@
 
 This document specializes [Part 03 — backup and recovery](https://github.com/psewdon1m-exocortex/general/blob/main/PART_03_BACKUP_AND_RECOVERY.md); that central contract remains authoritative.
 
-Status: `COMPLETE`
-Verified: 2026-09-03
+Status: `VERIFYING` — local recovery safety checks passed; exact production release qualification remains required
+Verified locally: 2026-10-06
 Surface: Settings → Backup
 
 ## Purpose and boundary
@@ -25,7 +25,8 @@ database access.
 - The owner has an active Access Key session.
 - `pg_dump` and `pg_restore` are available and compatible with PostgreSQL.
 - The packaged deployment manifest and database migrations are readable.
-- Recovery spool and retained pre-restore archive directories are writable.
+- Recovery spool directories are writable.
+- No interrupted `_saturn_restore_guard` exists.
 - No other snapshot or restore operation owns the recovery operation lease.
 
 The capability endpoint reports those conditions through
@@ -60,11 +61,15 @@ artifacts are removed and the UI reports the failure.
 4. `READY`: the overlay shows filename, size, schema, creation time, member
    count and archive SHA-256. The owner must explicitly acknowledge the
    control-plane replacement and enter the final restore action.
-5. `SNAPSHOTTING`: Saturn creates and validates a fresh pre-restore snapshot.
-6. `APPLYING`: ordinary API and worker mutations hold shared PostgreSQL
-   advisory leases; restore obtains the exclusive lease, runs `pg_restore` in
-   one transaction, applies forward migrations and executes database health
-   checks.
+5. `PRESERVING`: restore obtains the exclusive PostgreSQL maintenance lease,
+   atomically renames the original `public` schema and records its name in the
+   durable `_saturn_restore_guard`. The original stays in PostgreSQL until the
+   candidate has passed all checks. No host rescue ZIP is retained.
+6. `APPLYING`: ordinary API and worker operations hold shared maintenance
+   leases. Restore recreates the candidate in an empty `public` schema, applies
+   forward migrations, applies the storage profile and checks the length and
+   SHA-256 of every active current or retained file version against storage.
+   Only then does it atomically remove the original schema and guard.
 7. `COMPLETE`: verification counts and measured RPO/RTO are returned, a
    `recovery_runs` evidence row and redacted audit event are written, and the
    uploaded archive/journal are removed. Owner browser sessions are
@@ -73,11 +78,18 @@ artifacts are removed and the UI reports the failure.
 Failure output:
 
 - invalid/hostile/incomplete archives stop before mutation;
-- a restore error rolls its PostgreSQL transaction back;
-- a later migration or verification error restores the already validated
-  pre-restore snapshot;
-- a verified pre-restore archive is retained for operator recovery;
+- a migration, configuration or file verification failure restores the original
+  configuration and schema; a failed rollback preserves the guard and original
+  database for operator recovery;
+- a process interruption leaves a durable guard and failed operation journal;
+  ordinary traffic cannot resume against the unfinished candidate;
+- a lost final COMMIT response is checked against the guard. If the database
+  cannot be inspected, keep the applied configuration until the operator has
+  resolved the outcome; do not pair a committed catalog with an old profile;
 - outcome and rollback state are recorded without exposing secret material.
+
+Use the [transfer safety and recovery runbook](TRANSFER_SAFETY_AND_RECOVERY.md)
+for `rollback-interrupted`, profile checks and exact-schema Updater rollback.
 
 ## HTTP contract
 
@@ -105,7 +117,7 @@ upload rows creates an unrestorable foreign key graph. Portable JSONL metadata
 may retain the journal for forensic inspection because JSONL is not replayed as
 database state.
 
-## DEV verification evidence
+## Historical DEV verification evidence (2026-09-03)
 
 The final live workflow used the real local API and PostgreSQL container:
 
@@ -128,8 +140,8 @@ foreign keys before the live replacement test was allowed.
 
 - Production images include compatible PostgreSQL client tools and packaged
   migration/deployment inputs.
-- Recovery spool and retained pre-restore archives use dedicated writable
-  volumes owned by the non-root application user.
+- Recovery scratch uses dedicated bounded writable volumes owned by the
+  non-root application user. Successful operations remove their temporary ZIPs.
 - A second encrypted copy target and offline recovery key remain operator-owned
   production requirements.
 - Direct external database writers would bypass the Gateway advisory barrier

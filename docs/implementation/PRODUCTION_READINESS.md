@@ -2,19 +2,24 @@
 
 This document specializes [Part 04 — bootstrap and deployment](https://github.com/psewdon1m-exocortex/general/blob/main/PART_04_BOOTSTRAP_AND_DEPLOYMENT.md); that central contract remains authoritative.
 
-Status: `BLOCKED` on external production inputs  
-Implementation result: `READY_FOR_PRODUCTION_ACTIVATION`
+Status: `NO_GO` for production activation (2026-10-06).
+
+The working candidate requires fresh qualification against its exact release
+identity. Historical Stage 13 evidence does not qualify changed source, images
+or helpers. Current workspace evidence is indexed in
+`.audit/2026-10-06/remediation/remediation-and-re-audit.md`, outside this standalone
+repository. See [transfer safety and recovery](TRANSFER_SAFETY_AND_RECOVERY.md).
 
 ## What is complete locally
 
-The complete Saturn Gateway implementation is built and verified in an isolated
-production-like environment. The accepted Stage 13 report is
-`artifacts/verification/stage-13-production-hardening.json`. Its final digest
-is computed independently after the last source-frozen run.
+The following describes the qualification workflow, not a claim that the current
+production installation has passed it. Evidence must bind exact source revision,
+image digests, helper versions and Part 12 policy. Pluto also requires its own
+Git repository, signing trust and native lifecycle qualification.
 
 The aggregate gate covers:
 
-- frozen install, lint, type checking, 83 tests and release build;
+- frozen install, lint, type checking, current tests and release build;
 - non-root read-only API/worker/web images without source maps or secret files;
 - HTTPS-only, key-only, file-secret and immutable-image production policy;
 - loopback-only API/web publication behind the operator-managed server Nginx,
@@ -58,8 +63,8 @@ DEV credentials are not substitutes for any item in this table.
    the sub-account.
 2. Fill only the domain/origin, owner Access Key, Kernel coordinates and
    production `STORAGE_*` inputs in `.env.production`; run `vaultctl validate`.
-3. After publishing the pinned `updater-v0.5.0`, push the protected
-   `saturn-v0.2.2` tag. The release workflow builds candidate images once,
+3. Qualify the installed baseline and intended Saturn/Updater/Neptune/Pluto
+   release tuple, then use the protected `saturn-vX.Y.Z` tag. The workflow builds candidate images once,
    tests those digests, completes the revision-bound Part 12 pre-signing gate,
    signs and stages the bundle, verifies published bytes anonymously, then
    publishes only on final qualification. Unscoped
@@ -84,8 +89,24 @@ DEV credentials are not substitutes for any item in this table.
    `.env` identifier. Keep the prior digest and verified database snapshot.
 9. Load real data only after all preceding evidence is attached to the release.
 
-Stage 13 moves from `BLOCKED` to `READY` when the external inputs exist, and to
-`COMPLETE` only after this sequence succeeds against the real PROD environment.
+Production activation remains `NO_GO` until this sequence succeeds against the
+real environment, including independent database + file bytes recovery, numeric
+RPO/RTO and native lifecycle qualification. Local rehearsal alone cannot change
+that verdict.
+
+Production SFTP requires remote file fsync by default. Setting
+`STORAGE_REQUIRE_FSYNC=false` is rejected by production validation, and a legacy
+runtime profile cannot downgrade this requirement. Provider rename/directory and
+power-loss guarantees still require external confirmation.
+
+PostgreSQL tool budgets are `PG_COMMAND_TIMEOUT_MS` (default 15 minutes) and dump
+idle `PG_DUMP_IDLE_TIMEOUT_MS` (default 2 minutes). Timeout/cancellation reaps the
+child; interrupted replacement still follows the existing recovery guard.
+
+The owner Access Key is exact nonempty opaque text, without an application
+length/composition/trimming policy. New secret files use
+`SATURN_OWNER_ACCESS_KEY_V1` plus a JSON string. Legacy file framing remains
+compatible. The Linux installer parses dotenv as data and never sources key text.
 
 ## Rollback boundary
 

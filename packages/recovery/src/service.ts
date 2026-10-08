@@ -3,8 +3,10 @@ import { constants, createReadStream } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { StorageAdapter } from "@saturn/storage";
+import { ensureStorageDirectory } from "@saturn/storage";
 import { v7 as uuidv7 } from "uuid";
 import { BackupArchiveValidator, ManifestedZipBackupWriter } from "./archive.js";
+import { RecoveryCommitUncertainError } from "./types.js";
 import type { PostgresRecoveryRepository } from "./repository.js";
 import type {
   BackupMember,
@@ -52,11 +54,11 @@ async function digestStream(stream: NodeJS.ReadableStream): Promise<{ readonly s
   return { sha256: hash.digest("hex"), bytes };
 }
 
-async function ensureStorageDirectory(storage: StorageAdapter, storagePath: string): Promise<void> {
+async function ensureStorageTree(storage: StorageAdapter, storagePath: string): Promise<void> {
   let current = "";
   for (const segment of storagePath.split("/")) {
     current = current ? `${current}/${segment}` : segment;
-    if (!await storage.exists(current)) await storage.mkdir(current);
+    await ensureStorageDirectory(storage, current);
   }
 }
 
@@ -157,7 +159,7 @@ export class SaturnBackupService {
   async publishToStorage(created: CreatedBackup): Promise<{ readonly storagePath: string; readonly sha256: string; readonly bytes: number }> {
     if (this.#storage === undefined) throw new Error("Backup storage publication is not configured");
     const directory = "backups/gateway";
-    await ensureStorageDirectory(this.#storage, directory);
+    await ensureStorageTree(this.#storage, directory);
     const filename = `${created.manifest.createdAt.replaceAll(":", "-")}_${created.manifest.backupId}.zip`;
     const target = `${directory}/${filename}`;
     const part = `${target}.part`;
@@ -201,7 +203,9 @@ export class SaturnBackupService {
         if ((await fs.stat(publicPath)).size > 65_536) throw new Error("Recovered configuration exceeds the size limit");
         await input.configuration.prepare(JSON.parse(await fs.readFile(publicPath, "utf8")) as unknown);
       }
-      if (input.mode === "replace") {
+      return await withWriteBarrier(async () => {
+      let preserved = false;
+      if (input.mode === "replace" && this.#database.beginReplacement === undefined) {
         if (input.snapshotOutputPath === undefined || input.snapshotInput === undefined) {
           throw new Error("Replacement restore requires a pre-restore snapshot destination and inputs");
         }
@@ -211,12 +215,21 @@ export class SaturnBackupService {
           kind: "pre_restore",
         });
       }
-      return await withWriteBarrier(async () => {
         try {
+          if (input.mode === "replace" && this.#database.beginReplacement !== undefined) {
+            await this.#database.beginReplacement();
+            preserved = true;
+          }
           await this.#database.restoreDump(dumpPath, input.mode);
           await migrateTarget();
           const verification = await this.#database.verifyRestoredDatabase();
           await input.configuration?.apply();
+          if (input.configuration?.verifyFiles !== undefined) await input.configuration.verifyFiles();
+          else if (this.#database.verifyStorage !== undefined) {
+            if (this.#storage === undefined && (verification.versions ?? 0) > 0) throw new Error("File storage verification is required before restoring a nonempty catalog");
+            if (this.#storage !== undefined) await this.#database.verifyStorage(this.#storage);
+          }
+          if (preserved) await this.#database.commitReplacement?.();
           const finished = new Date();
           return {
             backupId: validated.manifest.backupId,
@@ -229,6 +242,16 @@ export class SaturnBackupService {
             ...(snapshot === undefined ? {} : { snapshotPath: snapshot.archivePath }),
           };
         } catch (restoreError) {
+          if (restoreError instanceof RecoveryCommitUncertainError) throw restoreError;
+          if (preserved) {
+            try {
+              await input.configuration?.rollback();
+              await this.#database.rollbackReplacement?.();
+            } catch (rollbackError) {
+              throw new AggregateError([restoreError, rollbackError], "Restore rollback failed; original database is preserved in the restore guard");
+            }
+            throw restoreError;
+          }
           if (snapshot === undefined) {
             await input.configuration?.rollback();
             throw restoreError;
@@ -249,7 +272,7 @@ export class SaturnBackupService {
         }
       });
     } finally {
-      await fs.rm(restoreDirectory, { recursive: true, force: true });
+      await fs.rm(restoreDirectory, { recursive: true, force: true }).catch(() => undefined);
     }
   }
 }

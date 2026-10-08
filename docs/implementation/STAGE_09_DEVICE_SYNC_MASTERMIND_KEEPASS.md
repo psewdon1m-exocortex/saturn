@@ -63,10 +63,14 @@ Obsidian tree and a separately protected opaque KeePass database workflow.
 ## API and protocol contract
 
 ```text
-POST   /api/v1/devices                    owner + recent proof
+POST   /api/v1/devices                    owner + CSRF
+POST   /api/v1/devices/enrollments        owner + CSRF
+POST   /api/v1/devices/{id}/enrollment    owner + CSRF
 GET    /api/v1/devices                    owner
 PATCH  /api/v1/devices/{id}               owner + recent proof
-DELETE /api/v1/devices/{id}               owner + recent proof
+DELETE /api/v1/devices/{id}               owner + CSRF
+POST   /api/v1/device-enrollments/redeem  one-time setup code
+POST   /api/v1/device-session/heartbeat   device bearer token
 
 OPTIONS  /dav/*
 PROPFIND /dav/*
@@ -82,6 +86,16 @@ Device authentication uses `Authorization` and never browser cookies. Paths
 are URL-decoded once, normalized as logical names, reject dot segments and are
 resolved from scoped stable root IDs. Destination headers must point to the
 same Gateway origin and an authorized scope.
+
+Synchronization uses the existing authenticated owner session without an
+additional Access Key form or a five-minute management unlock. Windows
+connection creation discloses a 32-character one-time setup code. Neptune
+exchanges it through `/api/v1/device-enrollments/redeem`; only Neptune receives
+the permanent 256-bit device credential. Each client reports presence through
+`/api/v1/device-session/heartbeat`, allowing Saturn to distinguish an active
+agent from a merely registered device. Creation, setup-code reissue and
+revocation remain session- and CSRF-protected; device scope/rights changes and
+owner KeePass access retain their separate recent-proof requirements.
 
 ## Scope and safety defaults
 
@@ -99,7 +113,8 @@ same Gateway origin and an authorized scope.
 ## Verification
 
 1. Migration apply/down/apply and stable/ephemeral recovery policy.
-2. One-time device token disclosure, verifier hashing, expiry and revocation.
+2. One-time setup-code redemption, permanent verifier hashing, heartbeat,
+   expiry and individual revocation.
 3. Scope containment for reads, writes, MOVE/COPY destinations and encoded
    traversal attempts.
 4. PROPFIND depth/XML correctness, GET/HEAD, ETag and exact Range behavior.
@@ -143,3 +158,7 @@ same Gateway origin and an authorized scope.
 - Machine report:
   `artifacts/verification/stage-09-device-sync-keepass.json` (SHA-256
   `627ca854a3d6610000e405a99a00b562bf32c6fcc7c8b377df6532464e3ae4bd`).
+
+## Enrollment update — 2026-10-05
+
+Windows enrollment now creates an exclusive `sync/<Connection name>` folder and binds the device to its stable ID. Enrollment/heartbeat return the folder name. The root itself and every neighboring folder are protected from client MOVE/COPY/DELETE; nested operations remain available. Legacy unbound Windows credentials fail closed. A replacement code creates a new folder only when its name is unused; it never adopts existing data. See the accepted [central decision](../../../.docs/decisions/2026-10-05-synchronization-enrollment.md).

@@ -82,10 +82,18 @@ touched.
 
 ## Rollback
 
-Open Settings → Security → Advanced security, verify the owner again and enter
+Open Settings → Storage connection → Configure storage and enter
 the previous target's connection fields and credential. Test it, accept the
 independent-file-set warning and switch. This performs another catalog rebuild;
 it is not a byte restore or migration.
+
+## Analyze the active storage
+
+For unseen changes on the current target, use Storage catalog → Analyze storage
+in the same Settings card. Review the saved report and explicitly synchronize it
+to import unknown files or update/missing-mark existing resources. This preserves
+existing resource IDs and file bytes, retains device identities, and revokes
+affected shared links. See [storage catalog analysis](STORAGE_CATALOG_ANALYSIS.md).
 
 ## Backup classification
 

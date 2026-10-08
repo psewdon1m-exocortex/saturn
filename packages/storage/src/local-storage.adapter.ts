@@ -93,6 +93,7 @@ export class LocalStorageAdapter implements StorageAdapter {
         position += buffer.length;
       }
       await handle.sync();
+      await this.#syncDirectory(path.dirname(target));
       return bytes;
     } finally {
       await handle.close();
@@ -101,17 +102,23 @@ export class LocalStorageAdapter implements StorageAdapter {
 
   async mkdir(storagePath: string): Promise<void> {
     await fs.mkdir(resolveLocalPath(this.#root, normalizeStoragePath(storagePath, false)), { recursive: false, mode: 0o700 });
+    await this.#syncDirectory(path.dirname(resolveLocalPath(this.#root, storagePath)));
   }
 
   async truncate(storagePath: string, size: number): Promise<void> {
     if (!Number.isSafeInteger(size) || size < 0) throw new Error("Truncate size is invalid");
-    await fs.truncate(resolveLocalPath(this.#root, storagePath), size);
+    const handle = await fs.open(resolveLocalPath(this.#root, storagePath), "r+");
+    try { await handle.truncate(size); await handle.sync(); }
+    finally { await handle.close(); }
   }
 
   async rename(source: string, destination: string): Promise<void> {
     const target = resolveLocalPath(this.#root, destination);
     await fs.mkdir(path.dirname(target), { recursive: true });
-    await fs.rename(resolveLocalPath(this.#root, source), target);
+    const origin = resolveLocalPath(this.#root, source);
+    await fs.rename(origin, target);
+    await this.#syncDirectory(path.dirname(target));
+    if (path.dirname(origin) !== path.dirname(target)) await this.#syncDirectory(path.dirname(origin));
   }
 
   async copy(source: string, destination: string): Promise<void> {
@@ -123,6 +130,7 @@ export class LocalStorageAdapter implements StorageAdapter {
     const info = await this.#info(storagePath);
     if (info.type === "directory") await fs.rmdir(resolveLocalPath(this.#root, storagePath));
     else await fs.unlink(resolveLocalPath(this.#root, storagePath));
+    await this.#syncDirectory(path.dirname(resolveLocalPath(this.#root, storagePath)));
   }
 
   async exists(storagePath: string): Promise<boolean> {
@@ -142,5 +150,11 @@ export class LocalStorageAdapter implements StorageAdapter {
 
   close(): Promise<void> {
     return Promise.resolve();
+  }
+
+  async #syncDirectory(directory: string): Promise<void> {
+    if (process.platform === "win32") return;
+    const handle = await fs.open(directory, "r");
+    try { await handle.sync(); } finally { await handle.close(); }
   }
 }

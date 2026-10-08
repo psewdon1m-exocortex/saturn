@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { Readable } from "node:stream";
 import { describe, expect, it } from "vitest";
 import { DropService } from "./drop.service.js";
+import { GryphonCommandService, type GryphonCommandEnvelope } from "./gryphon.service.js";
 import type { DropRepository, DropSession, DropUpload, TelegramIdentity } from "./types.js";
 
 class MemoryRepository implements DropRepository {
@@ -117,7 +118,59 @@ async function boundDrop(service: DropService, identity = { userId: "12345", cha
   return { identity, challenge: await service.issueDropCodeForGryphon(identity) };
 }
 
+function revokeCommand(identity: TelegramIdentity): GryphonCommandEnvelope {
+  return {
+    schema: "exocortex.telegram.command.v1", eventId: "test-revoke", correlationId: "test-revoke",
+    connectionId: "test-connection", serviceId: "saturn",
+    actor: { telegramUserId: identity.userId, chatId: identity.chatId, chatType: "private" },
+    command: "revoke", arguments: {},
+  };
+}
+
 describe("DropService", () => {
+  it("supersedes the previous code and reports only access newly revoked by the command", async () => {
+    const { service } = fixture();
+    const identity = { userId: "12345", chatId: "12345" };
+    const first = await service.issueDropCodeForGryphon(identity);
+    const second = await service.issueDropCodeForGryphon(identity);
+    await expect(service.redeem(first.code, "192.0.2.1", "browser")).rejects.toMatchObject({ code: "invalid_code" });
+
+    const commands = new GryphonCommandService(service);
+    const revoked = await commands.handle(revokeCommand(identity));
+    expect(revoked.actions[0]?.text).toBe("Saturn Drop access revoked: 0 session(s), 1 code(s).");
+    for (const challenge of [first, second]) {
+      await expect(service.redeem(challenge.code, "192.0.2.1", "browser")).rejects.toMatchObject({ code: "invalid_code" });
+    }
+    const repeated = await commands.handle(revokeCommand(identity));
+    expect(repeated.actions[0]?.text).toBe("Saturn Drop access revoked: 0 session(s), 0 code(s).");
+  });
+
+  it("revokes all same-identity sessions from previous and current codes while preserving another identity", async () => {
+    const { service } = fixture();
+    const identity = { userId: "12345", chatId: "12345" };
+    const first = await service.issueDropCodeForGryphon(identity);
+    const oldSessions = await Promise.all(["first-browser", "second-browser"].map(userAgent =>
+      service.redeem(first.code, "192.0.2.1", userAgent).then(created => ({ created, userAgent }))));
+
+    const other = await service.issueDropCodeForGryphon({ userId: "54321", chatId: "54321" });
+    const otherSession = await service.redeem(other.code, "192.0.2.2", "other-browser");
+    const current = await service.issueDropCodeForGryphon(identity);
+    const currentSession = await service.redeem(current.code, "192.0.2.1", "current-browser");
+    const sessions = [...oldSessions, { created: currentSession, userAgent: "current-browser" }];
+    for (const { created, userAgent } of sessions) {
+      await expect(service.validateSession({ token: created.token, userAgent, isMutation: false })).resolves.toMatchObject({ id: created.session.id });
+    }
+
+    const revoked = await new GryphonCommandService(service).handle(revokeCommand(identity));
+    expect(revoked.actions[0]?.text).toBe("Saturn Drop access revoked: 3 session(s), 1 code(s).");
+    for (const { created, userAgent } of sessions) {
+      await expect(service.validateSession({ token: created.token, userAgent, isMutation: false })).rejects.toMatchObject({ code: "invalid_session" });
+    }
+    await expect(service.validateSession({ token: otherSession.token, userAgent: "other-browser", isMutation: false }))
+      .resolves.toMatchObject({ id: otherSession.session.id });
+    await expect(service.redeem(current.code, "192.0.2.1", "current-browser")).rejects.toMatchObject({ code: "invalid_code" });
+  });
+
   it("lets a Gryphon-verified identity open a shared multi-client channel", async () => {
     const { service } = fixture(); const identity = { userId: "12345", chatId: "12345" };
     const drop = await service.issueDropCodeForGryphon(identity);

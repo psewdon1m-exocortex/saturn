@@ -1,10 +1,10 @@
-import { Readable } from "node:stream";
+import { PassThrough, Readable } from "node:stream";
 import { describe, expect, it } from "vitest";
 import type { Resource } from "@saturn/file-core";
 import { ShareService } from "./share.service.js";
 import type { SharePackage, ShareRecord, ShareRepository, ShareSession } from "./types.js";
 
-function fixture(overrides: { readonly failureLimit?: number } = {}) {
+function fixture(overrides: { readonly failureLimit?: number; readonly downloadSource?: () => Readable } = {}) {
   const shares = new Map<string, ShareRecord>();
   const sessions = new Map<string, ShareSession>();
   const attempts: Array<{ id: string; source: string; outcome: string; at: Date }> = [];
@@ -21,7 +21,7 @@ function fixture(overrides: { readonly failureLimit?: number } = {}) {
     updateShare: (id: string, input: Record<string, unknown>, now: Date) => { const current = shares.get(id); if (current === undefined) return Promise.reject(new Error("missing")); const value = { ...current, ...input, updatedAt: now } as ShareRecord; shares.set(id, value); return Promise.resolve(value); },
     revokeShare: (id: string, now: Date) => { const current = shares.get(id); if (current === undefined) return Promise.reject(new Error("missing")); const value = { ...current, state: "revoked" as const, revokedAt: now, updatedAt: now }; shares.set(id, value); return Promise.resolve(value); },
     sourceAllowed: () => Promise.resolve(true),
-    isDescendant: (root: string, candidate: string) => Promise.resolve(candidate === root || candidate === "child-folder"),
+    isDescendant: (root: string, candidate: string) => Promise.resolve(candidate === root || candidate === "child-folder" || candidate === "file"),
     createSession: (input: Omit<ShareSession, "state" | "downloadClaimed" | "lastSeenAt">) => { const value: ShareSession = { ...input, state: "active", downloadClaimed: false, lastSeenAt: input.createdAt }; sessions.set(value.tokenHash, value); return Promise.resolve(value); },
     touchSession: (input: { shareId: string; tokenHash: string; sourceIpHash: string; userAgentHash: string; now: Date }) => { const value = sessions.get(input.tokenHash); return Promise.resolve(value?.shareId === input.shareId && value.sourceIpHash === input.sourceIpHash && value.userAgentHash === input.userAgentHash && value.expiresAt > input.now && value.state === "active" ? value : undefined); },
     claimDownload: (shareId: string, sessionId: string) => { const current = shares.get(shareId); const currentSession = [...sessions.values()].find((value) => value.id === sessionId); if (current === undefined || currentSession === undefined || current.state !== "active") return Promise.reject(new Error("inactive")); const nextSession = { ...currentSession, downloadClaimed: true }; const nextShare = currentSession.downloadClaimed ? current : { ...current, downloadCount: current.downloadCount + 1 }; shares.set(shareId, nextShare); sessions.set(nextSession.tokenHash, nextSession); return Promise.resolve({ share: nextShare, session: nextSession }); },
@@ -47,7 +47,7 @@ function fixture(overrides: { readonly failureLimit?: number } = {}) {
   const files = {
     getResource: (id: string) => { const value = resources.get(id); return value === undefined ? Promise.reject(new Error("missing")) : Promise.resolve(value); },
     listChildren: (id: string) => Promise.resolve([...resources.values()].filter((value) => value.parentId === id)),
-    openDownload: (id: string, offset = 0, length?: number) => { const resource = resources.get(id); const value = bytes.get(id); if (resource === undefined || value === undefined) return Promise.reject(new Error("missing")); return Promise.resolve({ resource, stream: Readable.from(value.subarray(offset, length === undefined ? undefined : offset + length)) }); },
+    openDownload: (id: string, offset = 0, length?: number) => { const resource = resources.get(id); const value = bytes.get(id); if (resource === undefined || value === undefined) return Promise.reject(new Error("missing")); return Promise.resolve({ resource, stream: overrides.downloadSource?.() ?? Readable.from(value.subarray(offset, length === undefined ? undefined : offset + length)) }); },
     setSecurityClassification: (id: string, classification: "public" | "internal" | "confidential" | "secret") => { const value = resources.get(id); if (value === undefined) return Promise.reject(new Error("missing")); const updated = { ...value, securityClassification: classification }; resources.set(id, updated); return Promise.resolve(updated); },
   };
   const service = new ShareService({
@@ -61,6 +61,36 @@ function fixture(overrides: { readonly failureLimit?: number } = {}) {
 }
 
 describe("ShareService", () => {
+  it("closes the underlying file when a public download is cancelled", async () => {
+    const source = new PassThrough(), { service } = fixture({ downloadSource: () => source });
+    const share = await service.createShare({ resourceId: "file", mode: "download" });
+    const opened = await service.openContent(share.token, { offset: 0 }, { sourceIp: "192.0.2.1", userAgent: "browser" });
+    opened.stream.destroy();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(source.destroyed).toBe(true);
+  });
+  it("fails a public download when its file closes before EOF", async () => {
+    const source = new PassThrough(), { service } = fixture({ downloadSource: () => source });
+    const share = await service.createShare({ resourceId: "file", mode: "download" });
+    const opened = await service.openContent(share.token, { offset: 0 }, { sourceIp: "192.0.2.1", userAgent: "browser" });
+    const result = expect(opened.stream.toArray()).rejects.toThrow("closed before completion");
+    source.destroy(); await result;
+  });
+  it("inspects protected content without claiming the limited download", async () => {
+    const { service, shares } = fixture();
+    const created = await service.createShare({ resourceId: "file", mode: "download", maxDownloads: 1 });
+    const input = { sourceIp: "192.0.2.1", userAgent: "link-checker" };
+    const metadata = await service.contentMetadata(created.token, input);
+    if (metadata.newSession === undefined) throw new Error("Expected a new read-only share session");
+    expect(metadata.resource.sizeBytes).toBe(6);
+    expect(shares.get(created.share.id)?.downloadCount).toBe(0);
+    const opened = await service.openContent(created.token, { offset: 0 }, { ...input, sessionToken: metadata.newSession.token });
+    opened.stream.destroy();
+    expect(shares.get(created.share.id)?.downloadCount).toBe(1);
+    const locked = await service.createShare({ resourceId: "file", mode: "download", password: "protected" });
+    await expect(service.contentMetadata(locked.token, input)).rejects.toMatchObject({ code: "locked" });
+  });
+
   it("protects a 256-bit capability at rest and can copy it again later", async () => {
     const { service, shares } = fixture();
     const created = await service.createShare({ resourceId: "file", mode: "download" });
@@ -115,5 +145,17 @@ describe("ShareService", () => {
     expect(children.map((value) => value.name)).toEqual(["file.txt", "Child"]);
     expect(children.find((value) => value.id === "file")?.sha256).toBe("0".repeat(64));
     await expect(service.listChildren(created.token, "file", input)).rejects.toMatchObject({ code: "not_found" });
+  });
+
+  it("serves a protected derivative source in browse mode without exposing original content or claiming a download", async () => {
+    const { service, shares } = fixture();
+    const created = await service.createShare({ resourceId: "root", mode: "browse" });
+    const opened = await service.metadata(created.token, { sourceIp: "192.0.2.1", userAgent: "browser" });
+    const input = { sourceIp: "192.0.2.1", userAgent: "browser", ...(opened.session === undefined ? {} : { sessionToken: opened.session.token }) };
+    const thumbnail = await service.thumbnailSource(created.token, "file", input);
+    expect(Buffer.concat(await (await thumbnail.open()).toArray()).toString()).toBe("abcdef");
+    expect(shares.get(created.share.id)?.downloadCount).toBe(0);
+    await expect(service.openChildContent(created.token, "file", { offset: 0 }, input)).rejects.toMatchObject({ code: "invalid_mode" });
+    expect(shares.get(created.share.id)?.downloadCount).toBe(0);
   });
 });

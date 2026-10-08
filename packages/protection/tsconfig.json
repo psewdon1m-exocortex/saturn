@@ -5,6 +5,7 @@
     "outDir": "dist"
   },
   "include": [
+    "vitest.config.ts",
     "src/**/*.ts",
     "../audit/src/**/*.ts",
     "../database/src/**/*.ts",

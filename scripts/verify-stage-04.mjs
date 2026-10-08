@@ -229,8 +229,8 @@ try {
     if (!issueTypes.has(expected)) throw new Error(`Reconciliation issue missing: ${expected}`);
   }
   const orphan = issues.find((item) => item.issueType === "orphaned" && item.storagePath.endsWith(`orphan-${suffix}.bin`));
-  if (orphan === undefined || !await fs.stat(path.join(localStorageRoot, ...String(orphan.actual.orphanPath).split("/"))).then(() => true, () => false)) {
-    throw new Error("Orphan was not preserved in its run namespace");
+  if (orphan === undefined || orphan.resolution !== "awaiting_owner_catalog_analysis" || !await fs.stat(orphanPath).then(() => true, () => false)) {
+    throw new Error("Unknown file was not preserved at its original path for owner analysis");
   }
   pass("reconciliation mismatch fixtures", { issueTypes: [...issueTypes].sort(), orphanPreserved: true });
 

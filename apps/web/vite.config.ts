@@ -1,8 +1,10 @@
 import { defineConfig } from "vitest/config";
 import react from "@vitejs/plugin-react";
+import { pipelineMocks } from "./dev/pipeline-mocks.js";
+import { shareMocks } from "./dev/share-mocks.js";
 
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), shareMocks(), pipelineMocks()],
   server: {
     port: 5_173,
     strictPort: true,
@@ -29,6 +31,7 @@ export default defineConfig({
   },
   test: {
     environment: "jsdom",
+    include: ["src/**/*.test.{ts,tsx}"],
     setupFiles: [],
   },
 });

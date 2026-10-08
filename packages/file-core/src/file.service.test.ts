@@ -143,8 +143,9 @@ class MemoryRepository implements FileRepository {
     const selected = await this.getResourceAtPath(storagePath);
     if (selected === undefined) return undefined;
     if (selected.sha256 !== expectedSha256) throw new Error("checksum mismatch");
-    this.resources.delete(selected.id);
-    for (const [id, version] of this.versions) if (version.resourceId === selected.id) this.versions.delete(id);
+    if (selected.status === "purged") return undefined;
+    this.resources.set(selected.id, { ...selected, status: "purged" });
+    for (const [id, version] of this.versions) if (version.resourceId === selected.id) this.versions.set(id, { ...version, state: "expired" });
     if (selected.parentId !== undefined) this.#adjustAncestorSizes(selected.parentId, -selected.sizeBytes);
     return selected;
   }
@@ -156,6 +157,11 @@ class MemoryRepository implements FileRepository {
     return updated;
   }
   async getUpload(id: string) { return this.uploads.get(id); }
+  async retargetUpload(id: string, targetPath: string) {
+    const current = this.uploads.get(id);
+    if (current === undefined) throw new Error("Upload missing");
+    const value = { ...current, targetPath }; this.uploads.set(id, value); return value;
+  }
   async getUploadByIdempotencyKey(key: string) {
     return [...this.uploads.values()].find((item) => item.idempotencyKey === key);
   }
@@ -178,11 +184,16 @@ class MemoryRepository implements FileRepository {
     this.uploads.set(id, upload);
     return upload;
   }
-  async setUploadState(id: string, state: UploadStatus, fields: { readonly actualSha256?: string } = {}) {
+  readonly cleanupPending = new Set<string>();
+  async listAbandonedUploadsForCleanup(limit: number) {
+    return [...this.uploads.values()].filter(upload => upload.status === 'abandoned' && this.cleanupPending.has(upload.id)).slice(0, limit);
+  }
+  async setUploadState(id: string, state: UploadStatus, fields: { readonly actualSha256?: string; readonly errorCode?: string } = {}) {
     const current = this.uploads.get(id);
     if (current === undefined) throw new Error("Upload missing");
     const upload: UploadSession = { ...current, status: state, ...fields, updatedAt: new Date() };
     this.uploads.set(id, upload);
+    if (fields.errorCode === 'cleanup_pending') this.cleanupPending.add(id); else this.cleanupPending.delete(id);
     return upload;
   }
   async commitUpload(record: CommitUploadRecord): Promise<CompleteUploadRecordResult> {
@@ -268,7 +279,11 @@ class MemoryRepository implements FileRepository {
     return item?.resourceId === resourceId ? item : undefined;
   }
   async listVersions(resourceId: string, offset: number, limit: number) {
-    return [...this.versions.values()].filter((item) => item.resourceId === resourceId).slice(offset, offset + limit);
+    return [...this.versions.values()].filter((item) => item.resourceId === resourceId).reverse().slice(offset, offset + limit);
+  }
+  async expireVersion(resourceId: string, versionId: string) {
+    const version = this.versions.get(versionId);
+    if (version?.resourceId === resourceId && this.resources.get(resourceId)?.currentVersionId !== versionId) this.versions.set(versionId, { ...version, state: "expired" });
   }
   async getOperation(idempotencyKey: string) {
     return [...this.operations.values()].find((item) => item.idempotencyKey === idempotencyKey);
@@ -292,7 +307,7 @@ class MemoryRepository implements FileRepository {
   async acquireLocks(operationId: string, lockKeys: readonly string[], expiresAt: Date) {
     const now = Date.now();
     for (const [key, lock] of this.locks) if (lock.expiresAt.getTime() <= now) this.locks.delete(key);
-    if (lockKeys.some((key) => this.locks.has(key))) return false;
+    if (lockKeys.some((key) => this.locks.has(key) && this.locks.get(key)?.operationId !== operationId)) return false;
     for (const key of lockKeys) this.locks.set(key, { operationId, expiresAt });
     return true;
   }
@@ -507,6 +522,195 @@ async function collect(stream: NodeJS.ReadableStream): Promise<Buffer> {
 }
 
 describe("FileService upload state machine", () => {
+  async function safetyFixture(action: (service: FileService, repository: MemoryRepository, storage: LocalStorageAdapter) => Promise<void>) {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "saturn-transfer-safety-"));
+    const storage = new LocalStorageAdapter(root), repository = new MemoryRepository(), service = new FileService(repository, storage);
+    try { await storage.initialize(); await service.initializeStorage(); await action(service, repository, storage); }
+    finally { await storage.close(); await fs.rm(root, { recursive: true, force: true }); }
+  }
+  async function pending(service: FileService, filename: string, value: string, fields: Partial<Parameters<FileService['createUpload']>[0]> = {}) {
+    const upload = await service.createUpload({ parentId: SYNC_RESOURCE_ID, filename, expectedSize: Buffer.byteLength(value), expectedSha256: createHash('sha256').update(value).digest('hex'), idempotencyKey: `safety-${filename}-${value}`, ...fields });
+    await service.appendUpload(upload.id, 0, Buffer.byteLength(value), Readable.from([value])); return upload;
+  }
+
+  it("completes another file in the same folder while the first upload is still being hashed", async () => safetyFixture(async (service, _repository, storage) => {
+    const slow = await pending(service, 'slow.txt', 'valuable-first');
+    const fast = await pending(service, 'fast.txt', 'valuable-second');
+    let release: () => void = () => undefined, entered: () => void = () => undefined;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const open = storage.openRead.bind(storage);
+    vi.spyOn(storage, 'openRead').mockImplementation(async (file, options) => {
+      if (file === slow.tempPath && options === undefined) { entered(); await held; }
+      return open(file, options);
+    });
+    const first = service.completeUpload(slow.id);
+    let second: ReturnType<FileService['completeUpload']> | undefined;
+    try {
+      await started;
+      second = service.completeUpload(fast.id);
+      await Promise.race([second, new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error('Unrelated upload waited for the first file hash')), 500))]);
+      expect((await service.getUpload(fast.id)).status).toBe('active');
+    } finally { release(); await Promise.allSettled([first, ...(second === undefined ? [] : [second])]); }
+    expect((await service.getUpload(slow.id)).status).toBe('active');
+  }));
+
+  it("rechecks the parent after verification when its folder moves during hashing", async () => safetyFixture(async (service, _repository, storage) => {
+    const folder = await service.createFolder(SYNC_RESOURCE_ID, 'before-hash');
+    const upload = await pending(service, 'moved-during-hash.txt', 'valuable', { parentId: folder.id });
+    let release: () => void = () => undefined, entered: () => void = () => undefined;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const open = storage.openRead.bind(storage);
+    vi.spyOn(storage, 'openRead').mockImplementation(async (file, options) => {
+      if (file === upload.tempPath && options === undefined) { entered(); await held; }
+      return open(file, options);
+    });
+    const completed = service.completeUpload(upload.id);
+    try {
+      await started;
+      await service.moveResource(folder.id, { parentId: SYNC_RESOURCE_ID, name: 'after-hash', idempotencyKey: 'safety-move-during-hash' });
+    } finally { release(); await completed; }
+    const result = await completed;
+    expect(result.resource.storagePath).toBe('sync/after-hash/moved-during-hash.txt');
+    expect((await collect(await storage.openRead(result.resource.storagePath))).toString()).toBe('valuable');
+    expect(await storage.exists('sync/before-hash/moved-during-hash.txt')).toBe(false);
+  }));
+
+  it("records cancellation during a storage outage and removes only temporary bytes after recovery", async () => safetyFixture(async (service, repository, storage) => {
+    const original = await service.completeUpload((await pending(service, 'cancel-overwrite.txt', 'original')).id);
+    const upload = await pending(service, 'cancel-overwrite.txt', 'replacement', { overwriteResourceId: original.resource.id });
+    vi.spyOn(storage, 'delete').mockRejectedValueOnce(new Error('Storage disconnected'));
+    expect((await service.abandonUpload(upload.id)).status).toBe('abandoned');
+    expect(repository.cleanupPending.has(upload.id)).toBe(true);
+    await expect(service.appendUpload(upload.id, 0, 1, Readable.from('x'))).rejects.toThrow('current state');
+    expect(await storage.exists(upload.tempPath)).toBe(true);
+    await service.cleanupAbandonedUploads();
+    expect(repository.cleanupPending.size).toBe(0);
+    expect(await storage.exists(upload.tempPath)).toBe(false);
+    expect((await collect(await storage.openRead(original.resource.storagePath))).toString()).toBe('original');
+  }));
+
+  it("does not revive an abandoned or committed upload when a late PATCH arrives", async () => safetyFixture(async (service, _repository, storage) => {
+    const cancelled = await service.createUpload({ parentId: SYNC_RESOURCE_ID, filename: "cancelled.bin", expectedSize: 6, idempotencyKey: "late-cancelled-patch" });
+    await service.abandonUpload(cancelled.id);
+    await expect(service.appendUpload(cancelled.id, 0, 6, Readable.from(["saturn"]))).rejects.toThrow("current state");
+    expect((await service.getUpload(cancelled.id)).status).toBe("abandoned");
+    expect(await storage.exists(cancelled.tempPath)).toBe(false);
+    const committed = await pending(service, "committed.bin", "saturn");
+    await service.completeUpload(committed.id);
+    await expect(service.appendUpload(committed.id, 0, 6, Readable.from(["saturn"]))).rejects.toThrow("current state");
+    expect((await service.getUpload(committed.id)).status).toBe("active");
+    const resourceId = (await service.getUpload(committed.id)).resourceId;
+    if (resourceId === undefined) throw new Error("Committed resource missing");
+    expect((await service.getResource(resourceId)).sha256).toBe(committed.expectedSha256);
+  }));
+
+  it("preserves temporary bytes and rejects commit when the parent is trashed during hashing", async () => safetyFixture(async (service, _repository, storage) => {
+    const folder = await service.createFolder(SYNC_RESOURCE_ID, 'trashed-during-hash');
+    const upload = await pending(service, 'valuable.txt', 'valuable', { parentId: folder.id });
+    let release: () => void = () => undefined, entered: () => void = () => undefined;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const open = storage.openRead.bind(storage);
+    vi.spyOn(storage, 'openRead').mockImplementation(async (file, options) => {
+      if (file === upload.tempPath && options === undefined) { entered(); await held; }
+      return open(file, options);
+    });
+    const completed = service.completeUpload(upload.id);
+    const rejected = expect(completed).rejects.toThrow('Upload parent is not active');
+    try {
+      await started;
+      await service.trashResource(folder.id, { idempotencyKey: 'safety-trash-during-hash' });
+    } finally { release(); await rejected; }
+    expect((await service.getUpload(upload.id)).status).toBe('failed_retryable');
+    expect((await collect(await storage.openRead(upload.tempPath))).toString()).toBe('valuable');
+    expect(await storage.exists(upload.targetPath)).toBe(false);
+  }));
+
+  it("recovers a process interruption after the final rename", async () => safetyFixture(async (service, repository, storage) => {
+    const upload = await pending(service, 'interrupted.txt', 'valuable');
+    await repository.setUploadState(upload.id, 'committing', upload.expectedSha256 === undefined ? {} : { actualSha256: upload.expectedSha256 });
+    await storage.rename(upload.tempPath, upload.targetPath);
+    const completed = await service.completeUpload(upload.id);
+    expect(completed.upload.status).toBe('active');
+    expect(Buffer.concat(await (await storage.openRead(completed.resource.storagePath)).toArray()).toString()).toBe('valuable');
+  }));
+
+  it("recovers an interrupted overwrite while preserving its original version", async () => safetyFixture(async (service, repository, storage) => {
+    const original = (await service.completeUpload((await pending(service, 'overwrite.txt', 'original')).id)).resource;
+    if (original.currentVersionId === undefined) throw new Error('Version missing');
+    const upload = await pending(service, 'overwrite.txt', 'replacement', { overwriteResourceId: original.id, expectedVersionId: original.currentVersionId });
+    const archive = `_system/versions/${original.id}/${original.currentVersionId}/overwrite.txt`;
+    await repository.setUploadState(upload.id, 'committing', upload.expectedSha256 === undefined ? {} : { actualSha256: upload.expectedSha256 });
+    await storage.rename(upload.targetPath, archive); await storage.rename(upload.tempPath, upload.targetPath);
+    const completed = await service.completeUpload(upload.id);
+    expect(completed.resource.sha256).toBe(upload.expectedSha256);
+    expect(Buffer.concat(await (await storage.openRead(archive)).toArray()).toString()).toBe('original');
+    expect(await service.listVersions(original.id)).toHaveLength(2);
+  }));
+
+  it("keeps committed bytes when the database acknowledgement is lost", async () => safetyFixture(async (service, repository, storage) => {
+    const upload = await pending(service, 'acknowledged.txt', 'valuable');
+    const commit = repository.commitUpload.bind(repository);
+    vi.spyOn(repository, 'commitUpload').mockImplementationOnce(async record => { await commit(record); throw new Error('response lost'); });
+    const completed = await service.completeUpload(upload.id);
+    expect(completed.upload.status).toBe('active'); expect(await storage.exists(completed.resource.storagePath)).toBe(true);
+    expect(await storage.exists(upload.tempPath)).toBe(false);
+  }));
+
+  it("uses the current parent path when a folder moved before upload completion", async () => safetyFixture(async (service, _repository, storage) => {
+    const folder = await service.createFolder(SYNC_RESOURCE_ID, 'before');
+    const upload = await pending(service, 'moved.txt', 'valuable', { parentId: folder.id });
+    await service.moveResource(folder.id, { parentId: SYNC_RESOURCE_ID, name: 'after', idempotencyKey: 'safety-parent-move' });
+    const completed = await service.completeUpload(upload.id);
+    expect(completed.resource.storagePath).toBe('sync/after/moved.txt'); expect(await storage.exists('sync/before/moved.txt')).toBe(false);
+  }));
+
+  it("allows only one concurrent overwrite with the same expected version", async () => safetyFixture(async (service) => {
+    const original = (await service.completeUpload((await pending(service, 'conditional.txt', 'original')).id)).resource;
+    if (original.currentVersionId === undefined) throw new Error('Version missing');
+    const first = await pending(service, 'conditional.txt', 'first', { expectedVersionId: original.currentVersionId });
+    const second = await pending(service, 'conditional.txt', 'second', { expectedVersionId: original.currentVersionId });
+    const result = await Promise.allSettled([service.completeUpload(first.id), service.completeUpload(second.id)]);
+    expect(result.filter(value => value.status === 'fulfilled')).toHaveLength(1);
+    const failure = result.find(value => value.status === 'rejected');
+    expect(failure?.status === 'rejected' ? failure.reason : undefined).toBeInstanceOf(Error);
+    expect(await service.listVersions(original.id)).toHaveLength(2);
+  }));
+  it("keeps only ten downloadable versions and physically removes older archives", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "saturn-pluto-retention-"));
+    const storage = new LocalStorageAdapter(root), repository = new MemoryRepository(), service = new FileService(repository, storage);
+    try {
+      await storage.initialize(); await service.initializeStorage();
+      let resource: Resource | undefined;
+      for (let index = 0; index < 13; index++) {
+        const body = Buffer.from(`revision ${String(index)}`);
+        const upload = await service.createUpload({ parentId: BACKUPS_RESOURCE_ID, filename: "config.json", expectedSize: body.length,
+          idempotencyKey: `pluto-copy-${String(index)}`, ...(resource === undefined ? {} : { overwriteResourceId: resource.id }) });
+        await service.appendUpload(upload.id, 0, body.length, Readable.from(body));
+        resource = (await service.completeUpload(upload.id)).resource;
+        await service.limitVersions(resource.id, 10);
+      }
+      if (resource === undefined) throw new Error("No resource was uploaded");
+      const resourceId = resource.id;
+      const versions = await service.listVersions(resourceId);
+      expect(versions.filter(version => version.state === "active")).toHaveLength(10);
+      expect(versions.filter(version => version.state === "expired")).toHaveLength(3);
+      for (const version of versions.filter(version => version.state === "expired")) {
+        expect(await storage.exists(version.storagePath)).toBe(false);
+        await expect(service.openVersionDownload(resourceId, version.id)).rejects.toThrow();
+      }
+      const current = await service.openDownload(resourceId);
+      expect((await collect(current.stream)).toString()).toBe("revision 12");
+      const oldestRetained = versions.filter(version => version.state === "active").at(-1);
+      if (oldestRetained === undefined) throw new Error("Retained version is missing");
+      const old = await service.openVersionDownload(resourceId, oldestRetained.id);
+      expect((await collect(old.stream)).toString()).toBe("revision 3");
+      expect(repository.locks.size).toBe(0);
+      await expect(service.limitVersions(resourceId, 0)).rejects.toThrow("Version limit is invalid");
+    } finally { await storage.close(); await fs.rm(root, { recursive: true, force: true }); }
+  });
   it("pins a download version while an overwrite changes both bytes and length", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "saturn-read-overwrite-"));
     const storage = new LocalStorageAdapter(root);
@@ -981,7 +1185,8 @@ describe("FileService upload state machine", () => {
       await service.purgeAdoptedFile({ rootId: BACKUPS_RESOURCE_ID, storagePath, sha256: input.sha256 });
       await service.purgeAdoptedFile({ rootId: BACKUPS_RESOURCE_ID, storagePath, sha256: input.sha256 });
       expect(await storage.exists(storagePath)).toBe(false);
-      expect(await repository.getResourceAtPath(storagePath)).toBeUndefined();
+      expect(await repository.getResourceAtPath(storagePath)).toMatchObject({ status: "purged" });
+      expect((await service.listVersions(first.id)).every(version => version.state === "expired")).toBe(true);
     } finally {
       await storage.close();
       await fs.rm(root, { recursive: true, force: true });

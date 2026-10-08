@@ -5,6 +5,7 @@ describe("PostgresCommandToolchain recovery dump policy", () => {
   it("excludes a transient upload journal together with its upload sessions", () => {
     expect(RECOVERY_TRANSIENT_TABLES).toContain("upload_sessions");
     expect(RECOVERY_TRANSIENT_TABLES).toContain("operation_journal");
+    expect(RECOVERY_TRANSIENT_TABLES).toContain("storage_catalog_jobs");
     expect(new Set(RECOVERY_TRANSIENT_TABLES).size).toBe(RECOVERY_TRANSIENT_TABLES.length);
   });
 });

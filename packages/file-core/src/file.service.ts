@@ -3,7 +3,7 @@ import { Readable } from "node:stream";
 import { v7 as uuidv7 } from "uuid";
 import type { AuditSink } from "@saturn/audit";
 import type { StorageAdapter } from "@saturn/storage";
-import { joinStoragePath, normalizeStorageName, SATURN_BUSINESS_ROOT_DIRECTORIES, SATURN_SYSTEM_DIRECTORIES } from "@saturn/storage";
+import { ensureStorageDirectory, joinStoragePath, normalizeStorageName, SATURN_BUSINESS_ROOT_DIRECTORIES, SATURN_SYSTEM_DIRECTORIES } from "@saturn/storage";
 import type { CopiedResourceRecord, FileRepository, UploadLimits } from "./repository.js";
 import { archivedVersionPurgeAfter } from "./retention.js";
 import { detectContentType } from "./content-type.js";
@@ -33,6 +33,10 @@ export interface FileServiceOptions {
   readonly uploadIncompleteTtlMs?: number;
   readonly trashRetentionMs?: number;
   readonly auditSink?: AuditSink;
+}
+
+export class UploadPreconditionError extends Error {
+  constructor() { super("Upload precondition failed"); this.name = "UploadPreconditionError"; }
 }
 const CANONICAL_ROOT_RESOURCE_IDS = [
   DROP_POINT_RESOURCE_ID,
@@ -117,14 +121,14 @@ export class FileService {
 
   async initializeStorage(): Promise<void> {
     for (const directory of SATURN_SYSTEM_DIRECTORIES) {
-      if (!(await this.#storage.exists(directory))) await this.#storage.mkdir(directory);
+      await ensureStorageDirectory(this.#storage, directory);
     }
     for (const id of CANONICAL_ROOT_RESOURCE_IDS) {
       const resource = await this.getResource(id);
       if (resource.type !== "folder" || resource.parentId !== ROOT_RESOURCE_ID || resource.status !== "active" || resource.storagePath.includes("/")) {
         throw new Error(`Canonical Saturn root is invalid: ${id}`);
       }
-      if (!(await this.#storage.exists(resource.storagePath))) await this.#storage.mkdir(resource.storagePath);
+      await ensureStorageDirectory(this.#storage, resource.storagePath);
       if ((await this.#storage.stat(resource.storagePath)).type !== "directory") throw new Error(`Canonical Saturn root is not a directory: ${id}`);
     }
   }
@@ -304,6 +308,7 @@ export class FileService {
     if (selected !== undefined && (selected.type !== "file" || selected.sha256 !== input.sha256)) {
       throw new Error("Catalog purge target differs from the backup artifact");
     }
+    if (selected?.status === "purged") return;
     if (await this.#storage.exists(input.storagePath)) await this.#storage.delete(input.storagePath);
     const removed = await this.#repository.removeAdoptedFile(input.storagePath, input.sha256);
     if (removed !== undefined) await this.#writeAudit("backup.catalog.purged", `backup-purge:${input.storagePath}`, removed.id, {
@@ -355,6 +360,8 @@ export class FileService {
     const existing = await this.#repository.getUploadByIdempotencyKey(input.idempotencyKey);
     if (existing !== undefined) {
       if (existing.parentId !== parentId || existing.filename.toLocaleLowerCase() !== filename.toLocaleLowerCase() || existing.expectedSize !== input.expectedSize
+        || existing.expectedSha256 !== expectedSha256
+        || existing.expectedVersionId !== input.expectedVersionId || (existing.requireAbsent ?? false) !== (input.requireAbsent ?? false)
         || (input.overwriteResourceId !== undefined && existing.overwriteResourceId !== input.overwriteResourceId)
         || (existing.auditActorType ?? "owner_bootstrap") !== (input.auditActor?.type ?? "owner_bootstrap")
         || (existing.auditActorId ?? "owner") !== (input.auditActor?.id ?? "owner")) {
@@ -381,6 +388,8 @@ export class FileService {
       expectedSize: input.expectedSize,
       ...(expectedSha256 === undefined ? {} : { expectedSha256 }),
       ...(overwrite === undefined ? {} : { overwriteResourceId: overwrite.id }),
+      ...(input.expectedVersionId === undefined ? {} : { expectedVersionId: input.expectedVersionId }),
+      ...(input.requireAbsent === undefined ? {} : { requireAbsent: input.requireAbsent }),
       ...(input.auditActor === undefined ? {} : { auditActorType: input.auditActor.type, auditActorId: input.auditActor.id }),
       expiresAt: new Date(Date.now() + this.#uploadIncompleteTtlMs),
     });
@@ -400,6 +409,34 @@ export class FileService {
     return upload;
   }
 
+  findUploadByIdempotencyKey(key: string): Promise<UploadSession | undefined> {
+    return this.#repository.getUploadByIdempotencyKey(key);
+  }
+
+  async recoverInterruptedUploads(limit = 10): Promise<{ recovered: number; pending: number }> {
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new Error("Recovery batch limit is invalid");
+    let recovered = 0, pending = 0;
+    for (const item of await this.#repository.listRecoverableUploads?.(limit) ?? []) {
+      try { await this.completeUpload(item.id); recovered++; }
+      catch {
+        pending++;
+        const current = await this.#repository.getUpload(item.id);
+        if (current?.status === "committing") await this.#repository.setUploadState(item.id, "committing", { errorCode: "reconciliation_required" });
+      }
+    }
+    return { recovered, pending };
+  }
+
+  async cleanupAbandonedUploads(limit = 100): Promise<{ readonly attempted: number }> {
+    if (!Number.isInteger(limit) || limit < 1 || limit > 1000) throw new Error("Cleanup batch limit is invalid");
+    let attempted = 0;
+    for (const upload of await this.#repository.listAbandonedUploadsForCleanup?.(limit) ?? []) {
+      await this.abandonUpload(upload.id).catch(() => undefined);
+      attempted++;
+    }
+    return { attempted };
+  }
+
   async abandonUpload(id: string): Promise<UploadSession> {
     const lockId = uuidv7();
     if (!(await this.#repository.acquireLocks(lockId, [`upload:${id}`], new Date(Date.now() + MUTATION_LOCK_MS)))) {
@@ -407,10 +444,16 @@ export class FileService {
     }
     try {
       const upload = await this.getUpload(id);
-      if (upload.status === "abandoned") return upload;
-      if (upload.status === "active" || upload.status === "committing") throw new Error("Committed upload cannot be abandoned");
-      if (await this.#storage.exists(upload.tempPath)) await this.#storage.delete(upload.tempPath);
-      const abandoned = await this.#repository.setUploadState(id, "abandoned");
+      if (["active", "committing", "verifying"].includes(upload.status) || await this.#repository.hasUploadRecoveryJournal?.(id) || await this.#repository.isBufferedDeliveryUpload?.(id)) {
+        throw new Error("Committed or recovering upload cannot be abandoned");
+      }
+      // Cancellation is durable even while storage is unavailable. Only the
+      // temporary path may be removed; the worker retries its recorded cleanup.
+      const abandoned = await this.#repository.setUploadState(id, "abandoned", { errorCode: "cleanup_pending" });
+      try {
+        if (await this.#storage.exists(upload.tempPath)) await this.#storage.delete(upload.tempPath);
+        await this.#repository.setUploadState(id, "abandoned");
+      } catch { /* Keep cleanup_pending until storage recovers. */ }
       await this.#writeAudit("upload.abandoned", `upload-abandon:${id}`, undefined, { uploadId: id }, {
         type: upload.auditActorType ?? "owner_bootstrap",
         id: upload.auditActorId ?? "owner",
@@ -423,17 +466,22 @@ export class FileService {
 
   async appendUpload(id: string, offset: number, contentLength: number, source: Readable): Promise<UploadSession> {
     const lockId = uuidv7();
+    let chunkStarted = false;
     if (!(await this.#repository.acquireLocks(lockId, [`upload:${id}`], new Date(Date.now() + UPLOAD_LOCK_MS)))) {
       throw new Error("Upload is locked by another operation");
     }
     try {
       const upload = await this.getUpload(id);
       if (!["created", "uploading", "failed_retryable"].includes(upload.status)) throw new Error("Upload does not accept chunks in its current state");
+      if (await this.#repository.hasUploadRecoveryJournal?.(id)) throw new Error("Upload requires recovery before accepting chunks");
+      if (upload.expiresAt <= new Date() && !await this.#repository.isBufferedDeliveryUpload?.(id)) throw new Error("Upload session has expired");
       if (offset !== upload.receivedSize) throw new Error(`Upload offset mismatch; expected ${String(upload.receivedSize)}`);
       if (!Number.isSafeInteger(contentLength) || contentLength < 1 || contentLength > this.#uploadChunkMaxBytes
         || offset + contentLength > upload.expectedSize) {
         throw new Error("Upload chunk length is invalid");
       }
+      await this.#repository.setUploadState(id, "uploading");
+      chunkStarted = true;
       const written = await this.#storage.write(upload.tempPath, source, {
         offset,
         create: offset === 0,
@@ -447,10 +495,12 @@ export class FileService {
       return await this.#repository.updateUploadProgress(id, offset, offset + written);
     } catch (error) {
       const upload = await this.#repository.getUpload(id);
-      if (upload !== undefined && upload.receivedSize === offset) {
+      if (chunkStarted && upload !== undefined && ["created", "uploading", "failed_retryable"].includes(upload.status) && upload.receivedSize === offset) {
         await this.#rollbackPartialChunk(upload.tempPath, offset).catch(() => undefined);
       }
-      await this.#repository.setUploadState(id, "failed_retryable", { errorCode: "chunk_write_failed" });
+      if (chunkStarted && upload !== undefined && ["created", "uploading", "failed_retryable"].includes(upload.status)) {
+        await this.#repository.setUploadState(id, "failed_retryable", { errorCode: "chunk_write_failed" });
+      }
       throw error;
     } finally {
       await this.#repository.releaseLocks(lockId);
@@ -468,15 +518,27 @@ export class FileService {
       throw new Error("Upload is locked by another operation");
     }
     try {
-      const upload = await this.getUpload(id);
+      let upload = await this.getUpload(id);
       if (upload.status === "active" && upload.resourceId !== undefined) {
         return { upload, resource: await this.getResource(upload.resourceId) };
+      }
+      const recovering = ["committing", "verifying"].includes(upload.status) || await this.#repository.hasUploadRecoveryJournal?.(id);
+      if (await this.#repository.hasCommittingTarget?.(upload.parentId, upload.filename, id)) throw new Error("Destination has an interrupted upload requiring recovery");
+      if (upload.status === "committing") {
+        if (!(await this.#acquireLocksWithin(lockId, [`resource:${upload.parentId}`], UPLOAD_LOCK_MS, 30_000))) throw new Error("Upload is locked by another operation");
+        await this.#recoverInterruptedUpload(upload, lockId);
+        upload = await this.getUpload(id);
       }
       // A worker can stop after persisting `verifying` but before it commits the
       // resource. Re-running verification is idempotent and lets the Drop drain
       // recover that upload instead of leaving it permanently stuck.
       if (!["created", "uploading", "verifying", "failed_retryable"].includes(upload.status)) throw new Error("Upload cannot be completed in its current state");
       if (upload.receivedSize !== upload.expectedSize) throw new Error("Upload is incomplete");
+      // An accepted complete payload in verification/reconciliation must remain
+      // recoverable. Expiry only blocks starting a fresh ordinary completion.
+      if (upload.expiresAt <= new Date() && !recovering && !await this.#repository.isBufferedDeliveryUpload?.(id)) {
+        throw new Error("Upload session has expired");
+      }
       if (upload.status !== "verifying") await this.#repository.setUploadState(id, "verifying");
       if (upload.expectedSize === 0 && !(await this.#storage.exists(upload.tempPath))) {
         await this.#storage.write(upload.tempPath, Readable.from(Buffer.alloc(0)), {
@@ -502,13 +564,27 @@ export class FileService {
         64 * 1024,
       );
       const mimeType = await detectContentType(upload.filename, probe);
-      await this.#repository.setUploadState(id, "committing", { actualSha256: digest.sha256 });
+      // Temporary files are outside the destination tree. Verify them in
+      // parallel; hold the parent only while resolving and committing paths.
+      // A concurrent folder move/trash must be observed before any final rename.
+      if (!(await this.#acquireLocksWithin(lockId, [`resource:${upload.parentId}`], UPLOAD_LOCK_MS, 30_000))) throw new Error("Upload is locked by another operation");
+      const parent = await this.getResource(upload.parentId);
+      if (parent.status !== "active" || parent.type !== "folder") throw new Error("Upload parent is not active");
+      const destination = joinStoragePath(parent.storagePath, upload.filename);
+      if (destination !== upload.targetPath) {
+        if (this.#repository.retargetUpload === undefined) throw new Error("Upload parent moved; destination must be reconciled");
+        upload = await this.#repository.retargetUpload(id, destination);
+      }
       let target = upload.overwriteResourceId === undefined
         ? await this.#repository.getChild(upload.parentId, upload.filename)
         : await this.getResource(upload.overwriteResourceId);
       if (target !== undefined) {
         if (!(await this.#acquireLocksWithin(lockId, [`resource:${target.id}`], UPLOAD_LOCK_MS, 30_000))) throw new Error("Overwrite target is locked");
         target = await this.getResource(target.id);
+        if (upload.requireAbsent || (upload.expectedVersionId !== undefined && target.currentVersionId !== upload.expectedVersionId)) {
+          await this.#repository.setUploadState(id, "failed_final", { errorCode: "precondition_failed" });
+          throw new UploadPreconditionError();
+        }
         if (target.type !== "file" || target.status !== "active" || target.currentVersionId === undefined
           || target.parentId !== upload.parentId || target.name.toLocaleLowerCase() !== upload.filename.toLocaleLowerCase()) {
           await this.#repository.setUploadState(id, "failed_final", { errorCode: "overwrite_target_invalid" });
@@ -521,6 +597,7 @@ export class FileService {
         const archiveDirectory = `_system/versions/${target.id}/${target.currentVersionId}`;
         const archivePath = joinStoragePath(archiveDirectory, target.name);
         await this.#ensureDirectoryChain(archiveDirectory);
+        await this.#repository.setUploadState(id, "committing", { actualSha256: digest.sha256 });
         await this.#storage.rename(upload.targetPath, archivePath);
         try {
           await this.#storage.rename(upload.tempPath, upload.targetPath);
@@ -552,6 +629,8 @@ export class FileService {
           }, { type: upload.auditActorType ?? "owner_bootstrap", id: upload.auditActorId ?? "owner" });
           return completed;
         } catch (error) {
+          const recorded = await this.#repository.getUpload(id);
+          if (recorded?.status === "active" && recorded.resourceId !== undefined) return { upload: recorded, resource: await this.getResource(recorded.resourceId) };
           try {
             await this.#storage.rename(upload.targetPath, upload.tempPath);
             await this.#storage.rename(archivePath, upload.targetPath);
@@ -562,10 +641,12 @@ export class FileService {
           throw error;
         }
       }
+      if (upload.expectedVersionId !== undefined) throw new UploadPreconditionError();
       if (await this.#storage.exists(upload.targetPath)) {
         await this.#repository.setUploadState(id, "failed_final", { errorCode: "target_exists" });
         throw new Error("Upload target already exists");
       }
+      await this.#repository.setUploadState(id, "committing", { actualSha256: digest.sha256 });
       await this.#storage.rename(upload.tempPath, upload.targetPath);
       try {
         const completed = await this.#repository.commitUpload({
@@ -586,6 +667,8 @@ export class FileService {
         }, { type: upload.auditActorType ?? "owner_bootstrap", id: upload.auditActorId ?? "owner" });
         return completed;
       } catch (error) {
+        const recorded = await this.#repository.getUpload(id);
+        if (recorded?.status === "active" && recorded.resourceId !== undefined) return { upload: recorded, resource: await this.getResource(recorded.resourceId) };
         try {
           await this.#storage.rename(upload.targetPath, upload.tempPath);
           await this.#repository.setUploadState(id, "failed_retryable", { actualSha256: digest.sha256, errorCode: "database_commit_failed" });
@@ -611,6 +694,7 @@ export class FileService {
     try {
       const resource = await this.getResource(resourceId);
       if (resource.type !== "file" || resource.status !== "active") throw new Error("Resource is not an active file");
+      if (await this.#repository.hasCommittingTree?.(resource.storagePath)) throw new Error("File has an interrupted upload requiring recovery");
       if (typeof offset === "function") { const selected = offset(resource); offset = selected.offset; length = selected.length; }
       if (!Number.isSafeInteger(offset) || offset < 0 || offset > resource.sizeBytes) throw new Error("Download offset is invalid");
       if (length !== undefined && (!Number.isSafeInteger(length) || length < 1 || offset + length > resource.sizeBytes)) {
@@ -625,19 +709,26 @@ export class FileService {
   }
 
   async openVersionDownload(resourceId: string, versionId: string, offset = 0, length?: number, auditActor?: { readonly type: string; readonly id: string }): Promise<{ readonly resource: Resource; readonly version: FileVersion; readonly stream: Readable }> {
+    const lockId = uuidv7();
+    if (!(await this.#acquireLocksWithin(lockId, [`resource:${resourceId}`], MUTATION_LOCK_MS, 30_000))) throw new Error("Download resource is locked");
+    try {
     const resource = await this.getResource(resourceId);
     if (resource.type !== "file" || resource.status !== "active") throw new Error("Resource is not an active file");
+    if (await this.#repository.hasCommittingTree?.(resource.storagePath)) throw new Error("File has an interrupted upload requiring recovery");
     const version = await this.#repository.getVersion(resourceId, versionId);
     if (version === undefined || version.state !== "active") throw new Error("File version not found");
     if (!Number.isSafeInteger(offset) || offset < 0 || offset > version.sizeBytes) throw new Error("Download offset is invalid");
     if (length !== undefined && (!Number.isSafeInteger(length) || length < 1 || offset + length > version.sizeBytes)) throw new Error("Download length is invalid");
     const stream = await this.#storage.openRead(version.storagePath, { offset, ...(length === undefined ? {} : { length }) });
+    try {
     await this.#writeAudit("file.version.download.opened", `version-download:${uuidv7()}`, resource.id, {
       versionId,
       offset,
       length: length ?? version.sizeBytes - offset,
     }, auditActor);
+    } catch (error) { stream.destroy(); throw error; }
     return { resource, version, stream };
+    } finally { await this.#repository.releaseLocks(lockId); }
   }
 
   async moveResource(resourceId: string, input: MoveResourceInput): Promise<Resource> {
@@ -814,6 +905,7 @@ export class FileService {
 
   async restoreResource(resourceId: string, input: ResourceMutationInput): Promise<Resource> {
     const source = await this.getResource(resourceId);
+    if (await this.#repository.hasPendingPurge?.(resourceId)) throw new Error("Trash purge is in progress and requires completion");
     const completed = await this.#completedMutation("restore", input.idempotencyKey, resourceId);
     if (completed !== undefined) return completed;
     if (source.status !== "trashed" || source.trashedFromParentId === undefined || source.trashedFromName === undefined) {
@@ -832,6 +924,10 @@ export class FileService {
     });
     if (operation.state === "active" && operation.resourceId !== undefined) return this.getResource(operation.resourceId);
     return this.#withMutationLocks(operation, [...tree.map((item) => `resource:${item.id}`), `resource:${parent.id}`], async () => {
+      const current = await this.getResource(source.id);
+      if (current.status !== "trashed" || current.storagePath !== source.storagePath || await this.#repository.hasPendingPurge?.(source.id)) {
+        throw new Error("Trash resource changed or purge is in progress");
+      }
       await this.#repository.setOperationState(operation.id, "storage_committing");
       await this.#storage.rename(source.storagePath, restoredPath);
       try {
@@ -930,6 +1026,30 @@ export class FileService {
       throw new Error("Version page is invalid");
     }
     return this.#repository.listVersions(resourceId, offset, limit);
+  }
+
+  async limitVersions(resourceId: string, maximumCount: number): Promise<void> {
+    if (!Number.isSafeInteger(maximumCount) || maximumCount < 1 || maximumCount > 100) throw new Error("Version limit is invalid");
+    if (!this.#repository.expireVersion) throw new Error("Version retention is unavailable");
+    const lockId = uuidv7();
+    if (!(await this.#acquireLocksWithin(lockId, [`resource:${resourceId}`], UPLOAD_LOCK_MS, 30_000))) throw new Error("Version retention is locked");
+    try {
+      const resource = await this.getResource(resourceId);
+      let retained = 1;
+      for (let offset = 0; ; offset += 500) {
+        const versions = await this.#repository.listVersions(resourceId, offset, 500);
+        for (const version of versions) {
+          if (version.state !== "active" || version.id === resource.currentVersionId) continue;
+          if (retained++ < maximumCount) continue;
+            const archiveDirectory = `_system/versions/${resource.id}/${version.id}`;
+            if (!version.storagePath.startsWith(archiveDirectory + "/") || version.storagePath === resource.storagePath) throw new Error("Version archive path is invalid");
+            if (await this.#storage.exists(version.storagePath)) await this.#storage.delete(version.storagePath);
+            await this.#repository.expireVersion(resourceId, version.id);
+            await this.#storage.delete(archiveDirectory).catch(() => undefined);
+        }
+        if (versions.length < 500) break;
+      }
+    } finally { await this.#repository.releaseLocks(lockId); }
   }
 
   async getVersion(resourceId: string, versionId: string): Promise<FileVersion> {
@@ -1072,10 +1192,44 @@ export class FileService {
       throw new Error("Resource is locked by another operation");
     }
     try {
+      if (operation.resourceId !== undefined) {
+        const current = await this.getResource(operation.resourceId);
+        const oldPath = operation.payload.oldPath;
+        if (typeof oldPath === "string" && current.storagePath !== oldPath) throw new Error("Resource moved before the operation acquired its lock");
+        if (await this.#repository.hasCommittingTree?.(current.storagePath)) throw new Error("Resource contains an interrupted upload requiring recovery");
+      }
       return await action();
     } finally {
       await this.#repository.releaseLocks(operation.id);
     }
+  }
+
+  async #recoverInterruptedUpload(upload: UploadSession, lockId: string): Promise<void> {
+    let target = upload.overwriteResourceId === undefined
+      ? await this.#repository.getChild(upload.parentId, upload.filename)
+      : await this.getResource(upload.overwriteResourceId);
+    if (target !== undefined && !(await this.#acquireLocksWithin(lockId, [`resource:${target.id}`], UPLOAD_LOCK_MS, 30_000))) throw new Error("Upload recovery target is locked");
+    if (target !== undefined) target = await this.getResource(target.id);
+    const archive = target?.currentVersionId === undefined ? undefined : joinStoragePath(`_system/versions/${target.id}/${target.currentVersionId}`, target.name);
+    const tempExists = await this.#storage.exists(upload.tempPath);
+    const targetExists = await this.#storage.exists(upload.targetPath);
+    const archiveExists = archive !== undefined && await this.#storage.exists(archive);
+    if (archive !== undefined && archiveExists && target !== undefined) {
+      const old = await hashStream(await this.#storage.openRead(archive));
+      if (old.sha256 !== target.sha256 || old.bytes !== target.sizeBytes) throw new Error("Interrupted overwrite archive does not match the original version");
+    }
+    if (!tempExists) {
+      if (!targetExists || upload.actualSha256 === undefined) throw new Error("Interrupted upload has no verifiable committed object");
+      const digest = await hashStream(await this.#storage.openRead(upload.targetPath));
+      if (digest.sha256 !== upload.actualSha256 || digest.bytes !== upload.expectedSize) throw new Error("Interrupted upload target changed; manual recovery is required");
+      if (target !== undefined && !archiveExists) throw new Error("Interrupted overwrite original archive is missing");
+      await this.#storage.rename(upload.targetPath, upload.tempPath);
+    } else if (targetExists && archiveExists) {
+      throw new Error("Interrupted upload has ambiguous storage state; manual recovery is required");
+    }
+    if (archive !== undefined && archiveExists) await this.#storage.rename(archive, upload.targetPath);
+    else if (target !== undefined && !targetExists) throw new Error("Original overwrite target is missing");
+    await this.#repository.setUploadState(upload.id, "failed_retryable", { errorCode: "interrupted_commit_recovered" });
   }
 
   async #assertNotManagedBackup(resource: Resource): Promise<void> {

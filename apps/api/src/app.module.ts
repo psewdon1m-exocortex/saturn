@@ -5,7 +5,7 @@ import { AuditService } from "@saturn/audit";
 import { ArchiveService, PostgresArchiveJobRepository, type ArchiveJobRepository } from "@saturn/archive";
 import { OwnerAuthService, PostgresOwnerAuthRepository } from "@saturn/auth";
 import { BackupIngestService, PostgresBackupRepository, type BackupRepository } from "@saturn/backup-ingest";
-import { loadEnvironment } from "@saturn/config";
+import { loadEnvironment, readOwnerAccessKey } from "@saturn/config";
 import { Database } from "@saturn/database";
 import { DropBufferStore, DropService, GryphonNotificationSink, PostgresDropRepository, type DropRepository } from "@saturn/drop";
 import { BACKUPS_RESOURCE_ID, FileService, PostgresFileRepository } from "@saturn/file-core";
@@ -13,7 +13,7 @@ import { LaboratoryService, PostgresLaboratoryRepository, type LaboratoryReposit
 import { RuntimeStorageManager, type StorageAdapter } from "@saturn/storage";
 import { PostgresPurgeRepository, PostgresReconciliationRepository, PurgeService, ReconciliationService } from "@saturn/protection";
 import { AdapterStorageHealthProbe } from "@saturn/storage-health";
-import { PostgresShareRepository, ShareService, type ShareRepository } from "@saturn/shares";
+import { PostgresShareRepository, ShareService, ShareThumbnailService, type ShareRepository } from "@saturn/shares";
 import { DeviceService, PostgresDeviceRepository, type DeviceRepository } from "@saturn/sync";
 import { HealthController, PublicReachabilityController } from "./health.controller.js";
 import { HealthService } from "./health.service.js";
@@ -29,7 +29,7 @@ import { GryphonOwnerController } from "./gryphon-owner.controller.js";
 import { GryphonEventStore } from "./gryphon-event.store.js";
 import { PublicShareController, ResourceClassificationController, ShareOwnerController } from "./share.controller.js";
 import { ShareApiExceptionFilter } from "./share-api-exception.filter.js";
-import { DeviceController } from "./device.controller.js";
+import { DeviceController, DeviceEnrollmentController, DeviceSessionController } from "./device.controller.js";
 import { BackupCapabilitiesController, BackupEnrollmentController, BackupOwnerController, BackupProducerController, BackupRestoreController } from "./backup.controller.js";
 import { BackupApiExceptionFilter } from "./backup-api-exception.filter.js";
 import { LaboratoryAssetController, LaboratoryClientController, LaboratoryDeliveryController, LaboratoryImportController } from "./laboratory.controller.js";
@@ -58,6 +58,7 @@ import {
   RECONCILIATION_SERVICE,
   SHARE_REPOSITORY,
   SHARE_SERVICE,
+  SHARE_THUMBNAIL_SERVICE,
   STORAGE_ADAPTER,
   STORAGE_HEALTH,
   STORAGE_RUNTIME,
@@ -65,7 +66,6 @@ import {
 import { ArchiveController } from "./archive.controller.js";
 import { OperatorController } from "./operator.controller.js";
 import { UpdaterController } from "./updater.controller.js";
-import { HelperRecoveryController } from "./helper-recovery.controller.js";
 import { TransferMonitorService } from "./transfer-monitor.service.js";
 import { TransferTaskController } from "./transfer-task.controller.js";
 import { MaintenanceBarrierInterceptor } from "./maintenance-barrier.interceptor.js";
@@ -74,15 +74,17 @@ import { NeptuneExportController, NeptuneOwnerController } from "./neptune.contr
 import { RecoveryWorkflowService } from "./recovery-workflow.service.js";
 import { StorageConnectionController } from "./storage-connection.controller.js";
 import { StorageConnectionService } from "./storage-connection.service.js";
+import { StorageCatalogService } from "@saturn/protection";
 import { SyncClientController } from "./sync-client.controller.js";
 import { NeptuneAgentController, NeptuneFleetOwnerController } from "./neptune-fleet.controller.js";
 import { NeptuneFleetService } from "./neptune-fleet.service.js";
 import { BackupMaintenanceService } from "./backup-maintenance.service.js";
+import { PlutoController } from "./pluto.controller.js";
 
 const config = loadEnvironment();
 
 @Module({
-  controllers: [HelperRecoveryController, UpdaterController, HealthController, PublicReachabilityController, AuthController, OperatorController, TransferTaskController, ArchiveController, StorageConnectionController, RecoveryController, NeptuneExportController, NeptuneOwnerController, NeptuneAgentController, NeptuneFleetOwnerController, GryphonOwnerController, FileController, ActivityController, ProtectionController, DropController, GryphonController, ShareOwnerController, ResourceClassificationController, PublicShareController, DeviceController, SyncClientController, BackupOwnerController, BackupRestoreController, BackupEnrollmentController, BackupCapabilitiesController, BackupProducerController, LaboratoryClientController, LaboratoryAssetController, LaboratoryImportController, LaboratoryDeliveryController],
+  controllers: [PlutoController, UpdaterController, HealthController, PublicReachabilityController, AuthController, OperatorController, TransferTaskController, ArchiveController, StorageConnectionController, RecoveryController, NeptuneExportController, NeptuneOwnerController, NeptuneAgentController, NeptuneFleetOwnerController, GryphonOwnerController, FileController, ActivityController, ProtectionController, DropController, GryphonController, ShareOwnerController, ResourceClassificationController, PublicShareController, DeviceController, DeviceEnrollmentController, DeviceSessionController, SyncClientController, BackupOwnerController, BackupRestoreController, BackupEnrollmentController, BackupCapabilitiesController, BackupProducerController, LaboratoryClientController, LaboratoryAssetController, LaboratoryImportController, LaboratoryDeliveryController],
   providers: [
     { provide: APP_CONFIG, useValue: config },
     { provide: DATABASE, useFactory: () => new Database(config.databaseUrl, { max: 10, maintenanceBarrier: true }) },
@@ -105,7 +107,7 @@ const config = loadEnvironment();
       useFactory: async (database: Database, audit: AuditService) => {
         const service = new OwnerAuthService({
           repository: new PostgresOwnerAuthRepository(database),
-          ownerAccessKey: (await fs.readFile(config.ownerBootstrapTokenFile, "utf8")).replace(/[\r\n]+$/, ""),
+          ownerAccessKey: readOwnerAccessKey(config.ownerBootstrapTokenFile),
           pepper: (await fs.readFile(config.auth.pepperFile, "utf8")).replace(/[\r\n]+$/, ""),
           options: {
             publicOrigin: config.publicOrigin,
@@ -288,6 +290,11 @@ const config = loadEnvironment();
       inject: [SHARE_REPOSITORY, FILE_SERVICE, STORAGE_ADAPTER, AUDIT_SERVICE, DATABASE],
     },
     {
+      provide: SHARE_THUMBNAIL_SERVICE,
+      useFactory: (shares: ShareService, storage: StorageAdapter) => new ShareThumbnailService({ shares, storage }),
+      inject: [SHARE_SERVICE, STORAGE_ADAPTER],
+    },
+    {
       provide: RECONCILIATION_SERVICE,
       useFactory: (database: Database, storage: StorageAdapter, audit: AuditService) => new ReconciliationService(
         new PostgresReconciliationRepository(database),
@@ -318,6 +325,11 @@ const config = loadEnvironment();
     {
       provide: StorageConnectionService,
       useFactory: (database: Database, storage: RuntimeStorageManager, audit: AuditService) => new StorageConnectionService(database, storage, config, audit),
+      inject: [DATABASE, STORAGE_RUNTIME, AUDIT_SERVICE],
+    },
+    {
+      provide: StorageCatalogService,
+      useFactory: (database: Database, storage: RuntimeStorageManager, audit: AuditService) => new StorageCatalogService(database, storage, audit),
       inject: [DATABASE, STORAGE_RUNTIME, AUDIT_SERVICE],
     },
     RecoveryWorkflowService,

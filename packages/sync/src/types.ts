@@ -15,18 +15,33 @@ export interface DeviceRights {
 export interface DeviceRecord {
   readonly id: string;
   readonly name: string;
+  readonly deviceKind: "generic" | "mirror" | "windows_sync" | "pluto";
+  readonly plutoStatus?: PlutoStatus;
+  readonly syncRootId?: string;
   readonly tokenHash: string;
   readonly state: "active" | "revoked" | "expired";
   readonly scopeIds: readonly string[];
   readonly rights: DeviceRights;
   readonly expiresAt?: Date;
   readonly lastUsedAt?: Date;
+  readonly lastSeenAt?: Date;
+  readonly clientPlatform?: "windows" | "linux";
+  readonly clientVersion?: string;
   readonly createdAt: Date;
   readonly updatedAt: Date;
   readonly revokedAt?: Date;
 }
 
-export type PublicDevice = Omit<DeviceRecord, "tokenHash">;
+export interface DeviceEnrollmentRecord {
+  readonly id: string;
+  readonly deviceId: string;
+  readonly codeHash: string;
+  readonly expiresAt: Date;
+  readonly createdAt: Date;
+  readonly consumedAt?: Date;
+}
+
+export type PublicDevice = Omit<DeviceRecord, "tokenHash"> & { readonly syncFolderName?: string };
 
 export interface SyncConflict {
   readonly id: string;
@@ -44,10 +59,23 @@ export interface DeviceRepository {
   getById(id: string): Promise<DeviceRecord | undefined>;
   authenticate(tokenHash: string, now: Date): Promise<DeviceRecord | undefined>;
   list(offset: number, limit: number): Promise<readonly DeviceRecord[]>;
-  update(id: string, input: { readonly name?: string; readonly scopeIds?: readonly string[]; readonly rights?: DeviceRights; readonly expiresAt?: Date | null }, now: Date): Promise<DeviceRecord>;
+  update(id: string, input: { readonly name?: string; readonly scopeIds?: readonly string[]; readonly rights?: DeviceRights; readonly expiresAt?: Date | null; readonly syncRootId?: string; readonly tokenHash?: string }, now: Date): Promise<DeviceRecord>;
   revoke(id: string, now: Date): Promise<DeviceRecord>;
+  createEnrollment(value: DeviceEnrollmentRecord): Promise<void>;
+  redeemEnrollment(codeHash: string, tokenHash: string, now: Date, kind?: "windows_sync" | "pluto"): Promise<DeviceRecord | undefined>;
+  recordPresence(id: string, platform: "windows" | "linux", version: string, now: Date, plutoStatus?: PlutoStatus): Promise<DeviceRecord>;
   reserveDelete(input: { readonly deviceId: string; readonly itemCount: number; readonly since: Date; readonly limit: number; readonly occurredAt: Date }): Promise<boolean>;
   recordConflict(input: SyncConflict): Promise<void>;
+}
+
+export interface PlutoStatus {
+  readonly enabled: boolean;
+  readonly intervalSeconds: number;
+  readonly lastAttemptAt?: string;
+  readonly lastSuccessAt?: string;
+  readonly nextRunAt?: string;
+  readonly uploadedFiles: number;
+  readonly error?: string;
 }
 
 export interface DeviceOptions {

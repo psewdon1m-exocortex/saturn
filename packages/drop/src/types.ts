@@ -109,6 +109,10 @@ export interface DropCompletion {
 }
 
 export interface DropRepository {
+  retryUpload?(id: string, failureCode: string, now: Date): Promise<void>;
+  releaseBuffer?(id: string): Promise<void>;
+  listBufferCleanup?(limit: number): Promise<readonly DropUpload[]>;
+  withUploadLock?<T>(id: string, action: () => Promise<T>): Promise<T>;
   createDropChallenge(input: { readonly id: string; readonly codeHash: string; readonly identity?: TelegramIdentity; readonly createdAt: Date; readonly expiresAt: Date; readonly maxFiles: number; readonly maxBytes: number }): Promise<boolean>;
   redeemDropChallenge(input: { readonly codeHash: string; readonly tokenHash: string; readonly csrfHash: string; readonly userAgentHash: string; readonly sessionId: string; readonly now: Date; readonly expiresAt: Date; readonly maxFiles: number; readonly maxBytes: number }): Promise<DropSession | undefined>;
   beginDropAttempt(input: { readonly sourceIpHash: string; readonly since: Date; readonly sourceLimit: number; readonly globalLimit: number; readonly occurredAt: Date }): Promise<string | undefined>;

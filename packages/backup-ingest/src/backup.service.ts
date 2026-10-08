@@ -1,7 +1,7 @@
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import type { Readable } from "node:stream";
 import type { AuditSink } from "@saturn/audit";
-import { joinStoragePath, normalizeStorageName } from "@saturn/storage";
+import { ensureStorageDirectory, joinStoragePath, normalizeStorageName } from "@saturn/storage";
 import { v7 as uuidv7 } from "uuid";
 import { retentionCandidates } from "./retention.js";
 import type {
@@ -43,6 +43,7 @@ function publicRun(value: BackupRunRecord) {
 
 export class BackupIngestService {
   readonly pepper: Buffer;
+  readonly #runLocks = new Map<string, Promise<unknown>>();
   constructor(private readonly input: { readonly repository: BackupRepository; readonly storage: BackupStorage; readonly pepper: string; readonly options: BackupOptions; readonly backupRootPath?: () => Promise<string>; readonly catalog?: BackupCatalog; readonly audit?: AuditSink }) {
     if (input.pepper.length < 32 || /[\r\n]/.test(input.pepper)) throw new Error("Backup pepper is invalid"); this.pepper = Buffer.from(input.pepper, "utf8");
   }
@@ -56,8 +57,13 @@ export class BackupIngestService {
     if (!safeSlug.test(slug) || !safeSlug.test(namespaceSlug) || !safeSlug.test(deploymentId) || name.length < 1 || name.length > 100 || /[\r\n]/.test(name)
       || (value.mirrorRoot !== undefined && value.mirrorRoot !== namespaceSlug)) throw new BackupServiceError("invalid");
     const defaults = this.input.options.defaults; const retention = { ...defaults.retention, ...value.retention };
+    const pipelineKind = value.pipelineKind ?? value.mirrorRoot ?? "service";
+    const archivePipeline = value.archivePipeline ?? true;
+    if ((pipelineKind === "volt" || pipelineKind === "mastermind") && (namespaceSlug !== pipelineKind || value.mirrorRoot !== undefined && value.mirrorRoot !== pipelineKind)) throw new BackupServiceError("invalid");
+    if (!archivePipeline && value.mirrorRoot === undefined) throw new BackupServiceError("invalid");
+    if (value.pipelineGroupId !== undefined && !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value.pipelineGroupId)) throw new BackupServiceError("invalid");
     const record: BackupServiceRecord = {
-      id: uuidv7(), slug, namespaceSlug, deploymentId, ...(value.mirrorRoot === undefined ? {} : { mirrorRoot: value.mirrorRoot }), name, tokenHash: "", state: "active", requireEncryption: value.requireEncryption ?? defaults.requireEncryption,
+      id: uuidv7(), slug, namespaceSlug, deploymentId, pipelineKind, archivePipeline, ...(value.pipelineGroupId === undefined ? {} : { pipelineGroupId: value.pipelineGroupId }), ...(value.mirrorRoot === undefined ? {} : { mirrorRoot: value.mirrorRoot }), name, tokenHash: "", state: "active", requireEncryption: value.requireEncryption ?? defaults.requireEncryption,
       ...(value.mtlsCertFingerprint === undefined ? {} : { mtlsCertFingerprint: this.fingerprint(value.mtlsCertFingerprint) }),
       maxBackupBytes: value.maxBackupBytes ?? defaults.maxBackupBytes, dailyQuotaBytes: value.dailyQuotaBytes ?? defaults.dailyQuotaBytes,
       storedQuotaBytes: value.storedQuotaBytes ?? defaults.storedQuotaBytes, maxConcurrentRuns: value.maxConcurrentRuns ?? defaults.maxConcurrentRuns,
@@ -73,7 +79,7 @@ export class BackupIngestService {
     const deploymentId = (value.deploymentId ?? "default").trim().toLowerCase();
     const existing = await this.input.repository.getActiveServiceByDeployment(namespaceSlug, deploymentId);
     if (existing !== undefined) {
-      if (existing.mirrorRoot !== value.mirrorRoot) throw new BackupServiceError("conflict");
+      if (existing.archivePipeline !== (value.archivePipeline ?? true) || existing.mirrorRoot !== value.mirrorRoot || (value.pipelineKind !== undefined && existing.pipelineKind !== value.pipelineKind)) throw new BackupServiceError("conflict");
       return this.createEnrollmentForService(existing.id, now);
     }
     const created = await this.createService(value, now);
@@ -89,14 +95,14 @@ export class BackupIngestService {
     return { service: await this.publicService(selected, now), code, expiresAt: expiresAt.toISOString() };
   }
 
-  async redeemEnrollment(code: string, now = new Date()): Promise<{ readonly serviceId: string; readonly token: string; readonly slug: string; readonly namespaceSlug: string; readonly deploymentId: string; readonly mirrorRoot?: "volt" | "mastermind" }> {
+  async redeemEnrollment(code: string, now = new Date()): Promise<{ readonly serviceId: string; readonly token: string; readonly slug: string; readonly namespaceSlug: string; readonly deploymentId: string; readonly archivePipeline: boolean; readonly mirrorRoot?: "volt" | "mastermind" }> {
     if (!/^[A-Za-z0-9_-]{32}$/.test(code)) throw new BackupServiceError("unauthorized");
     const selected = await this.input.repository.consumeEnrollment(this.hmac("backup-enrollment-code", code), now);
-    if (selected === undefined) throw new BackupServiceError("unauthorized");
+    if (selected === undefined || selected.state !== "active") throw new BackupServiceError("unauthorized");
     const token = this.token();
     await this.input.repository.rotateToken(selected.id, this.hmac("backup-service-token", token), now, now);
     await this.audit("backup.service.enrollment.redeemed", selected.id, { deploymentId: selected.deploymentId });
-    return { serviceId: selected.id, token, slug: selected.slug, namespaceSlug: selected.namespaceSlug, deploymentId: selected.deploymentId, ...(selected.mirrorRoot === undefined ? {} : { mirrorRoot: selected.mirrorRoot }) };
+    return { serviceId: selected.id, token, slug: selected.slug, namespaceSlug: selected.namespaceSlug, deploymentId: selected.deploymentId, archivePipeline: selected.archivePipeline, ...(selected.mirrorRoot === undefined ? {} : { mirrorRoot: selected.mirrorRoot }) };
   }
 
   async attachMirrorDevice(serviceId: string, deviceId: string, now = new Date(), readerDeviceId?: string): Promise<PublicBackupService> {
@@ -136,9 +142,13 @@ export class BackupIngestService {
     if (expected !== undefined && (!this.input.options.trustClientCertificateHeader || presentedCertificateFingerprint === undefined || !equal(expected, this.fingerprint(presentedCertificateFingerprint)))) throw new BackupServiceError("unauthorized");
     return authenticated;
   }
-  assertSlug(context: BackupContext, slug: string): void { if (context.service.slug !== slug) throw new BackupServiceError("not_found"); }
+  assertSlug(context: BackupContext, slug: string): void {
+    if (!context.service.archivePipeline) throw new BackupServiceError("unauthorized");
+    if (context.service.slug !== slug) throw new BackupServiceError("not_found");
+  }
 
   async createRun(context: BackupContext, slug: string, value: BackupRunCreateInput, now = new Date()) {
+    if (!context.service.archivePipeline) throw new BackupServiceError("unauthorized");
     this.assertSlug(context, slug); const filename = normalizeStorageName(value.filename); const sha256 = value.sha256.toLowerCase();
     if (!/^[a-f0-9]{64}$/.test(sha256) || !/^[a-z][a-z0-9_-]{0,31}$/.test(value.backupType) || !/^[A-Za-z0-9._:-]{8,128}$/.test(value.idempotencyKey)
       || value.sourceVersion.length < 1 || value.sourceVersion.length > 200 || /[\r\n]/.test(value.sourceVersion) || !Number.isSafeInteger(value.expectedSize) || value.expectedSize < 1 || value.expectedSize > context.service.maxBackupBytes
@@ -155,6 +165,9 @@ export class BackupIngestService {
   async inspectRun(context: BackupContext, slug: string, runId: string) { this.assertSlug(context, slug); return publicRun(await this.requiredRun(context.service.id, runId)); }
   async uploadOffset(context: BackupContext, slug: string, runId: string): Promise<number> { this.assertSlug(context, slug); return (await this.requiredRun(context.service.id, runId)).receivedSize; }
   async append(context: BackupContext, slug: string, runId: string, offset: number, length: number, source: Readable, now = new Date()): Promise<number> {
+    return this.withRunLock(runId, () => this.appendLocked(context, slug, runId, offset, length, source, now));
+  }
+  private async appendLocked(context: BackupContext, slug: string, runId: string, offset: number, length: number, source: Readable, now: Date): Promise<number> {
     this.assertSlug(context, slug); if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(length) || length < 1 || length > this.input.options.uploadChunkMaxBytes) throw new BackupServiceError("invalid");
     let claimed: BackupRunRecord; try { claimed = await this.input.repository.claimAppend(context.service.id, runId, offset, length, now); } catch (error) { if (error instanceof Error && /offset|writable/i.test(error.message)) throw new BackupServiceError("conflict"); throw error; }
     try {
@@ -162,11 +175,20 @@ export class BackupIngestService {
       if (written !== length) throw new Error("Backup chunk length differs from Content-Length"); const updated = await this.input.repository.finishAppend(context.service.id, runId, offset + written, new Date());
       await this.audit("backup.run.appended", runId, { serviceId: context.service.id, offset, length }, context.service.id); return updated.receivedSize;
     } catch (error) {
-      if (offset === 0) await this.input.storage.delete(claimed.tempPath).catch(() => undefined); else await this.input.storage.truncate(claimed.tempPath, offset).catch(() => undefined);
+      // A lost database acknowledgement must not undo an already accepted chunk.
+      // If the database is unavailable, retain bytes until its offset is known.
+      const current = await this.input.repository.getRun(context.service.id, runId).catch(() => undefined);
+      if (current === undefined) throw error;
+      if (current.receivedSize === offset + length && current.state !== "appending") return current.receivedSize;
+      if (current.receivedSize === 0) await this.input.storage.delete(claimed.tempPath).catch(() => undefined);
+      else await this.input.storage.truncate(claimed.tempPath, current.receivedSize).catch(() => undefined);
       await this.input.repository.releaseAppend(context.service.id, runId, "append_failed", false, new Date()).catch(() => undefined); throw error;
     }
   }
   async complete(context: BackupContext, slug: string, runId: string, now = new Date()) {
+    return this.withRunLock(runId, () => this.completeLocked(context, slug, runId, now));
+  }
+  private async completeLocked(context: BackupContext, slug: string, runId: string, now: Date) {
     this.assertSlug(context, slug); let selected: BackupRunRecord;
     try { selected = await this.input.repository.claimComplete(context.service.id, runId, now); } catch (error) { if (error instanceof Error && /incomplete/i.test(error.message)) throw new BackupServiceError("conflict"); throw error; }
     if (selected.state === "complete") {
@@ -182,7 +204,15 @@ export class BackupIngestService {
       const completed = await this.input.repository.completeRun(context.service.id, runId, receipt, committedAt);
       await this.publishCatalog(completed).catch(() => undefined);
       await this.audit("backup.run.completed", runId, { serviceId: context.service.id, sizeBytes: digest.bytes, sha256: digest.sha256 }, context.service.id); return publicRun(completed);
-    } catch (error) { if (error instanceof BackupServiceError) throw error; if (error instanceof Error && /checksum|size differs/i.test(error.message)) throw new BackupServiceError("invalid"); await this.input.repository.failRun(context.service.id, runId, "completion_failed", new Date()).catch(() => undefined); throw error; }
+    } catch (error) {
+      if (error instanceof BackupServiceError) throw error;
+      if (error instanceof Error && /checksum|size differs/i.test(error.message)) throw new BackupServiceError("invalid");
+      const recorded = await this.input.repository.getRun(context.service.id, runId).catch(() => undefined);
+      if (recorded?.state === "complete") return publicRun(recorded);
+      // Keep the committed object: a retry verifies finalPath before issuing its receipt.
+      await this.input.repository.releaseCompletion?.(context.service.id, runId, new Date()).catch(() => undefined);
+      throw error;
+    }
   }
 
   async listRunsForOwner(serviceId: string, offset = 0, limit = 100) { validatePage(offset, limit); await this.requiredService(serviceId); return (await this.input.repository.listRuns(serviceId, offset, limit)).map(publicRun); }
@@ -192,13 +222,16 @@ export class BackupIngestService {
     return run;
   }
   async cancelRunForOwner(runId: string, now = new Date()): Promise<void> {
+    return this.withRunLock(runId, () => this.cancelRunLocked(runId, now));
+  }
+  private async cancelRunLocked(runId: string, now: Date): Promise<void> {
     const run = await this.getRunForOwner(runId);
     if (!["pending", "uploading", "appending"].includes(run.state)) throw new BackupServiceError("conflict");
     await this.input.repository.failRun(run.serviceId, run.id, "cancelled_by_owner", now);
     await this.input.storage.delete(run.tempPath).catch(() => undefined);
     await this.audit("backup.run.cancelled", run.id, { serviceId: run.serviceId, receivedSize: run.receivedSize });
   }
-  async retentionPreview(serviceId: string, limit = 500) { const selected = await this.requiredService(serviceId); const runs = await this.input.repository.listRuns(serviceId, 0, Math.min(500, limit)); return retentionCandidates(runs, selected.retention).map((item) => item.id); }
+  async retentionPreview(serviceId: string, limit = 500) { validatePage(0, limit); const selected = await this.requiredService(serviceId); return (await this.retentionFor(selected, limit)).map(item => item.id); }
   async reconcileCatalog(limitPerService = 1000): Promise<{ readonly scanned: number; readonly published: number; readonly failed: number }> {
     if (!Number.isSafeInteger(limitPerService) || limitPerService < 1 || limitPerService > 10_000) throw new BackupServiceError("invalid");
     if (this.input.catalog === undefined) return { scanned: 0, published: 0, failed: 0 };
@@ -206,7 +239,7 @@ export class BackupIngestService {
     for (let serviceOffset = 0; ; serviceOffset += 100) {
       const services = await this.input.repository.listServices(serviceOffset, 100);
       for (const selected of services) {
-        const runs = await this.input.repository.listRuns(selected.id, 0, limitPerService);
+        const runs = this.input.repository.listMissingCatalogRuns === undefined ? await this.input.repository.listRuns(selected.id, 0, limitPerService) : await this.input.repository.listMissingCatalogRuns(selected.id, limitPerService);
         for (const run of runs) {
           if (run.state !== "complete") continue;
           scanned += 1;
@@ -224,8 +257,7 @@ export class BackupIngestService {
     for (let serviceOffset = 0; ; serviceOffset += 100) {
       const services = await this.input.repository.listServices(serviceOffset, 100);
       for (const selected of services) {
-        const runs = await this.input.repository.listRuns(selected.id, 0, 500);
-        for (const run of retentionCandidates(runs, selected.retention)) {
+        for (const run of await this.retentionFor(selected, maxPurges - candidates)) {
           if (candidates >= maxPurges) return { candidates, purged, failed };
           candidates += 1;
           try {
@@ -254,11 +286,29 @@ export class BackupIngestService {
   }
 
   async requiredService(id: string): Promise<BackupServiceRecord> { const value = await this.input.repository.getService(id); if (value === undefined) throw new BackupServiceError("not_found"); return value; }
+  private async retentionFor(service: BackupServiceRecord, limit: number): Promise<readonly BackupRunRecord[]> {
+    if (limit <= 0) return [];
+    if (this.input.repository.listRetentionCandidates !== undefined) return this.input.repository.listRetentionCandidates(service.id, service.retention, limit);
+    const all: BackupRunRecord[] = [];
+    for (let offset = 0; ; offset += 500) {
+      const page = await this.input.repository.listRuns(service.id, offset, 500); all.push(...page);
+      if (page.length < 500) return retentionCandidates(all, service.retention).slice(0, limit);
+    }
+  }
+  private async withRunLock<T>(id: string, action: () => Promise<T>): Promise<T> {
+    if (this.input.repository.withRunLock !== undefined) return this.input.repository.withRunLock(id, action);
+    const previous = this.#runLocks.get(id) ?? Promise.resolve();
+    const current = previous.catch(() => undefined).then(action); this.#runLocks.set(id, current);
+    try { return await current; } finally { if (this.#runLocks.get(id) === current) this.#runLocks.delete(id); }
+  }
   async requiredRun(serviceId: string, id: string): Promise<BackupRunRecord> { const value = await this.input.repository.getRun(serviceId, id); if (value === undefined) throw new BackupServiceError("not_found"); return value; }
   async publicService(value: BackupServiceRecord, now: Date): Promise<PublicBackupService> { const [usage, lastRestoreTest] = await Promise.all([this.input.repository.usage(value.id, startOfUtcDay(now)), this.input.repository.latestRestoreTest(value.id)]); const fresh = usage.lastCompletedAt !== undefined && now.getTime() - usage.lastCompletedAt.getTime() <= value.freshnessSlaMs; const { tokenHash, previousTokenHash, ...safe } = value; void tokenHash; void previousTokenHash; return { ...safe, usage, ...(lastRestoreTest === undefined ? {} : { lastRestoreTest }), fresh }; }
   validatePolicy(value: BackupServiceRecord): void { if (value.name.length < 1 || value.name.length > 100 || !Number.isSafeInteger(value.maxBackupBytes) || value.maxBackupBytes < 1 || value.maxBackupBytes > this.input.options.defaults.maxBackupBytes || !Number.isSafeInteger(value.dailyQuotaBytes) || value.dailyQuotaBytes < value.maxBackupBytes || !Number.isSafeInteger(value.storedQuotaBytes) || value.storedQuotaBytes < value.maxBackupBytes || !Number.isSafeInteger(value.maxConcurrentRuns) || value.maxConcurrentRuns < 1 || value.maxConcurrentRuns > 32 || !Number.isSafeInteger(value.freshnessSlaMs) || value.freshnessSlaMs < 60_000 || Object.values(value.retention).some((item) => !Number.isSafeInteger(item) || item < 0)) throw new BackupServiceError("invalid"); }
   fingerprint(value: string): string { const normalized = value.trim().toLowerCase().replace(/^sha256:/, ""); if (!/^[a-f0-9]{64}$/.test(normalized)) throw new BackupServiceError("invalid"); return normalized; }
-  async ensureParents(filePath: string): Promise<void> { const parts = filePath.split("/").slice(0, -1); let current = ""; for (const part of parts) { current = joinStoragePath(current, part); if (!(await this.input.storage.exists(current))) await this.input.storage.mkdir(current); } }
+  async ensureParents(filePath: string): Promise<void> {
+    const parts = filePath.split("/").slice(0, -1); let current = "";
+    for (const part of parts) { current = joinStoragePath(current, part); await ensureStorageDirectory(this.input.storage, current); }
+  }
   async digest(path: string): Promise<{ readonly bytes: number; readonly sha256: string }> { const hash = createHash("sha256"); let bytes = 0; for await (const raw of await this.input.storage.openRead(path)) { const chunk = Buffer.from(raw as Uint8Array); bytes += chunk.length; hash.update(chunk); } return { bytes, sha256: hash.digest("hex") }; }
   async publishCatalog(run: BackupRunRecord): Promise<void> {
     if (run.state !== "complete" || run.receipt === undefined || !(await this.input.storage.exists(run.finalPath))) return;

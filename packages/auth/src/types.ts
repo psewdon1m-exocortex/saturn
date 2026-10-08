@@ -23,7 +23,7 @@ export interface OwnerPreferences {
   readonly sidebarMode: "fixed" | "auto-hide";
   readonly navigationOrder: readonly ("dashboard" | "files" | "inbox" | "shared" | "synchronization" | "trash" | "settings")[];
   readonly dashboardOrder: readonly ("cpu" | "ram" | "disk" | "uptime" | "storage" | "drop" | "reachability" | "tasks")[];
-  readonly settingsOrder: readonly ("appearance" | "security" | "backup" | "gryphon" | "updates" | "logs")[];
+  readonly settingsOrder: readonly ("appearance" | "security" | "storage" | "backup" | "gryphon" | "updates" | "logs")[];
   readonly trashRetentionDays: number;
   readonly uploadBufferGiB: number;
   readonly maximumUploadFileGiB: number;

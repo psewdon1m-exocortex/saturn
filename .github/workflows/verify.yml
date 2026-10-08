@@ -2,6 +2,13 @@ name: verify
 
 on:
   workflow_call:
+    inputs:
+      volt-ref:
+        type: string
+        default: ''
+      mastermind-ref:
+        type: string
+        default: ''
   pull_request:
   push:
     branches:
@@ -13,6 +20,38 @@ permissions:
   contents: read
 
 jobs:
+  consumers:
+    name: Qualified Settings consumers
+    if: ${{ inputs.volt-ref != '' && inputs.mastermind-ref != '' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          path: saturn
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: psewdon1m-exocortex/volt
+          ref: ${{ inputs.volt-ref }}
+          path: volt
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: psewdon1m-exocortex/mastermind
+          ref: ${{ inputs.mastermind-ref }}
+          path: mastermind
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24'
+      - working-directory: saturn
+        run: corepack enable && corepack prepare pnpm@11.24.0 --activate && pnpm install --frozen-lockfile
+      - name: Test explicit consumer revisions
+        working-directory: saturn
+        env:
+          EXOCORTEX_CONSUMER_SOURCE_ROOT: ${{ github.workspace }}
+        run: |
+          git -C ../volt rev-parse HEAD
+          git -C ../mastermind rev-parse HEAD
+          pnpm --filter @saturn/web test:consumers
   verify:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -46,9 +85,44 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+  postgres:
+    name: PostgreSQL integration
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:18.1-alpine
+        env:
+          POSTGRES_USER: vault
+          POSTGRES_PASSWORD: disposable-ci-fixture
+          POSTGRES_DB: saturn_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U vault -d saturn_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgresql://vault:disposable-ci-fixture@127.0.0.1:5432/saturn_test
+      PIPELINE_TEST_DATABASE_URL: postgresql://vault:disposable-ci-fixture@127.0.0.1:5432/saturn_test
+      STORAGE_SETTINGS_TEST_DATABASE_URL: postgresql://vault:disposable-ci-fixture@127.0.0.1:5432/saturn_test
+      PLUTO_TEST_DATABASE_URL: postgresql://vault:disposable-ci-fixture@127.0.0.1:5432/saturn_test
+      DEVICE_TEST_DATABASE_URL: postgresql://vault:disposable-ci-fixture@127.0.0.1:5432/saturn_test
+      POLICY_TEST_DATABASE_URL: postgresql://vault:disposable-ci-fixture@127.0.0.1:5432/saturn_test
+      SATURN_CATALOG_INTEGRATION: '1'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24'
+      - run: corepack enable && corepack prepare pnpm@11.24.0 --activate
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm -r --filter @saturn/api... --filter @saturn/protection... build
+      - run: pnpm --filter @saturn/database migrate
+      - run: pnpm -r --filter @saturn/database --filter @saturn/protection --filter @saturn/api test
+
   pre-push-gate:
     name: Pre-push gate
-    needs: verify
+    needs: [verify, postgres]
     if: ${{ always() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -61,7 +135,7 @@ jobs:
           GATE_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: >-
           python3 scripts/pre-push-gate.py
-          --upstream-result "${{ needs.verify.result }}"
+          --upstream-result "${{ needs.verify.result == 'success' && needs.postgres.result == 'success' && 'success' || 'failure' }}"
           --report .pre-push-gate-report.json
       - name: Preserve gate report
         if: ${{ always() }}

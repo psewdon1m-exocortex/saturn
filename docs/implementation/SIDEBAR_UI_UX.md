@@ -12,7 +12,9 @@ Normative inputs:
   composition and geometry.
 
 The Saturn-specific template is authoritative for the rail geometry and brand.
-Its transparent purple planet asset is bundled into the Web production build.
+Its transparent beige watercolor planet asset is bundled into the Web
+production build; the opaque black-background variant is reserved for the
+login composition.
 
 ## Entry state
 

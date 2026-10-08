@@ -61,7 +61,7 @@ export class OwnerAuthService {
     readonly options: OwnerAuthOptions;
     readonly audit?: AuditSink;
   }) {
-    if (input.ownerAccessKey.length < 32 || /[\r\n]/.test(input.ownerAccessKey)) throw new Error("Owner access key is invalid");
+    if (input.ownerAccessKey.length === 0) throw new Error("Owner access key is not configured");
     if (input.pepper.length < 32 || /[\r\n]/.test(input.pepper)) throw new Error("Authentication pepper is invalid");
     this.#repository = input.repository;
     this.#ownerAccessKey = input.ownerAccessKey;
@@ -221,9 +221,7 @@ export class OwnerAuthService {
   }): Promise<NewOwnerSession & { readonly revokedSessions: number }> {
     if (!await this.verifyBootstrap(input.currentAccessKey)) throw new OwnerAuthenticationError("invalid_credentials");
     if (!secureEqual(input.newAccessKey, input.confirmation)
-      || input.newAccessKey.length < 32
-      || input.newAccessKey.length > 512
-      || /[\r\n]/.test(input.newAccessKey)
+      || input.newAccessKey.length === 0
       || secureEqual(input.currentAccessKey, input.newAccessKey)) {
       throw new OwnerAuthenticationError("invalid_credentials");
     }

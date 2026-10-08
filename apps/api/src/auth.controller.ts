@@ -13,11 +13,11 @@ import {
 } from "./owner-token.guard.js";
 import { APP_CONFIG, AUTH_SERVICE } from "./tokens.js";
 
-const accessKeySchema = z.object({ accessKey: z.string().min(1).max(512) }).strict();
+const accessKeySchema = z.object({ accessKey: z.string().min(1) }).strict();
 const accessKeyChangeSchema = z.object({
-  currentAccessKey: z.string().min(1).max(512),
-  newAccessKey: z.string().min(32).max(512),
-  confirmation: z.string().min(32).max(512),
+  currentAccessKey: z.string().min(1),
+  newAccessKey: z.string().min(1),
+  confirmation: z.string().min(1),
 }).strict();
 
 const appearanceSchema = z.object({
@@ -29,9 +29,15 @@ const appearanceSchema = z.object({
   dashboardOrder: z.array(z.enum(["cpu", "ram", "disk", "uptime", "storage", "drop", "reachability", "tasks"]))
     .length(8)
     .refine((value) => new Set(value).size === value.length, "Dashboard cards must be unique"),
-  settingsOrder: z.array(z.enum(["appearance", "security", "backup", "gryphon", "updates", "logs"]))
-    .length(6)
-    .refine((value) => new Set(value).size === value.length, "Settings cards must be unique"),
+  settingsOrder: z.array(z.enum(["appearance", "security", "storage", "backup", "gryphon", "updates", "logs"]))
+    .min(6).max(7)
+    .refine((value) => new Set(value).size === value.length, "Settings cards must be unique")
+    .refine((value) => value.length === 7 || !value.includes("storage"), "Settings cards must include every section")
+    .transform((value) => {
+      const order = [...value];
+      if (!order.includes("storage")) order.splice(order.indexOf("security") + 1, 0, "storage");
+      return order;
+    }),
   trashRetentionDays: z.number().int().min(1).max(365).optional(),
   uploadBufferGiB: z.number().int().min(1).max(8_192).optional(),
   maximumUploadFileGiB: z.number().int().min(1).max(4_096).optional(),

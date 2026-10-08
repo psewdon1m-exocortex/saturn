@@ -10,8 +10,9 @@ import type {
 } from "./types.js";
 
 interface ServiceRow {
+  archive_pipeline: boolean;
   reader_device_id: string | null;
-  id: string; slug: string; namespace_slug: string; deployment_id: string; mirror_root: "volt" | "mastermind" | null; mirror_device_id: string | null; name: string; token_hash: string; previous_token_hash: string | null;
+  id: string; slug: string; namespace_slug: string; deployment_id: string; pipeline_kind: BackupServiceRecord["pipelineKind"]; pipeline_group_id: string | null; mirror_root: "volt" | "mastermind" | null; mirror_device_id: string | null; name: string; token_hash: string; previous_token_hash: string | null;
   previous_token_expires_at: Date | null; state: BackupServiceRecord["state"]; require_encryption: boolean;
   mtls_cert_fingerprint: string | null; max_backup_bytes: string; daily_quota_bytes: string; stored_quota_bytes: string;
   max_concurrent_runs: number; freshness_sla_ms: string; retention_daily: number; retention_weekly: number;
@@ -30,7 +31,8 @@ interface RestoreRow {
 
 function service(row: ServiceRow): BackupServiceRecord {
   return {
-    id: row.id, slug: row.slug, namespaceSlug: row.namespace_slug, deploymentId: row.deployment_id,
+    id: row.id, slug: row.slug, namespaceSlug: row.namespace_slug, deploymentId: row.deployment_id, pipelineKind: row.pipeline_kind, archivePipeline: row.archive_pipeline,
+    ...(row.pipeline_group_id === null ? {} : { pipelineGroupId: row.pipeline_group_id }),
     ...(row.mirror_root === null ? {} : { mirrorRoot: row.mirror_root }), ...(row.mirror_device_id === null ? {} : { mirrorDeviceId: row.mirror_device_id }),
     ...(row.reader_device_id === null ? {} : { readerDeviceId: row.reader_device_id }),
     name: row.name, tokenHash: row.token_hash,
@@ -61,14 +63,43 @@ function restore(row: RestoreRow): BackupRestoreTestRecord {
 }
 
 export class PostgresBackupRepository implements BackupRepository {
+  withRunLock<T>(runId: string, action: () => Promise<T>): Promise<T> {
+    return this.database.withAdvisoryLock(`saturn-backup-run:${runId}`, action);
+  }
   constructor(private readonly database: Database) {}
+
+  listRetentionCandidates(serviceId: string, policy: BackupServiceRecord['retention'], limit: number): Promise<readonly BackupRunRecord[]> {
+    return this.database.withSql(async sql => (await sql<RunRow[]>`
+      WITH complete AS (
+        SELECT *, committed_at AT TIME ZONE 'UTC' AS utc FROM service_backup_runs
+        WHERE service_id=${serviceId} AND state='complete' AND committed_at IS NOT NULL
+      ), ranked AS (
+        SELECT *,
+          row_number() OVER (PARTITION BY date_trunc('day', utc) ORDER BY committed_at DESC,id DESC) AS dr,
+          dense_rank() OVER (ORDER BY date_trunc('day', utc) DESC) AS dk,
+          row_number() OVER (PARTITION BY date_trunc('week', utc) ORDER BY committed_at DESC,id DESC) AS wr,
+          dense_rank() OVER (ORDER BY date_trunc('week', utc) DESC) AS wk,
+          row_number() OVER (PARTITION BY date_trunc('month', utc) ORDER BY committed_at DESC,id DESC) AS mr,
+          dense_rank() OVER (ORDER BY date_trunc('month', utc) DESC) AS mk,
+          row_number() OVER (PARTITION BY date_trunc('year', utc) ORDER BY committed_at DESC,id DESC) AS yr,
+          dense_rank() OVER (ORDER BY date_trunc('year', utc) DESC) AS yk
+        FROM complete
+      )
+      SELECT * FROM ranked WHERE NOT ((dr=1 AND dk<=${policy.daily}) OR (wr=1 AND wk<=${policy.weekly}) OR (mr=1 AND mk<=${policy.monthly}) OR (yr=1 AND yk<=${policy.yearly}))
+      ORDER BY committed_at,id LIMIT ${limit}
+    `).map(run));
+  }
+
+  listMissingCatalogRuns(serviceId: string, limit: number): Promise<readonly BackupRunRecord[]> {
+    return this.database.withSql(async sql => (await sql<RunRow[]>`SELECT b.* FROM service_backup_runs b LEFT JOIN resources r ON r.storage_path=b.final_path AND r.status='active' WHERE b.service_id=${serviceId} AND b.state='complete' AND r.id IS NULL ORDER BY b.committed_at,b.id LIMIT ${limit}`).map(run));
+  }
 
   createService(value: BackupServiceRecord): Promise<void> {
     return this.database.withSql(async (sql) => { await sql`
-      INSERT INTO backup_services (id, slug, namespace_slug, deployment_id, mirror_root, name, token_hash, state, require_encryption, mtls_cert_fingerprint,
+      INSERT INTO backup_services (id, slug, namespace_slug, deployment_id, pipeline_kind, archive_pipeline, pipeline_group_id, mirror_root, name, token_hash, state, require_encryption, mtls_cert_fingerprint,
         max_backup_bytes, daily_quota_bytes, stored_quota_bytes, max_concurrent_runs, freshness_sla_ms,
         retention_daily, retention_weekly, retention_monthly, retention_yearly, created_at, updated_at)
-      VALUES (${value.id}, ${value.slug}, ${value.namespaceSlug}, ${value.deploymentId}, ${value.mirrorRoot ?? null}, ${value.name}, ${value.tokenHash}, ${value.state}, ${value.requireEncryption}, ${value.mtlsCertFingerprint ?? null},
+      VALUES (${value.id}, ${value.slug}, ${value.namespaceSlug}, ${value.deploymentId}, ${value.pipelineKind}, ${value.archivePipeline}, ${value.pipelineGroupId ?? null}, ${value.mirrorRoot ?? null}, ${value.name}, ${value.tokenHash}, ${value.state}, ${value.requireEncryption}, ${value.mtlsCertFingerprint ?? null},
         ${value.maxBackupBytes}, ${value.dailyQuotaBytes}, ${value.storedQuotaBytes}, ${value.maxConcurrentRuns}, ${value.freshnessSlaMs},
         ${value.retention.daily}, ${value.retention.weekly}, ${value.retention.monthly}, ${value.retention.yearly}, ${value.createdAt}, ${value.updatedAt})
     `; });
@@ -134,6 +165,14 @@ export class PostgresBackupRepository implements BackupRepository {
   getRun(serviceId: string, runId: string): Promise<BackupRunRecord | undefined> { return this.database.withSql(async (sql) => { const rows = await sql<RunRow[]>`SELECT * FROM service_backup_runs WHERE id = ${runId} AND service_id = ${serviceId} LIMIT 1`; return rows[0] === undefined ? undefined : run(rows[0]); }); }
   getRunForOwner(runId: string): Promise<BackupRunRecord | undefined> { return this.database.withSql(async (sql) => { const rows = await sql<RunRow[]>`SELECT * FROM service_backup_runs WHERE id = ${runId} LIMIT 1`; return rows[0] === undefined ? undefined : run(rows[0]); }); }
   listRuns(serviceId: string, offset: number, limit: number): Promise<readonly BackupRunRecord[]> { return this.database.withSql(async (sql) => (await sql<RunRow[]>`SELECT * FROM service_backup_runs WHERE service_id = ${serviceId} ORDER BY created_at DESC, id DESC OFFSET ${offset} LIMIT ${limit}`).map(run)); }
+  listCompletedRuns(serviceId: string, offset: number, limit: number): Promise<readonly BackupRunRecord[]> {
+    return this.database.withSql(async sql => (await sql<RunRow[]>`SELECT * FROM service_backup_runs WHERE service_id = ${serviceId}
+      AND state = 'complete' AND committed_at IS NOT NULL ORDER BY committed_at DESC, id DESC OFFSET ${offset} LIMIT ${limit}`).map(run));
+  }
+  releaseCompletion(serviceId: string, runId: string, now: Date): Promise<void> {
+    return this.database.withSql(async sql => { await sql`UPDATE service_backup_runs SET state = 'uploading',
+      failure_code = 'completion_retry', updated_at = ${now} WHERE id = ${runId} AND service_id = ${serviceId} AND state = 'verifying'`; });
+  }
   claimAppend(serviceId: string, runId: string, offset: number, length: number, now: Date): Promise<BackupRunRecord> { return this.database.transaction(async (sql) => {
     const rows = await sql<RunRow[]>`SELECT * FROM service_backup_runs WHERE id = ${runId} AND service_id = ${serviceId} FOR UPDATE`; const row = rows[0];
     if (row === undefined) throw new Error("Backup run not found"); if (!['pending','uploading'].includes(row.state)) throw new Error("Backup run is not writable");

@@ -187,7 +187,7 @@ export class OperatorController {
           AND expires_at > now()
           AND NOT EXISTS (
             SELECT 1 FROM drop_uploads
-            WHERE drop_uploads.upload_id = upload_sessions.id
+            WHERE (drop_uploads.upload_id = upload_sessions.id OR upload_sessions.idempotency_key = 'drop-drain:' || drop_uploads.id::text)
               AND drop_uploads.state IN ('reserved', 'uploading', 'buffered', 'transferring', 'verifying')
           )
         ORDER BY
@@ -199,22 +199,23 @@ export class OperatorController {
             ELSE 4
           END,
           updated_at DESC
-        LIMIT 32
       `),
       this.#database.withSql((sql) => sql<DropUploadTaskRow[]>`
-        SELECT id::text, filename, expected_size::text, received_size::text, state, created_at, updated_at
+        SELECT drop_uploads.id::text, drop_uploads.filename, drop_uploads.expected_size::text,
+          CASE WHEN drop_uploads.state IN ('transferring', 'verifying') THEN COALESCE(core.received_size, 0) ELSE drop_uploads.received_size END::text AS received_size,
+          drop_uploads.state, drop_uploads.created_at, drop_uploads.updated_at
         FROM drop_uploads
-        WHERE state IN ('reserved', 'uploading', 'buffered', 'transferring', 'verifying')
+        LEFT JOIN upload_sessions core ON core.idempotency_key = 'drop-drain:' || drop_uploads.id::text
+        WHERE drop_uploads.state IN ('reserved', 'uploading', 'buffered', 'transferring', 'verifying')
         ORDER BY
-          CASE state
+          CASE drop_uploads.state
             WHEN 'transferring' THEN 0
             WHEN 'verifying' THEN 1
             WHEN 'uploading' THEN 2
             WHEN 'buffered' THEN 3
             ELSE 4
           END,
-          updated_at DESC
-        LIMIT 32
+          drop_uploads.updated_at DESC
       `),
       this.#database.withSql((sql) => sql<BackupUploadTaskRow[]>`
         SELECT id::text, filename, expected_size::text, received_size::text, state, created_at, updated_at
@@ -228,7 +229,6 @@ export class OperatorController {
             ELSE 2
           END,
           updated_at DESC
-        LIMIT 32
       `),
       this.#database.withSql((sql) => sql<StorageUsageRow[]>`
         SELECT
@@ -265,7 +265,7 @@ export class OperatorController {
       id: `drop:${row.id}`,
       filename: row.filename,
       expectedBytes: databaseInteger(row.expected_size),
-      receivedBytes: ["buffered", "transferring", "verifying"].includes(row.state)
+      receivedBytes: row.state === "buffered"
         ? databaseInteger(row.expected_size)
         : databaseInteger(row.received_size),
       status: row.state === "reserved" || row.state === "buffered"

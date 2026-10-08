@@ -48,6 +48,13 @@ describe("migration manifest", () => {
       "0037_service_backup_policy",
       "0038_neptune_resource_reader",
       "0039_neptune_disconnect_receipt",
+      "0040_storage_settings_section",
+      "0041_synchronization_pipelines",
+      "0042_pipeline_capabilities",
+      "0043_storage_catalog_analysis",
+      "0044_pluto_outdoor",
+      "0045_share_thumbnail_access",
+      "0046_transfer_safety",
     ]);
     for (const pair of pairs) {
       await expect(fs.readFile(pair.up, "utf8")).resolves.toMatch(/\S/);

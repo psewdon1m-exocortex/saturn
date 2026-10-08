@@ -1,5 +1,11 @@
 # Saturn
 
+## Pluto outdoor files
+
+Synchronization includes the **Pluto · Linux files and folders** type and an **Outdoor backups · Pluto** card. Creation requires only a connection name. A 15-minute setup code enrolls the standalone Pluto TUI into `backups/pluto/<connection name>`. Sources, interval and the separate copying switch are owned by Pluto. Neptune fleet displays Pluto separately without a Neptune runtime dependency.
+
+Pluto uploads ordinary files, preserves source hierarchy and retains at most ten active versions per file including the current file. Its capability is isolated to its assigned folder and cannot move or delete data. Confirmed Revoke invalidates access while preserving stored files and retained versions. Migration `0044_pluto_outdoor` adds the constrained device kind and observed status. The implementation contract and installation workflow are in the workspace `pluto/README.md` and the approved `.docs/decisions/2026-10-05-pluto-outdoor.md` decision.
+
 > Documentation authority: the workspace-wide [Part 00](https://github.com/psewdon1m-exocortex/general/blob/main/PART_00_SYSTEM_UNIFICATION_SPECIFICATION.md)
 > and its applicable Parts are normative. This repository documents
 > Saturn-specific details only; a conflict is corrected here and a material
@@ -43,6 +49,17 @@ CLI-сценарием. После подключения переключате
 автоматического резервного копирования задаются в Settings → Backup
 соответствующего сервиса; ручной запуск удалённого backup не предлагается.
 Synchronization остаётся местом для подключения и наблюдения за агентами.
+Управление во вкладке Synchronization доступно по действующей сессии владельца
+без повторного ввода Access Key; изменяющие запросы сохраняют CSRF-защиту.
+Экран содержит ровно пять рабочих карточек: создание pipeline, сводку Neptune
+fleet, host recovery-службы, service/Volt/Mastermind pipeline и Windows sync.
+Host recovery представлен четырьмя полностью независимыми pipeline для Gryphon,
+Wyvern, Updater и Neptune. На сервере создаются только фактически нужные
+подключения; каждое имеет собственные setup code и revoke. Volt связывает архив
+с зеркалом `personal.volt`, а Mastermind — архив
+с полным файловым зеркалом `/mastermind`: в Storage видны отдельные файлы и
+каталоги, а не `vault.zip`. Windows получает постоянный scoped credential только
+после одноразового обмена setup code внутри Neptune и сообщает heartbeat.
 Перед обновлением Neptune до версии с `policy_protocol: 1` установите
 совместимый Saturn: новый агент передаёт в него запросы политики.
 
@@ -177,9 +194,14 @@ fail-closed default server.
 The bootstrap `STORAGE_*` values remain the first-start fallback. API and worker
 also require the same protected writable `STORAGE_RUNTIME_CONFIG_DIR` (default
 `data/storage-runtime`; production `/var/lib/vault/storage-runtime`). An owner
-may validate and select another SFTP target in Settings → Security. This rebuilds
+may validate and select another SFTP target in Settings → Storage connection. This rebuilds
 the active catalog for that independent target and migrates no file bytes. See
 [runtime storage switching](docs/implementation/RUNTIME_STORAGE_SWITCHING.md).
+
+The same card provides Analyze storage and a saved differences report. Explicit
+Synchronize catalog imports unseen files and reconciles metadata with the active
+storage while preserving file bytes and existing resource IDs. See
+[storage catalog analysis](docs/implementation/STORAGE_CATALOG_ANALYSIS.md).
 
 ## Gryphon integration
 
@@ -208,3 +230,7 @@ host. No update ZIP is retained on the application host.
 Release builds pin the published Updater 0.5.0 installer by the SHA-256 in
 `.release/updater.sha256` and verify it before extraction. This digest was
 verified against the production-signed Updater manifest and existing trust key.
+
+## Enrollment update — 2026-10-05
+
+Host recovery names derive from component + Server ID. Volt/Mastermind registration selects archive, mirror or both. Windows Connection name creates its dedicated server folder and is returned to Neptune; server-side DAV authorization protects its root and excludes other connections. Migration 0042 adds these capabilities; legacy unbound Windows clients require isolated setup. See the accepted [central decision](../.docs/decisions/2026-10-05-synchronization-enrollment.md).

@@ -6,9 +6,9 @@ import { createRequire } from "node:module";
 
 const vaultRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const [command, archiveArgument, confirmation] = process.argv.slice(2);
-const validCommands = new Set(["backup", "validate", "restore-clean", "restore-replace", "restore-rollback"]);
+const validCommands = new Set(["backup", "validate", "restore-clean", "restore-replace", "restore-rollback", "rollback-interrupted"]);
 if (command === undefined || !validCommands.has(command)) {
-  throw new Error("Usage: recovery-cli.mjs backup | validate <archive> | restore-clean <archive> | restore-replace <archive> --confirm-replace");
+  throw new Error("Usage: recovery-cli.mjs backup | validate <archive> | restore-clean <archive> | restore-replace <archive> --confirm-replace | restore-rollback <archive> --confirm-replace | rollback-interrupted");
 }
 
 const runtimeRoot = process.env.VAULT_RUNTIME_ROOT;
@@ -49,30 +49,40 @@ const database = new databaseModule.Database(config.databaseUrl, { max: 3 });
 // Recovery queries must not acquire a shared lock from inside the exclusive
 // maintenance operation. Use a separate connection solely for the barrier.
 const barrierDatabase = new databaseModule.Database(config.databaseUrl, { max: 1, maintenanceBarrier: true });
+if (command === "rollback-interrupted") {
+  try {
+    const toolchain = new recovery.PostgresCommandToolchain({ databaseUrl: config.databaseUrl, database, maximumDumpBytes: config.recovery.limits.maxMemberBytes });
+    await barrierDatabase.withExclusiveMaintenance(() => toolchain.rollbackReplacement());
+    process.stdout.write(`${JSON.stringify({ state: "rolled_back", originalDatabasePreserved: true })}\n`);
+  } finally { await database.close(); await barrierDatabase.close(); }
+  process.exit(0);
+}
 const storage = new storageModule.RuntimeStorageManager(config.storage, config.storageRuntimeConfigDirectory);
 await storage.initialize();
 try {
   const databaseUrl = new URL(config.databaseUrl);
   const knownSecrets = [
-    await fs.readFile(config.ownerBootstrapTokenFile, "utf8").then((value) => value.trim()),
+    configModule.readOwnerAccessKey(config.ownerBootstrapTokenFile),
     databaseUrl.password ? decodeURIComponent(databaseUrl.password) : "",
     config.storage.passwordFile === undefined
       ? ""
       : await fs.readFile(config.storage.passwordFile, "utf8").then((value) => value.replace(/[\r\n]+$/, "")),
   ].filter((value) => value.length >= 8);
+  const toolchain = new recovery.PostgresCommandToolchain({
+    databaseUrl: config.databaseUrl, database,
+    pgDumpExecutable: config.recovery.pgDumpExecutable,
+    pgRestoreExecutable: config.recovery.pgRestoreExecutable,
+    pgDumpPrefixArgs: config.recovery.pgDumpPrefixArgs,
+    pgRestorePrefixArgs: config.recovery.pgRestorePrefixArgs,
+    ...(config.recovery.pgCommandConnectionArgs.length === 0 ? {} : { commandConnectionArgs: config.recovery.pgCommandConnectionArgs }),
+    maximumDumpBytes: config.recovery.limits.maxMemberBytes,
+    commandTimeoutMs: config.recovery.commandTimeoutMs,
+    dumpIdleTimeoutMs: config.recovery.dumpIdleTimeoutMs,
+  });
   const service = new recovery.SaturnBackupService({
     spoolRoot: config.recovery.spoolDirectory,
     limits: config.recovery.limits,
-    database: new recovery.PostgresCommandToolchain({
-      databaseUrl: config.databaseUrl,
-      database,
-      pgDumpExecutable: config.recovery.pgDumpExecutable,
-      pgRestoreExecutable: config.recovery.pgRestoreExecutable,
-      pgDumpPrefixArgs: config.recovery.pgDumpPrefixArgs,
-      pgRestorePrefixArgs: config.recovery.pgRestorePrefixArgs,
-      ...(config.recovery.pgCommandConnectionArgs.length === 0 ? {} : { commandConnectionArgs: config.recovery.pgCommandConnectionArgs }),
-      maximumDumpBytes: config.recovery.limits.maxMemberBytes,
-    }),
+    database: toolchain,
     metadata: new recovery.DatabaseMetadataExporter(database),
     knownSecrets,
     repository: new recovery.PostgresRecoveryRepository(database),
@@ -87,10 +97,13 @@ try {
   if (command === "backup") {
     await fs.mkdir(config.recovery.archiveDirectory, { recursive: true, mode: 0o700 });
     const localPath = path.join(config.recovery.archiveDirectory, `saturn-${new Date().toISOString().replaceAll(":", "-")}.zip`);
-    const created = await service.createBackup({ ...safeInputs, outputPath: localPath, kind: "manual" });
-    const published = await service.publishToStorage(created);
-    await fs.rm(localPath, { force: true });
-    process.stdout.write(`${JSON.stringify({ state: "complete", backupId: created.manifest.backupId, ...published })}\n`);
+    try {
+      const created = await service.createBackup({ ...safeInputs, outputPath: localPath, kind: "manual" });
+      const published = await service.publishToStorage(created);
+      process.stdout.write(`${JSON.stringify({ state: "complete", backupId: created.manifest.backupId, ...published })}\n`);
+    } finally {
+      await fs.rm(localPath, { force: true });
+    }
   } else {
     if (archiveArgument === undefined) throw new Error(`${command} requires an archive path`);
     if ((command === "restore-replace" || command === "restore-rollback") && confirmation !== "--confirm-replace") {
@@ -99,10 +112,11 @@ try {
     await fs.mkdir(config.recovery.archiveDirectory, { recursive: true, mode: 0o700 });
     const snapshotOutputPath = path.join(config.recovery.archiveDirectory, `pre-restore-${new Date().toISOString().replaceAll(":", "-")}.zip`);
     const mode = command === "restore-clean" ? "clean" : "replace";
+    const participant = await storageModule.createStorageRecoveryParticipant(config, storage);
     const result = await service.restore({
       archivePath: path.resolve(archiveArgument),
       mode,
-      configuration: await storageModule.createStorageRecoveryParticipant(config, storage),
+      configuration: { ...participant, verifyFiles: () => toolchain.verifyStorage(storage) },
       ...(mode === "clean" ? {} : { snapshotOutputPath, snapshotInput: safeInputs }),
     }, () => command === "restore-rollback" ? Promise.resolve() : databaseModule.migrate(config.databaseUrl, safeInputs.migrationsDirectory), action => barrierDatabase.withExclusiveMaintenance(action));
     process.stdout.write(`${JSON.stringify({ state: "complete", ...result })}\n`);

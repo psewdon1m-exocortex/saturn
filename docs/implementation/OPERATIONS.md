@@ -106,6 +106,11 @@ its validated 4500 ms ceiling.
 
 ## Update and rollback
 
+The current migration, interrupted restore and Windows identity cutover
+procedure is [Transfer safety and recovery](TRANSFER_SAFETY_AND_RECOVERY.md).
+Use it alongside the immutable release manifest; the local audit checks do
+not certify an unknown production image/agent/PostgreSQL/storage tuple.
+
 Before every migration, create and validate a Saturn recovery archive and a
 logical PostgreSQL snapshot. Start the candidate API/worker/web processes
 before switching server Nginx. Retain the prior image digests and snapshot until the new release has
@@ -161,10 +166,19 @@ backend configuration.
 
 ## Runtime target change
 
-Use Settings → Security → Advanced security → Storage connection for an
+Use Settings → Storage connection → Configure storage for an
 operator-approved target change. An authenticated owner session, exact host
 fingerprint and a successful connection test are mandatory. A switch rebuilds the active
 catalog from the target and migrates no bytes; it also revokes active shares,
 devices and pending transfers so capabilities cannot cross file sets. API and
 worker must mount the same mode-`0700` `STORAGE_RUNTIME_CONFIG_DIR`. To return,
 select the prior target and submit its credential again.
+
+## Unseen changes on the active storage
+
+Open Settings → Storage connection → Storage catalog → Analyze storage. The worker
+hashes visible files and saves a report without changing storage bytes. Review
+new, changed, absent and blocked entries; confirm Synchronize catalog to apply a
+freshly verified metadata update. If the report becomes stale, analyze again.
+Unknown files remain in place during automatic reconciliation. Full behavior,
+limits and rollback are in [storage catalog analysis](STORAGE_CATALOG_ANALYSIS.md).

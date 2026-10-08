@@ -55,6 +55,7 @@ class MemoryRepository implements ReconciliationRepository {
     const current = this.files[index];
     if (current === undefined) throw new Error("File missing");
     this.files[index] = { ...current, status };
+    return true;
   }
   async listInterruptedOperations() { return this.interrupted; }
   async addIssue(issue: ReconciliationIssue) { this.issues.push(issue); }
@@ -100,9 +101,10 @@ describe("ReconciliationService", () => {
       expect(repository.files.find((item) => item.id === "02")?.status).toBe("missing");
       expect(repository.files.find((item) => item.id === "03")?.status).toBe("error");
       expect(repository.files.find((item) => item.id === "04")?.status).toBe("quarantined");
-      expect(await storage.exists("sync/orphan.bin")).toBe(false);
+      expect(await storage.exists("sync/orphan.bin")).toBe(true);
+      expect(await storage.exists("personal files/orphan.txt")).toBe(true);
       const orphan = repository.issues.find((item) => item.issueType === "orphaned");
-      expect(await storage.exists(String(orphan?.actual.orphanPath))).toBe(true);
+      expect(orphan?.resolution).toBe("awaiting_owner_catalog_analysis");
       expect(audit.at(-1)?.action).toBe("reconciliation.completed");
     } finally {
       await storage.close();

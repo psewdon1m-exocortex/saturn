@@ -30,6 +30,16 @@ afterEach(async () => {
 });
 
 describe("RuntimeStorageManager", () => {
+  it("applies production fsync policy to a legacy profile and rejects a weaker activation",async()=>{
+    const directory=await fs.mkdtemp(path.join(os.tmpdir(),"saturn-storage-strict-"));temporaryDirectories.push(directory);
+    const credential=path.join(directory,"password");await fs.writeFile(credential,"fixture-secret");
+    const base=config(credential),legacy=new RuntimeStorageManager(base,directory,()=>adapter("legacy"));await legacy.initialize();
+    await legacy.activate({profileId:"11111111-1111-4111-8111-111111111111",revision:2,activatedAt:new Date().toISOString(),config:base});await legacy.close();
+    const observed:boolean[]=[];const manager=new RuntimeStorageManager({...base,requireFsync:true},directory,value=>{observed.push(value.requireFsync===true);return adapter("strict");});
+    await manager.initialize();expect(observed.every(Boolean)).toBe(true);expect(manager.current().config.requireFsync).toBe(true);
+    await expect(manager.activate({profileId:"22222222-2222-4222-8222-222222222222",revision:3,activatedAt:new Date().toISOString(),config:base})).rejects.toThrow("fsync");
+    await manager.close();
+  });
   it("persists only a credential path and lets a second process converge on the active profile", async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), "saturn-storage-runtime-"));
     temporaryDirectories.push(directory);

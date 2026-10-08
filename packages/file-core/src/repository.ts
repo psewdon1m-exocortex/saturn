@@ -11,6 +11,8 @@ export interface CreateUploadRecord {
   readonly expectedSha256?: string;
   readonly expiresAt: Date;
   readonly overwriteResourceId?: string;
+  readonly expectedVersionId?: string;
+  readonly requireAbsent?: boolean;
   readonly auditActorType?: string;
   readonly auditActorId?: string;
 }
@@ -56,15 +58,21 @@ export interface FileRepository {
   setSecurityClassification(id: string, classification: SecurityClassification): Promise<Resource>;
   getUpload(id: string): Promise<UploadSession | undefined>;
   getUploadByIdempotencyKey(key: string): Promise<UploadSession | undefined>;
+  listRecoverableUploads?(limit: number): Promise<readonly UploadSession[]>;
+  listAbandonedUploadsForCleanup?(limit: number): Promise<readonly UploadSession[]>;
+  hasUploadRecoveryJournal?(id: string): Promise<boolean>;
+  isBufferedDeliveryUpload?(id: string): Promise<boolean>;
   createUpload(record: CreateUploadRecord): Promise<UploadSession>;
   updateUploadProgress(id: string, expectedOffset: number, newOffset: number): Promise<UploadSession>;
   setUploadState(id: string, state: UploadStatus, fields?: { readonly actualSha256?: string; readonly errorCode?: string }): Promise<UploadSession>;
+  retargetUpload?(id: string, targetPath: string): Promise<UploadSession>;
   commitUpload(record: CommitUploadRecord): Promise<CompleteUploadRecordResult>;
   adoptExistingFile(record: AdoptExistingFileRecord): Promise<Resource>;
   removeAdoptedFile(storagePath: string, expectedSha256: string): Promise<Resource | undefined>;
   commitOverwrite(record: CommitOverwriteRecord): Promise<CompleteUploadRecordResult>;
   getVersion(resourceId: string, versionId: string): Promise<FileVersion | undefined>;
   listVersions(resourceId: string, offset: number, limit: number): Promise<readonly FileVersion[]>;
+  expireVersion?(resourceId: string, versionId: string): Promise<void>;
   getOperation(idempotencyKey: string): Promise<FileOperation | undefined>;
   createOperation(record: {
     readonly id: string;
@@ -76,6 +84,9 @@ export interface FileRepository {
   setOperationState(id: string, state: string, fields?: { readonly resourceId?: string; readonly errorCode?: string }): Promise<void>;
   acquireLocks(operationId: string, lockKeys: readonly string[], expiresAt: Date): Promise<boolean>;
   releaseLocks(operationId: string): Promise<void>;
+  hasPendingPurge?(resourceId: string): Promise<boolean>;
+  hasCommittingTarget?(parentId: string, filename: string, exceptUploadId: string): Promise<boolean>;
+  hasCommittingTree?(storagePath: string): Promise<boolean>;
   moveTree(record: {
     readonly operationId: string;
     readonly resourceId: string;

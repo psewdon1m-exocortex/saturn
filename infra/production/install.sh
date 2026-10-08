@@ -17,19 +17,15 @@ need() { command -v "$1" >/dev/null 2>&1 || die "required command is missing: $1
 bounded_logs() { docker compose --env-file "$CONFIG_FILE" -f "$COMPOSE_FILE" logs --tail 100 --no-color 2>/dev/null || true; }
 
 get_config() {
-  sed -n "s/^$1=//p" "$CONFIG_FILE" | tail -n 1
+  python3 "$INSTALL_ROOT/infra/production/dotenv-config.py" "$CONFIG_FILE" get "$1"
 }
 
 set_config() {
-  key=$1; value=$2; temporary="$CONFIG_FILE.tmp"
-  awk -v key="$key" -v value="$value" 'BEGIN { found=0 } index($0,key "=")==1 { print key "=" value; found=1; next } { print } END { if (!found) print key "=" value }' "$CONFIG_FILE" >"$temporary"
-  chmod 0600 "$temporary"; mv -f "$temporary" "$CONFIG_FILE"
+  python3 "$INSTALL_ROOT/infra/production/dotenv-config.py" "$CONFIG_FILE" set "$1" "$2"
 }
 
 remove_config() {
-  key=$1; temporary="$CONFIG_FILE.tmp"
-  awk -v key="$key" 'index($0,key "=")!=1 { print }' "$CONFIG_FILE" >"$temporary"
-  chmod 0600 "$temporary"; mv -f "$temporary" "$CONFIG_FILE"
+  python3 "$INSTALL_ROOT/infra/production/dotenv-config.py" "$CONFIG_FILE" remove "$1"
 }
 
 needs_generation() {
@@ -57,10 +53,8 @@ migrate_operator_config() {
   for obsolete in VAULT_DEV_STORAGE_USER VAULT_DEV_STORAGE_FINGERPRINT VAULT_SECOND_COPY_ID; do
     remove_config "$obsolete"
   done
-  if ! grep -q '^OWNER_ACCESS_KEY=' "$CONFIG_FILE"; then
-    temporary="$CONFIG_FILE.tmp"
-    awk 'BEGIN { inserted=0 } { print } /^PUBLIC_ORIGIN=/ && !inserted { print "OWNER_ACCESS_KEY=replace-me-with-owner-access-key"; inserted=1 } END { if (!inserted) print "OWNER_ACCESS_KEY=replace-me-with-owner-access-key" }' "$CONFIG_FILE" >"$temporary"
-    chmod 0600 "$temporary"; mv -f "$temporary" "$CONFIG_FILE"
+  if ! python3 "$INSTALL_ROOT/infra/production/dotenv-config.py" "$CONFIG_FILE" has OWNER_ACCESS_KEY; then
+    set_config OWNER_ACCESS_KEY replace-me-with-owner-access-key
   fi
   # 0.1.4 used a Compose-relative runtime env file. A refresh must make the
   # preserved machine config explicit before the new Compose file is evaluated.
@@ -106,16 +100,14 @@ prepare_generated_secrets() {
 }
 
 sync_owner_access_key() {
-  owner_access_key=$(get_config OWNER_ACCESS_KEY)
-  case "$owner_access_key" in
-    ""|CHANGE_ME*|change-*|replace-*) die "set OWNER_ACCESS_KEY in $CONFIG_FILE" ;;
-    *[!A-Za-z0-9_-]*) die "OWNER_ACCESS_KEY must contain only URL-safe letters, digits, underscore or hyphen" ;;
-  esac
-  [ "${#owner_access_key}" -ge 32 ] || die "OWNER_ACCESS_KEY must contain at least 32 characters"
-  owner_temporary="$SECRET_ROOT/.owner_access_key.new"
-  printf '%s\n' "$owner_access_key" >"$owner_temporary"
-  chown root:root "$owner_temporary"; chmod 0600 "$owner_temporary"
-  mv -f "$owner_temporary" "$SECRET_ROOT/owner_access_key"
+  # Parse dotenv as data inside the verified image. Never source or shell-expand
+  # the operator's opaque text; quotes, Unicode and multiline values are valid.
+  owner_key_image=$(get_config VAULT_APP_IMAGE)
+  [ -n "$owner_key_image" ] || die "verified application image is missing"
+  docker pull "$owner_key_image" >/dev/null
+  docker run --rm --user 0:0 --network none --read-only --security-opt no-new-privileges --cap-drop ALL \
+    -v "$CONFIG_FILE:/config/.env.production:ro" -v "$SECRET_ROOT:/secrets" \
+    "$owner_key_image" node /app/scripts/provision-owner-access-key.mjs /config/.env.production /secrets/owner_access_key
 }
 
 sync_gryphon_validation_secret() {
@@ -250,10 +242,11 @@ validate() {
   [ -f "$CONFIG_FILE" ] || die "missing $CONFIG_FILE"
   [ "$(stat -c '%a' "$CONFIG_FILE")" = 600 ] || die "configuration mode must be 0600"
   prepare_runtime_secrets
-  set -a; . "$CONFIG_FILE"; set +a
+  VAULT_APP_IMAGE=$(get_config VAULT_APP_IMAGE)
+  VAULT_SECRET_ROOT=$(get_config VAULT_SECRET_ROOT)
   docker compose --env-file "$CONFIG_FILE" -f "$COMPOSE_FILE" config --quiet
   docker pull "$VAULT_APP_IMAGE" >/dev/null
-  docker run --rm --user 0:0 --network none --read-only --security-opt no-new-privileges --cap-drop ALL --env-file "$CONFIG_FILE" -e OWNER_ACCESS_KEY= -e KERNEL_SERVICE_TOKEN= -e VAULT_SECRET_ROOT=/run/secrets -v "$CONFIG_FILE:/config/.env.production:ro" -v "$VAULT_SECRET_ROOT:/run/secrets:ro" "$VAULT_APP_IMAGE" node /app/scripts/validate-production.mjs /config/.env.production >/dev/null
+  docker run --rm --user 0:0 --network none --read-only --security-opt no-new-privileges --cap-drop ALL -e OWNER_ACCESS_KEY= -e KERNEL_SERVICE_TOKEN= -e VAULT_SECRET_ROOT=/run/secrets -v "$CONFIG_FILE:/config/.env.production:ro" -v "$VAULT_SECRET_ROOT:/run/secrets:ro" "$VAULT_APP_IMAGE" node /app/scripts/validate-production.mjs /config/.env.production >/dev/null
 }
 
 refresh_runtime_secrets() {
@@ -272,7 +265,8 @@ install_release() {
   fi
   updater neptune install --bundle "$INSTALL_ROOT/helpers/neptune"
   updater gryphon install --bundle "$INSTALL_ROOT/helpers/gryphon"
-  set -a; . "$CONFIG_FILE"; set +a
+  VAULT_APP_IMAGE=$(get_config VAULT_APP_IMAGE)
+  VAULT_WEB_IMAGE=$(get_config VAULT_WEB_IMAGE)
   docker pull "$VAULT_APP_IMAGE"
   docker pull "$VAULT_WEB_IMAGE"
   docker network inspect exocortex-services >/dev/null 2>&1 || docker network create exocortex-services >/dev/null

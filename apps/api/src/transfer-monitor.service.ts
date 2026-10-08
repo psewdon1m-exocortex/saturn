@@ -31,6 +31,7 @@ export interface TransferTaskSnapshot {
   readonly state: TransferTaskState;
   readonly transferredBytes: number;
   readonly totalBytes: number;
+  readonly sizeKnown?: boolean;
   readonly percent: number;
   readonly bytesPerSecond?: number;
   readonly queuePosition?: number;
@@ -57,6 +58,7 @@ interface DownloadTask {
   readonly id: string;
   readonly filename: string;
   readonly totalBytes: number;
+  readonly sizeKnown: boolean;
   readonly startedAt: number;
   transferredBytes: number;
   bytesPerSecond?: number;
@@ -66,6 +68,7 @@ interface DownloadTask {
   state: "downloading" | "paused" | "cancelled" | "completed" | "failed";
   source: Readable;
   meter: Transform;
+  pausedChunk?: () => void;
   terminalAt?: number;
 }
 
@@ -93,8 +96,38 @@ export class TransferMonitorService {
   readonly #downloads = new Map<string, DownloadTask>();
   readonly #uploadRates = new Map<string, UploadRateSample>();
   readonly #controls = new Map<string, TaskControl>();
+  readonly #uploadBodies = new Map<string, Set<Readable>>();
 
-  trackDownload(source: Readable, input: { readonly filename: string; readonly totalBytes: number }): Readable {
+  trackUploadBody(id: string, source: Readable): () => void {
+    const bodies = this.#uploadBodies.get(id) ?? new Set<Readable>();
+    this.#uploadBodies.set(id, bodies);
+    bodies.add(source);
+    // Cancellation can arrive while the file repository is acquiring its lock.
+    const handleError = () => undefined;
+    source.on("error", handleError);
+    if (this.controlState(id) === "cancelled") source.destroy(new TransferTaskControlError("cancelled"));
+    return () => {
+      bodies.delete(source);
+      if (bodies.size === 0) this.#uploadBodies.delete(id);
+      source.off("error", handleError);
+    };
+  }
+
+  assertDownloadAvailable(id?: string): void {
+    this.#prune(Date.now());
+    if (id === undefined) return;
+    const control = this.#controls.get(id);
+    if (control?.state === "cancelled") throw new TransferTaskControlError("cancelled");
+    const existing = this.#downloads.get(id);
+    if (control !== undefined || existing?.state === "downloading" || existing?.state === "paused") {
+      throw new Error("Download operation already in progress");
+    }
+  }
+
+  trackDownload(source: Readable, input: { readonly id?: string; readonly filename: string; readonly totalBytes?: number }): Readable {
+    try { this.assertDownloadAvailable(input.id); }
+    catch (error) { source.destroy(); throw error; }
+    if (source.destroyed) throw source.errored ?? new Error("Download source closed before streaming started");
     const now = Date.now();
 
     const finish = (state: "completed" | "failed") => {
@@ -107,17 +140,22 @@ export class TransferMonitorService {
     };
     const meter = new Transform({
       transform: (chunk: Buffer, _encoding, callback) => {
-        task.transferredBytes = boundedBytes(task.transferredBytes + chunk.byteLength);
-        task.updatedAt = Date.now();
-        this.#refreshDownloadRate(task, task.updatedAt, false);
-        callback(null, chunk);
+        const forward = () => {
+          task.transferredBytes = boundedBytes(task.transferredBytes + chunk.byteLength);
+          task.updatedAt = Date.now();
+          this.#refreshDownloadRate(task, task.updatedAt, false);
+          callback(null, chunk);
+        };
+        if (task.state === "paused") task.pausedChunk = forward;
+        else forward();
       },
       final: (callback) => { finish("completed"); callback(); },
     });
     const task: DownloadTask = {
-      id: randomUUID(),
+      id: input.id ?? randomUUID(),
       filename: input.filename,
-      totalBytes: boundedBytes(input.totalBytes),
+      totalBytes: boundedBytes(input.totalBytes ?? 0),
+      sizeKnown: input.totalBytes !== undefined,
       startedAt: now,
       transferredBytes: 0,
       lastRateBytes: 0,
@@ -129,6 +167,11 @@ export class TransferMonitorService {
     };
     this.#downloads.set(task.id, task);
     source.once("error", (error) => { finish("failed"); meter.destroy(error); });
+    source.once("close", () => {
+      if ((task.state === "downloading" || task.state === "paused") && !source.readableEnded) {
+        finish("failed"); meter.destroy(new Error("Download source closed before completion"));
+      }
+    });
     meter.once("close", () => {
       if (task.state !== "downloading" && task.state !== "paused") return;
       finish("failed");
@@ -171,6 +214,7 @@ export class TransferMonitorService {
     if (current?.state === "cancelled") return "cancelled";
     const cancelled: TaskControl = { state: "cancelled", updatedAt: Date.now(), terminalAt: Date.now(), waiters: current?.waiters ?? new Set() };
     this.#controls.set(id, cancelled);
+    for (const body of this.#uploadBodies.get(id) ?? []) body.destroy(new TransferTaskControlError("cancelled"));
     for (const waiter of cancelled.waiters) waiter.reject(new TransferTaskControlError("cancelled"));
     cancelled.waiters.clear();
     return "cancelled";
@@ -256,7 +300,8 @@ export class TransferMonitorService {
         state: task.state,
         transferredBytes: task.transferredBytes,
         totalBytes: task.totalBytes,
-        percent: percent(task.transferredBytes, task.totalBytes),
+        sizeKnown: task.sizeKnown,
+        percent: task.sizeKnown ? percent(task.transferredBytes, task.totalBytes) : 0,
         ...(task.bytesPerSecond === undefined ? {} : { bytesPerSecond: task.bytesPerSecond }),
         canPause: task.state === "downloading",
         canResume: task.state === "paused",
@@ -264,17 +309,16 @@ export class TransferMonitorService {
         updatedAt: new Date(task.updatedAt).toISOString(),
       };
     });
-    const tasks = [...downloadTasks, ...uploadTasks]
-      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
-      .slice(0, 32);
+    const allTasks = [...downloadTasks, ...uploadTasks].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+    const tasks = allTasks.slice(0, 32);
     const activeStates = new Set<TransferTaskState>(["uploading", "verifying", "committing", "downloading"]);
     const queuedStates = new Set<TransferTaskState>(["queued", "waiting_retry"]);
-    const uploadRates = tasks.filter((task) => task.direction === "upload" && activeStates.has(task.state)).map((task) => task.bytesPerSecond).filter((value): value is number => value !== undefined);
-    const downloadRates = tasks.filter((task) => task.direction === "download" && task.state === "downloading").map((task) => task.bytesPerSecond).filter((value): value is number => value !== undefined);
-    const activeUploadCount = tasks.filter((task) => task.direction === "upload" && activeStates.has(task.state)).length;
-    const activeDownloadCount = tasks.filter((task) => task.direction === "download" && task.state === "downloading").length;
+    const uploadRates = allTasks.filter((task) => task.direction === "upload" && activeStates.has(task.state)).map((task) => task.bytesPerSecond).filter((value): value is number => value !== undefined);
+    const downloadRates = allTasks.filter((task) => task.direction === "download" && task.state === "downloading").map((task) => task.bytesPerSecond).filter((value): value is number => value !== undefined);
+    const activeUploadCount = allTasks.filter((task) => task.direction === "upload" && activeStates.has(task.state)).length;
+    const activeDownloadCount = allTasks.filter((task) => task.direction === "download" && task.state === "downloading").length;
     const activeCount = activeUploadCount + activeDownloadCount;
-    const queuedCount = tasks.filter((task) => queuedStates.has(task.state)).length;
+    const queuedCount = allTasks.filter((task) => queuedStates.has(task.state)).length;
     return {
       ...(activeUploadCount === 0 || uploadRates.length > 0 ? { uploadBytesPerSecond: uploadRates.reduce((sum, value) => sum + value, 0) } : {}),
       ...(activeDownloadCount === 0 || downloadRates.length > 0 ? { downloadBytesPerSecond: downloadRates.reduce((sum, value) => sum + value, 0) } : {}),
@@ -310,6 +354,9 @@ export class TransferMonitorService {
       task.updatedAt = Date.now();
       task.lastRateAt = task.updatedAt;
       task.lastRateBytes = task.transferredBytes;
+      const pending = task.pausedChunk;
+      delete task.pausedChunk;
+      pending?.();
       task.source.resume();
       return "running";
     }
@@ -318,9 +365,13 @@ export class TransferMonitorService {
     task.state = "cancelled";
     task.updatedAt = Date.now();
     task.terminalAt = task.updatedAt;
+    // A browser can automatically retry a truncated download using the same URL.
+    // Retain its operation ID after the visible task is removed.
+    this.#controls.set(task.id, { state: "cancelled", updatedAt: task.updatedAt, terminalAt: task.updatedAt, waiters: new Set() });
     task.source.unpipe(task.meter);
     task.source.destroy();
-    task.meter.destroy();
+    delete task.pausedChunk;
+    task.meter.destroy(new TransferTaskControlError("cancelled"));
     return "cancelled";
   }
 
@@ -329,7 +380,8 @@ export class TransferMonitorService {
       if (task.terminalAt !== undefined && now >= task.terminalAt) this.#downloads.delete(id);
     }
     for (const [id, control] of this.#controls) {
-      if (control.terminalAt !== undefined && now >= control.terminalAt) this.#controls.delete(id);
+      // Keep a cancellation barrier while in-flight requests unwind and abandonment obtains its lock.
+      if (control.terminalAt !== undefined && now >= control.terminalAt + 60_000) this.#controls.delete(id);
     }
   }
 }

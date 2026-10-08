@@ -9,6 +9,8 @@ import {
   PostgresReconciliationRepository,
   PurgeService,
   ReconciliationService,
+  StorageCatalogService,
+  IntegrityScrubService,
 } from "@saturn/protection";
 import { RuntimeStorageManager } from "@saturn/storage";
 import { AdapterStorageHealthProbe } from "@saturn/storage-health";
@@ -19,7 +21,7 @@ import {
   SaturnBackupService,
 } from "@saturn/recovery";
 import { buildWorker } from "./worker.js";
-import { PostgresShareRepository } from "@saturn/shares";
+import { PostgresShareRepository, ShareService } from "@saturn/shares";
 import { DropBufferStore, DropDrainService, PostgresDropRepository } from "@saturn/drop";
 import { FileService, PostgresFileRepository } from "@saturn/file-core";
 import { ArchiveJobRunner, PostgresArchiveJobRepository } from "@saturn/archive";
@@ -29,11 +31,13 @@ const database = new Database(config.databaseUrl, { max: 5, maintenanceBarrier: 
 const storage = new RuntimeStorageManager(config.storage, config.storageRuntimeConfigDirectory);
 await storage.initialize();
 const audit = new AuditService(database);
+const storageCatalog = new StorageCatalogService(database, storage, audit);
 const reconciliation = new ReconciliationService(
   new PostgresReconciliationRepository(database),
   storage,
   audit,
 );
+const integrityScrub = new IntegrityScrubService(database, storage);
 const purge = new PurgeService(
   new PostgresPurgeRepository(database),
   storage,
@@ -68,6 +72,8 @@ const recovery = new SaturnBackupService({
 const shareRepository = new PostgresShareRepository(database);
 const dropRepository = new PostgresDropRepository(database);
 const fileService = new FileService(new PostgresFileRepository(database), storage, { ...config.limits, auditSink: audit });
+const shares = new ShareService({ repository: shareRepository, files: fileService, storage, audit,
+  pepper: (await fs.readFile(config.share.pepperFile, "utf8")).replace(/[\r\n]+$/, ""), options: { ...config.share, publicOrigin: config.publicOrigin } });
 const dropBuffer = new DropBufferStore({
   root: config.drop.bufferDirectory,
   maxBytes: async () => (await fileService.getUploadLimits()).bufferMaxBytes,
@@ -91,7 +97,9 @@ const archiveRunner = new ArchiveJobRunner(
   audit,
 );
 const runtime = buildWorker(config, database, new AdapterStorageHealthProbe(storage), {
+  storageCatalog: async () => storageCatalog.runNext(),
   reconcile: async () => { await reconciliation.run("metadata"); },
+  scrub: async () => { await integrityScrub.run(); },
   purge: async () => { await purge.run(); },
   backup: async () => {
     await fs.mkdir(config.recovery.archiveDirectory, { recursive: true, mode: 0o700 });
@@ -99,11 +107,12 @@ const runtime = buildWorker(config, database, new AdapterStorageHealthProbe(stor
     const created = await recovery.createBackup({
       outputPath,
       publicConfiguration: publicConfig({ ...config, storage: storage.current().config }),
-      deploymentManifestPath: path.resolve("compose.yaml"),
-      migrationsDirectory: path.resolve("packages/database/migrations"),
+      deploymentManifestPath: process.env.VAULT_RUNTIME_ROOT === undefined ? path.resolve("compose.yaml") : path.join(process.env.VAULT_RUNTIME_ROOT, "recovery/compose.yaml"),
+      migrationsDirectory: process.env.VAULT_RUNTIME_ROOT === undefined ? path.resolve("packages/database/migrations") : path.join(process.env.VAULT_RUNTIME_ROOT, "recovery/migrations"),
       kind: "scheduled",
     });
-    await recovery.publishToStorage(created);
+    try { await recovery.publishToStorage(created); }
+    finally { await fs.rm(outputPath, { force: true }); }
   },
   maintain: async () => {
     const expired = await shareRepository.claimExpiredPackages(new Date(), 100);
@@ -112,8 +121,9 @@ const runtime = buildWorker(config, database, new AdapterStorageHealthProbe(stor
       await shareRepository.markPackageExpired(item.id);
     }
   },
-  drain: async () => dropDrain.drain(),
+  drain: async () => { await fileService.cleanupAbandonedUploads(); await fileService.recoverInterruptedUploads(); return dropDrain.drain(); },
   archive: async () => archiveRunner.runNext(),
+  sharePackage: async () => shares.runNextPackage(),
   close: async () => { await storage.close(); },
 });
 await database.reconcileInactiveFileLocks();

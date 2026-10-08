@@ -8,6 +8,37 @@ afterEach(() => {
   localStorage.clear();
 });
 
+it("edits only the enrolled mirror schedule without exposing archive controls", async () => {
+  let policy = { schema: "exocortex.backup.policy.v1", revision: 1, appliedRevision: 1, paused: false,
+    archive: { available: false, enabled: false, intervalHours: 24 }, mirror: { enabled: false, intervalMinutes: 300 } };
+  const mutations: Record<string, unknown>[] = [];
+  vi.stubGlobal("fetch", vi.fn(async (_url: string, init?: RequestInit) => {
+    if (init?.method === "PUT") {
+      if (typeof init.body !== "string") throw new Error("Expected a JSON request body");
+      const body = JSON.parse(init.body) as Record<string, unknown>;
+      mutations.push(body);
+      policy = { ...policy, revision: policy.revision + 1, mirror: { enabled: Boolean(body.enabled), intervalMinutes: Number(body.intervalHours) * 60 } };
+    }
+    return { ok: true, json: async () => policy };
+  }));
+  const root = document.createElement("div"); document.body.append(root);
+  const cleanup = mountBackupPolicy(root, { service: "volt", base: "/api/neptune/policy" });
+  try {
+    await waitFor(() => expect(root.querySelector('[data-pipeline="mirror"]')).not.toBeNull());
+    expect(root.querySelector('[data-pipeline="archive"]')).toBeNull();
+    const checkbox = root.querySelector<HTMLInputElement>('.exo-agent-group input[type="checkbox"]');
+    if (!checkbox) throw new Error("Mirror scheduling switch is missing");
+    checkbox.checked = true; checkbox.dispatchEvent(new Event("change", { bubbles: true }));
+    await waitFor(() => expect(mutations).toHaveLength(1));
+    expect(mutations[0]).toMatchObject({ kind: "schedule", pipeline: "mirror", enabled: true, intervalHours: 5 });
+    const interval = root.querySelector<HTMLInputElement>('.exo-agent-group input[type="number"]');
+    if (!interval) throw new Error("Mirror interval is missing");
+    interval.focus(); interval.value = "24"; interval.dispatchEvent(new Event("input", { bubbles: true })); interval.blur();
+    await waitFor(() => expect(mutations).toHaveLength(2));
+    expect(mutations[1]).toMatchObject({ kind: "schedule", pipeline: "mirror", intervalHours: 24 });
+  } finally { cleanup(); }
+});
+
 it("shows independent advanced pipeline states and updates both schedules through one control", async () => {
   let policy = {
     schema: "exocortex.backup.policy.v1", revision: 4, appliedRevision: 4, paused: false,

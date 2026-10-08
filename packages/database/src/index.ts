@@ -1,5 +1,7 @@
 import postgres, { type Sql, type TransactionSql } from "postgres";
 import type { WorkerHeartbeat } from "@saturn/contracts";
+import { setTimeout as delay } from "node:timers/promises";
+import { AsyncLocalStorage } from "node:async_hooks";
 
 const SATURN_MAINTENANCE_LOCK = 1_397_967_206;
 
@@ -16,6 +18,11 @@ interface HeartbeatRow {
 
 export class Database {
   readonly #sql: Sql;
+  readonly #lockSql: Sql;
+  readonly #maintenanceSql: Sql;
+  readonly #queryAdmissionSql: Sql;
+  readonly #maintenanceContext = new AsyncLocalStorage<{ active: boolean }>();
+  #lockRequests = 0;
   readonly #maintenanceBarrier: boolean;
 
   constructor(databaseUrl: string, options: DatabaseOptions = {}) {
@@ -26,7 +33,14 @@ export class Database {
       connect_timeout: 10,
       max_lifetime: 60 * 30,
       transform: { undefined: null },
+      prepare: false,
     });
+    // A lease must not consume the last connection used by the action it protects.
+    this.#lockSql = postgres(databaseUrl, { max: 4, idle_timeout: 20, connect_timeout: 10 });
+    this.#maintenanceSql = postgres(databaseUrl, { max: 8, idle_timeout: 20, connect_timeout: 10, prepare: false });
+    // Status/authentication must not queue behind long filesystem leases.
+    // Both admission pools acquire the same barrier before using query slots.
+    this.#queryAdmissionSql = postgres(databaseUrl, { max: 8, idle_timeout: 20, connect_timeout: 10, prepare: false });
   }
 
   async ping(): Promise<number> {
@@ -68,27 +82,34 @@ export class Database {
   }
 
   async withSql<T>(action: (sql: Sql) => Promise<T>): Promise<T> {
-    if (!this.#maintenanceBarrier) return action(this.#sql);
-    return await this.#sql.begin(async (sql) => {
-      await sql`SELECT pg_advisory_xact_lock_shared(${SATURN_MAINTENANCE_LOCK})`;
-      return action(sql as unknown as Sql);
-    }) as T;
+    if (!this.#maintenanceBarrier || this.#maintenanceContext.getStore()?.active === true) return action(this.#sql);
+    // Wait for maintenance admission before using the query pool. Otherwise
+    // new requests waiting behind an exclusive barrier can consume every query
+    // connection needed by the admitted writers that must release that barrier.
+    return this.#withMaintenanceAdmission(this.#queryAdmissionSql, () => action(this.#sql));
   }
 
   async transaction<T>(action: (sql: TransactionSql) => Promise<T>): Promise<T> {
-    return await this.#sql.begin(async (sql) => {
-      if (this.#maintenanceBarrier) await sql`SELECT pg_advisory_xact_lock_shared(${SATURN_MAINTENANCE_LOCK})`;
-      return action(sql);
-    }) as T;
+    if (this.#maintenanceBarrier && this.#maintenanceContext.getStore()?.active !== true) {
+      return this.#withMaintenanceAdmission(this.#queryAdmissionSql, () => this.transaction(action));
+    }
+    return await this.#sql.begin(action) as T;
   }
 
   async withSharedMaintenance<T>(action: () => Promise<T>): Promise<T> {
-    if (!this.#maintenanceBarrier) return action();
-    const connection = await this.#sql.reserve();
+    return this.#withMaintenanceAdmission(this.#maintenanceSql, action);
+  }
+
+  async #withMaintenanceAdmission<T>(pool: Sql, action: () => Promise<T>): Promise<T> {
+    if (!this.#maintenanceBarrier || this.#maintenanceContext.getStore()?.active === true) return action();
+    const connection = await pool.reserve();
     try {
       await connection`SELECT pg_advisory_lock_shared(${SATURN_MAINTENANCE_LOCK})`;
       try {
-        return await action();
+        await this.#assertRecoveryReady(connection);
+        const scope = { active: true };
+        try { return await this.#maintenanceContext.run(scope, action); }
+        finally { scope.active = false; }
       } finally {
         await connection`SELECT pg_advisory_unlock_shared(${SATURN_MAINTENANCE_LOCK})`;
       }
@@ -99,7 +120,7 @@ export class Database {
 
   async withExclusiveMaintenance<T>(action: (sql: Sql) => Promise<T>): Promise<T> {
     if (!this.#maintenanceBarrier) throw new Error("Database maintenance barrier is not enabled");
-    const connection = await this.#sql.reserve();
+    const connection = await this.#maintenanceSql.reserve();
     try {
       await connection`SELECT pg_advisory_lock(${SATURN_MAINTENANCE_LOCK})`;
       try {
@@ -127,7 +148,48 @@ export class Database {
   }
 
   async close(): Promise<void> {
-    await this.#sql.end({ timeout: 5 });
+    await Promise.all([this.#sql.end({ timeout: 5 }), this.#lockSql.end({ timeout: 5 }), this.#maintenanceSql.end({ timeout: 5 }), this.#queryAdmissionSql.end({ timeout: 5 })]);
+  }
+
+  async #assertRecoveryReady(sql: Sql): Promise<void> {
+    const rows = await sql<{ pending: boolean }[]>`SELECT to_regnamespace('_saturn_restore_guard') IS NOT NULL AS pending`;
+    if (rows[0]?.pending) throw new Error("Interrupted recovery: original database is preserved; operator rollback is required");
+  }
+
+  async withAdvisoryLock<T>(key: string, action: () => Promise<T>, waitMs = 30_000): Promise<T> {
+    if (this.#lockRequests >= 32) throw new Error("Database operation queue is full");
+    if (!Number.isSafeInteger(waitMs) || waitMs < 1 || waitMs > 120_000) throw new Error("Lock wait deadline is invalid");
+    this.#lockRequests++;
+    const deadline = Date.now() + waitMs;
+    const reservation = { expired: false };
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const pending = this.#lockSql.reserve();
+    // A timed-out pool reservation still has to release its eventual connection.
+    void pending.then(connection => { if (reservation.expired) connection.release(); }, () => undefined);
+    try {
+      const connection = await Promise.race([
+        pending,
+        new Promise<never>((_resolve, reject) => { timer = setTimeout(() => { reservation.expired = true; reject(new Error("Database lock queue deadline exceeded")); }, waitMs); }),
+      ]);
+      if (timer !== undefined) clearTimeout(timer);
+      let acquired = false;
+      try {
+        while (Date.now() < deadline) {
+          const rows = await connection<{ acquired: boolean }[]>`SELECT pg_try_advisory_lock(hashtextextended(${key}, 0)) AS acquired`;
+          if (rows[0]?.acquired) { acquired = true; break; }
+          await delay(Math.min(25, Math.max(1, deadline - Date.now())));
+        }
+        if (!acquired) throw new Error("Database operation is locked");
+        return await action();
+      } finally {
+        if (acquired) await connection`SELECT pg_advisory_unlock(hashtextextended(${key}, 0))`.catch(() => undefined);
+        connection.release();
+      }
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+      if (reservation.expired) void pending.finally(() => { this.#lockRequests--; }).catch(() => undefined);
+      else this.#lockRequests--;
+    }
   }
 
   async reconcileInactiveFileLocks(): Promise<void> {
@@ -137,10 +199,13 @@ export class Database {
     // All API/Worker components must run the same coordinated release.
     await this.withExclusiveTransaction(async (sql) => {
       await sql`DELETE FROM operation_locks`;
+      await sql`UPDATE operation_journal SET state='failed_retryable',error_code='verification_interrupted',updated_at=now()
+        WHERE upload_id IN (SELECT id FROM upload_sessions WHERE status='verifying')`;
       await sql`UPDATE upload_sessions SET status = 'failed_retryable', updated_at = now()
         WHERE status = 'verifying'`;
     });
   }
 }
 
-export { migrate, rollback } from "./migrate.js";
+export { migrate, rollback, listMigrationPairs } from "./migrate.js";
+export type { Sql } from "postgres";

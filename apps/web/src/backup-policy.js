@@ -49,9 +49,12 @@ export function mountBackupPolicy(root, options) {
     if (!draft.dirty) { draft.value = String(current); draft.confirmed = current; draft.revision = policy.revision; }
     return draft;
   }
+  const archiveAvailable = () => policy?.archive?.available !== false;
+  const primaryKind = () => archiveAvailable() ? "archive" : "mirror";
+  const combined = () => archiveAvailable() && Boolean(policy?.mirror);
   const schedule = (enabled, intervalHours, expectedRevision) => ({
-    kind: policy.mirror ? "schedule-all" : "schedule",
-    ...(policy.mirror ? {} : { pipeline: "archive" }), enabled, intervalHours,
+    kind: combined() ? "schedule-all" : "schedule",
+    ...(combined() ? {} : { pipeline: primaryKind() }), enabled, intervalHours,
     expectedRevision, requestId: crypto.randomUUID(),
   });
   const stopGeometry = bindActionGeometry(root);
@@ -92,7 +95,7 @@ export function mountBackupPolicy(root, options) {
     const inlineError = node("span", "", "exo-agent-error"); inlineError.id = "interval-error-" + crypto.randomUUID();
     inlineError.setAttribute("role", "alert"); input.setAttribute("aria-describedby", inlineError.id);
     label.append(node("span", "Interval in hours"), input, inlineError);
-    const current = () => policy.archive.intervalHours;
+    const current = () => kind === "mirror" ? policy.mirror.intervalMinutes / 60 : policy.archive.intervalHours;
     const commit = () => {
       const draft = draftFor(kind, current());
       if (busy || !draft.dirty || draft.review) return;
@@ -100,7 +103,7 @@ export function mountBackupPolicy(root, options) {
       if (!draft.value.trim() || !Number.isInteger(value) || value < 1 || value > max) {
         draft.error = "Enter a whole number of hours from 1 to " + max + "."; render(); return;
       }
-      void mutate(schedule(policy.archive.enabled, value, draft.revision), "archive");
+      void mutate(schedule(policy[kind].enabled, value, draft.revision), kind);
     };
     input.oninput = () => {
       const draft = draftFor(kind, current());
@@ -123,7 +126,7 @@ export function mountBackupPolicy(root, options) {
       : "Advanced vault pipeline status:");
     const details = node("div", undefined, "exo-policy-observations"); details.append(imported, observed, state);
     statuses.append(heading);
-    if (kind === "archive") group.append(controls, drift, review, discard, apply);
+    if (kind === primaryKind()) group.append(controls, drift, review, discard, apply);
     group.append(details);
     root.insertBefore(group, summary);
     return { group, heading, input, checkbox, inlineError, imported, observed, state, drift, review, discard, apply };
@@ -149,21 +152,21 @@ export function mountBackupPolicy(root, options) {
       : "Policy saved · pending application (desired " + policy.revision + ", applied " + policy.appliedRevision + ")";
     summary.className = "exo-policy-summary " + (policy.paused || !applied ? "exo-agent-muted" : "exo-agent-success");
     for (const kind of ["archive", "mirror"]) {
-      if (!policy[kind]) { if (panels.has(kind)) { panels.get(kind).group.hidden = true; panels.get(kind).heading.hidden = true; } continue; }
+      if (!policy[kind] || kind === "archive" && !archiveAvailable()) { if (panels.has(kind)) { panels.get(kind).group.hidden = true; panels.get(kind).heading.hidden = true; } continue; }
       if (!panels.has(kind)) panels.set(kind, makePanel(kind));
       const panel = panels.get(kind), settings = policy[kind], current = kind === "mirror" ? settings.intervalMinutes / 60 : settings.intervalHours;
       panel.group.hidden = false;
       panel.heading.hidden = false;
       panel.heading.firstChild.textContent = kind === "archive" ? policy.mirror ? "Basic pipeline status:" : "Pipeline status:" : "Advanced vault pipeline status:";
-      if (kind === "archive") {
+      if (kind === primaryKind()) {
         const draft = draftFor(kind, current);
-        panel.checkbox.checked = settings.enabled; panel.checkbox.indeterminate = Boolean(policy.mirror && settings.enabled !== policy.mirror.enabled);
+        panel.checkbox.checked = settings.enabled; panel.checkbox.indeterminate = Boolean(combined() && settings.enabled !== policy.mirror.enabled);
         panel.checkbox.disabled = busy || policy.paused;
         panel.input.max = policy.mirror ? "168" : "8760";
         panel.input.disabled = busy || policy.paused;
         if (document.activeElement !== panel.input) panel.input.value = draft.value;
         panel.input.setAttribute("aria-invalid", String(Boolean(draft.error))); panel.inlineError.textContent = draft.error;
-        panel.drift.hidden = !policy.mirror || settings.enabled === policy.mirror.enabled && settings.intervalHours * 60 === policy.mirror.intervalMinutes;
+        panel.drift.hidden = !combined() || settings.enabled === policy.mirror.enabled && settings.intervalHours * 60 === policy.mirror.intervalMinutes;
         panel.drift.textContent = "The two saved schedules differ. Choose an interval and save it to align both pipelines.";
         panel.discard.hidden = !(draft.dirty && draft.error); panel.discard.disabled = busy;
         panel.review.hidden = panel.apply.hidden = !draft.review; panel.apply.disabled = busy;

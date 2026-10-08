@@ -21,17 +21,27 @@ export class DropDrainService {
   }
 
   async drain(): Promise<number> {
+    for (const item of await this.#repository.listBufferCleanup?.(100) ?? []) {
+      if (item.localPath === undefined) continue;
+      try { await this.#buffer.delete(item.localPath); await this.#repository.releaseBuffer?.(item.id); }
+      catch { /* Keep the bytes accounted for until cleanup succeeds. */ }
+    }
     if (this.#repository.claimBufferedUpload === undefined) return 0;
     const results = await Promise.all(Array.from({ length: this.#workers }, async () => {
       const item = await this.#repository.claimBufferedUpload?.(new Date());
       if (item === undefined) return 0;
-      await this.#transfer(item);
+      if (this.#repository.withUploadLock === undefined) await this.#transfer(item);
+      else await this.#repository.withUploadLock(item.id, () => this.#transfer(item));
       return 1;
     }));
     return results.reduce<number>((sum, value) => sum + value, 0);
   }
 
   async #transfer(item: DropUpload): Promise<void> {
+    // A stale claim may have waited behind another worker that finished it.
+    const fresh = await this.#repository.getDropUpload(item.channelId, item.id);
+    if (fresh === undefined || fresh.state === "stored" || fresh.state === "cancelled") return;
+    item = fresh;
     if (item.localPath === undefined || this.#repository.markUploadVerifying === undefined || this.#repository.markUploadStored === undefined) {
       await this.#repository.markUploadFailed?.(item.id, "buffer_metadata_missing", new Date());
       return;
@@ -66,9 +76,11 @@ export class DropDrainService {
       if (item.actualSha256 !== undefined && checksum !== item.actualSha256) throw new Error("Remote checksum does not match local buffer");
       await this.#repository.markUploadStored(item.id, completed.resource.id, checksum, new Date());
       await this.#buffer.delete(item.localPath);
+      await this.#repository.releaseBuffer?.(item.id);
     } catch (error) {
       const code = error instanceof Error && /checksum/i.test(error.message) ? "remote_checksum_mismatch" : "transfer_failed";
-      await this.#repository.markUploadFailed?.(item.id, code, new Date()).catch(() => undefined);
+      if (code !== "remote_checksum_mismatch" && this.#repository.retryUpload !== undefined) await this.#repository.retryUpload(item.id, code, new Date());
+      else await this.#repository.markUploadFailed?.(item.id, code, new Date()).catch(() => undefined);
     }
   }
 }

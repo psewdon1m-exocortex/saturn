@@ -5,7 +5,7 @@ import path from "node:path";
 import { Readable } from "node:stream";
 import { AuditService } from "@saturn/audit";
 import { loadEnvironment } from "@saturn/config";
-import { Database, migrate, rollback } from "@saturn/database";
+import { Database, migrate, rollback, listMigrationPairs } from "@saturn/database";
 import { RuntimeStorageManager, SftpStorageAdapter, type StorageAdapter } from "@saturn/storage";
 import { StorageConnectionService } from "../apps/api/src/storage-connection.service.js";
 
@@ -48,7 +48,8 @@ async function main(): Promise<void> {
     const databaseUrl = new URL(config.databaseUrl);
     databaseUrl.pathname = `/${databaseName}`;
     await migrate(databaseUrl.toString());
-    if (await rollback(databaseUrl.toString()) !== "0024_runtime_storage_profiles") throw new Error("Stage 15 migration rollback did not select migration 0024");
+    const appliedHead = (await listMigrationPairs()).at(-1)?.name;
+    if (await rollback(databaseUrl.toString()) !== appliedHead) throw new Error("Stage 15 migration rollback did not select the applied schema head");
     if (await migrate(databaseUrl.toString()) !== 1) throw new Error("Stage 15 migration could not be reapplied after rollback");
     database = new Database(databaseUrl.toString(), { max: 4, maintenanceBarrier: true });
 

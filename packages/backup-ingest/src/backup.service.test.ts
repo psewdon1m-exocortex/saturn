@@ -44,6 +44,65 @@ beforeEach(async () => { root = await fs.mkdtemp(path.join(os.tmpdir(), "vault-b
 afterEach(async () => fs.rm(root, { recursive: true, force: true }));
 
 describe("BackupIngestService", () => {
+  it("allows simultaneous first chunks to create their shared SFTP parent", async () => {
+    let checks = 0, release!: () => void;
+    const checked = new Promise<void>(resolve => { release = resolve; });
+    class ConcurrentStorage extends LocalStorageAdapter {
+      override async exists(value: string): Promise<boolean> {
+        const existed = await super.exists(value);
+        if (value === "_system" && !existed) { if (++checks === 2) release(); await checked; }
+        return existed;
+      }
+    }
+    const storage = new ConcurrentStorage(root); await storage.initialize();
+    const concurrent = new BackupIngestService({ repository, storage, pepper: "p".repeat(64), options });
+    const payload = Buffer.from("valuable"), digest = createHash("sha256").update(payload).digest("hex");
+    const runs = await Promise.all(["first", "second"].map(async slug => {
+      const created = await concurrent.createService({ slug, name: slug });
+      const context = await concurrent.authenticate(`Bearer ${created.token}`);
+      const createdRun = await concurrent.createRun(context, slug, { filename: "backup.age", createdAt: new Date(), backupType: "full", expectedSize: payload.length, sha256: digest, sourceVersion: "1", encrypted: true, idempotencyKey: `parallel-${slug}` });
+      const run = repository.runs.get(createdRun.id);
+      if (run === undefined) throw new Error("Created run is missing");
+      return { context, slug, run };
+    }));
+    await Promise.all(runs.map(async ({ context, slug, run }) => {
+      expect(await concurrent.append(context, slug, run.id, 0, payload.length, Readable.from(payload))).toBe(payload.length);
+      expect((await fs.readFile(path.join(root, run.tempPath))).equals(payload)).toBe(true);
+    }));
+  });
+  it("keeps a durably accepted chunk when its database acknowledgement is lost", async () => {
+    const payload = Buffer.from("precious"), created = await service.createService({ slug: "ack-test", name: "Ack test" });
+    const context = await service.authenticate(`Bearer ${created.token}`);
+    const run = await service.createRun(context, "ack-test", { filename: "backup.age", createdAt: new Date(), backupType: "full", expectedSize: payload.length, sha256: createHash("sha256").update(payload).digest("hex"), sourceVersion: "1", encrypted: true, idempotencyKey: "lost-ack-fixture" });
+    const finish = repository.finishAppend.bind(repository);
+    repository.finishAppend = async (...args) => { await finish(...args); throw new Error("acknowledgement lost"); };
+    expect(await service.append(context, "ack-test", run.id, 0, payload.length, Readable.from(payload))).toBe(payload.length);
+    expect(await service.complete(context, "ack-test", run.id)).toMatchObject({ state: "complete" });
+  });
+  it("keeps selected archive/mirror capabilities through enrollment and rejects archive access for mirror-only identities", async () => {
+    for (const kind of ["volt", "mastermind"] as const) {
+      for (const [archivePipeline, mirror] of [[true, false], [false, true], [true, true]] as const) {
+        const deploymentId = `host-${archivePipeline ? "archive" : "noarchive"}-${mirror ? "mirror" : "nomirror"}`;
+        const input = { slug: `${kind}-${deploymentId}`, namespaceSlug: kind, deploymentId, pipelineKind: kind, name: kind,
+          archivePipeline, ...(mirror ? { mirrorRoot: kind } : {}) };
+        const enrollment = await service.createEnrollment(input);
+        const redeemed = await service.redeemEnrollment(enrollment.code);
+        expect(redeemed.archivePipeline).toBe(archivePipeline);
+        expect(redeemed.mirrorRoot).toBe(mirror ? kind : undefined);
+        const context = await service.authenticate(`Bearer ${redeemed.token}`);
+        if (!archivePipeline) {
+          const payload = Buffer.from("fixture archive");
+          await expect(service.createRun(context, redeemed.slug, { filename: "fixture.zip", createdAt: new Date(), backupType: "full",
+            expectedSize: payload.length, sha256: createHash("sha256").update(payload).digest("hex"), sourceVersion: "1", encrypted: true, idempotencyKey: "mirror-only-test" })).rejects.toMatchObject({ code: "unauthorized" });
+          await expect(service.inspectRun(context, redeemed.slug, "missing-run")).rejects.toMatchObject({ code: "unauthorized" });
+          await expect(service.uploadOffset(context, redeemed.slug, "missing-run")).rejects.toMatchObject({ code: "unauthorized" });
+          await expect(service.complete(context, redeemed.slug, "missing-run")).rejects.toMatchObject({ code: "unauthorized" });
+        }
+        await expect(service.createEnrollment({ ...input, archivePipeline: !archivePipeline })).rejects.toMatchObject({ code: "conflict" });
+      }
+      await expect(service.createService({ slug: `${kind}-empty`, namespaceSlug: kind, pipelineKind: kind, name: kind, archivePipeline: false })).rejects.toMatchObject({ code: "invalid" });
+    }
+  });
   it("discloses a token once, enforces mTLS binding, rotation overlap and revoke", async () => {
     const fingerprint = "a".repeat(64); const created = await service.createService({ slug: "service-a", name: "Service A", mtlsCertFingerprint: fingerprint });
     await expect(service.authenticate(`Bearer ${created.token}`, "b".repeat(64))).rejects.toMatchObject({ code: "unauthorized" });
@@ -60,6 +119,12 @@ describe("BackupIngestService", () => {
     const payload = Buffer.from("plain-zip"); const digest = createHash("sha256").update(payload).digest("hex");
     const run = await service.createRun(context, redeemed.slug, { filename: "chronos.zip", createdAt: new Date("2026-09-08T10:00:00Z"), backupType: "full", expectedSize: payload.length, sha256: digest, sourceVersion: "1", encrypted: false, idempotencyKey: "deployment-path-test" });
     expect(repository.runs.get(run.id)?.finalPath).toContain("backups/chronos/vps-1/2026/09/08/");
+  });
+
+  it("invalidates an unredeemed setup code when its individual pipeline is revoked", async () => {
+    const enrollment = await service.createEnrollment({ slug: "neptune-edge-1", namespaceSlug: "neptune", deploymentId: "edge-1", pipelineKind: "host_service", name: "Neptune edge 1", requireEncryption: true });
+    await service.revokeService(enrollment.service.id);
+    await expect(service.redeemEnrollment(enrollment.code)).rejects.toMatchObject({ code: "unauthorized" });
   });
   it("reissues setup for an existing active project/server pair instead of duplicating it", async () => {
     const first = await service.createEnrollment({ slug: "chronos-vps-1", namespaceSlug: "chronos", deploymentId: "vps-1", name: "Chronos VPS 1", requireEncryption: false });
@@ -87,6 +152,21 @@ describe("BackupIngestService", () => {
     expect(published).toHaveLength(1);
     expect(published[0]).toMatchObject({ id: run.id, state: "complete" });
     expect(published[0]?.finalPath).toContain("backups/service-a/");
+  });
+  it("keeps each helper recovery producer in its own top-level backups folder", async () => {
+    for (const scope of ["updater", "neptune", "gryphon", "wyvern"] as const) {
+      const payload = Buffer.from(`encrypted-${scope}-recovery`); const digest = createHash("sha256").update(payload).digest("hex");
+      const enrollment = await service.createEnrollment({ slug: `${scope}-recovery-host`, namespaceSlug: scope, deploymentId: "recovery-host", name: `${scope} recovery`, requireEncryption: true });
+      const identity = await service.redeemEnrollment(enrollment.code);
+      const context = await service.authenticate(`Bearer ${identity.token}`);
+      const run = await service.createRun(context, identity.slug, {
+        filename: `${scope}-component-fixture.exorecovery`, createdAt: new Date("2026-10-02T20:30:00Z"), backupType: "helper_recovery",
+        expectedSize: payload.length, sha256: digest, sourceVersion: "0.6.12", encrypted: true, idempotencyKey: `component-${scope}-fixture`,
+      });
+      await service.append(context, identity.slug, run.id, 0, payload.length, Readable.from(payload));
+      await service.complete(context, identity.slug, run.id);
+      expect(repository.runs.get(run.id)?.finalPath).toMatch(new RegExp(`^backups/${scope}/recovery-host/2026/10/02/`));
+    }
   });
   it("does not authorize a token or run under a neighboring service slug", async () => {
     const a = await service.createService({ slug: "service-a", name: "A" }); const b = await service.createService({ slug: "service-b", name: "B" }); const contextA = await service.authenticate(`Bearer ${a.token}`); const contextB = await service.authenticate(`Bearer ${b.token}`);

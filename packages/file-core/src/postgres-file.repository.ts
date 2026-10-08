@@ -71,6 +71,8 @@ interface UploadRow {
   status: UploadStatus;
   resource_id: string | null;
   overwrite_resource_id: string | null;
+  expected_version_id: string | null;
+  require_absent: boolean;
   audit_actor_type: string;
   audit_actor_id: string;
   expires_at: Date;
@@ -143,6 +145,8 @@ function upload(row: UploadRow): UploadSession {
     status: row.status,
     ...(row.resource_id === null ? {} : { resourceId: row.resource_id }),
     ...(row.overwrite_resource_id === null ? {} : { overwriteResourceId: row.overwrite_resource_id }),
+    ...(row.expected_version_id === null ? {} : { expectedVersionId: row.expected_version_id }),
+    requireAbsent: row.require_absent,
     auditActorType: row.audit_actor_type,
     auditActorId: row.audit_actor_id,
     expiresAt: row.expires_at,
@@ -249,11 +253,19 @@ export class PostgresFileRepository implements FileRepository {
     return this.#database.withSql(async (sql) => {
       const rows = await sql<ResourceRow[]>`
         SELECT * FROM resources
-        WHERE storage_path = ${storagePath} OR storage_path LIKE ${`${storagePath}/%`}
+        WHERE storage_path = ${storagePath} OR starts_with(storage_path, ${`${storagePath}/`})
         ORDER BY length(storage_path), storage_path
       `;
       return rows.map(resource);
     });
+  }
+
+  hasCommittingTarget(parentId: string, filename: string, exceptUploadId: string): Promise<boolean> {
+    return this.#database.withSql(async sql => (await sql<{ pending: boolean }[]>`SELECT EXISTS(SELECT 1 FROM upload_sessions WHERE parent_id=${parentId} AND lower(filename)=lower(${filename}) AND status='committing' AND id<>${exceptUploadId}) AS pending`)[0]?.pending ?? false);
+  }
+
+  hasCommittingTree(storagePath: string): Promise<boolean> {
+    return this.#database.withSql(async sql => (await sql<{ pending: boolean }[]>`SELECT EXISTS(SELECT 1 FROM upload_sessions WHERE status='committing' AND (target_path=${storagePath} OR starts_with(target_path, ${`${storagePath}/`}))) AS pending`)[0]?.pending ?? false);
   }
 
   createFolder(record: { readonly id: string; readonly parentId: string; readonly name: string; readonly storagePath: string }): Promise<Resource> {
@@ -294,18 +306,57 @@ export class PostgresFileRepository implements FileRepository {
     });
   }
 
+  listAbandonedUploadsForCleanup(limit: number): Promise<readonly UploadSession[]> {
+    return this.#database.withSql(async sql => (await sql<UploadRow[]>`
+      SELECT u.* FROM upload_sessions u WHERE ((u.status='abandoned'
+        AND EXISTS(SELECT 1 FROM operation_journal j WHERE j.upload_id=u.id AND j.error_code='cleanup_pending'))
+        OR (u.status='failed_retryable' AND u.received_size=0 AND u.audit_actor_type='device_token'
+          AND u.idempotency_key LIKE 'dav-upload-%' AND u.updated_at < now()-interval '2 minutes')
+        OR (u.status IN ('created','uploading','failed_retryable','failed_final') AND u.expires_at <= now()
+          AND NOT EXISTS(SELECT 1 FROM drop_uploads d WHERE u.audit_actor_type='drop_worker' AND u.parent_id='00000000-0000-7000-8000-000000000002' AND d.local_path IS NOT NULL AND d.received_size=d.expected_size
+            AND d.state IN ('buffered','transferring','verifying') AND (d.upload_id=u.id OR u.idempotency_key='drop-drain:'||d.id::text))
+          AND NOT EXISTS(SELECT 1 FROM operation_journal j WHERE j.upload_id=u.id AND j.error_code IN ('verification_interrupted','reconciliation_required'))))
+        AND NOT EXISTS(SELECT 1 FROM operation_locks l WHERE l.lock_key='upload:'||u.id::text AND l.expires_at>now())
+      ORDER BY u.updated_at LIMIT ${limit}
+    `).map(upload));
+  }
+
+  hasUploadRecoveryJournal(id: string): Promise<boolean> {
+    return this.#database.withSql(async sql => (await sql`
+      SELECT 1 FROM operation_journal WHERE upload_id=${id}
+        AND error_code IN ('verification_interrupted','reconciliation_required') LIMIT 1
+    `).length > 0);
+  }
+
+  isBufferedDeliveryUpload(id: string): Promise<boolean> {
+    return this.#database.withSql(async sql => (await sql<{pending:boolean}[]>`
+      SELECT EXISTS(SELECT 1 FROM upload_sessions u JOIN drop_uploads d
+        ON d.upload_id=u.id OR u.idempotency_key='drop-drain:'||d.id::text
+        WHERE u.id=${id} AND u.audit_actor_type='drop_worker' AND u.parent_id='00000000-0000-7000-8000-000000000002' AND d.local_path IS NOT NULL AND d.received_size=d.expected_size
+        AND d.state IN ('buffered','transferring','verifying')) AS pending
+    `)[0]?.pending ?? false);
+  }
+
+  listRecoverableUploads(limit: number): Promise<readonly UploadSession[]> {
+    return this.#database.withSql(async sql => (await sql<UploadRow[]>`
+      SELECT u.* FROM upload_sessions u WHERE u.updated_at < now()-interval '2 minutes'
+        AND (u.status IN ('committing','verifying') OR (u.status='failed_retryable' AND EXISTS(SELECT 1 FROM operation_journal j WHERE j.upload_id=u.id AND j.error_code='verification_interrupted')))
+        AND u.received_size=u.expected_size ORDER BY u.updated_at LIMIT ${limit}
+    `).map(upload));
+  }
+
   createUpload(record: CreateUploadRecord): Promise<UploadSession> {
     return this.#database.transaction(async (sql) => {
       const rows = await sql<UploadRow[]>`
         INSERT INTO upload_sessions (
           id, idempotency_key, parent_id, filename, temp_path, target_path,
           expected_size, expected_sha256, status, expires_at, overwrite_resource_id,
-          audit_actor_type, audit_actor_id
+          audit_actor_type, audit_actor_id, expected_version_id, require_absent
         ) VALUES (
           ${record.id}, ${record.idempotencyKey}, ${record.parentId}, ${record.filename},
           ${record.tempPath}, ${record.targetPath}, ${record.expectedSize},
           ${record.expectedSha256 ?? null}, 'created', ${record.expiresAt}, ${record.overwriteResourceId ?? null},
-          ${record.auditActorType ?? "owner_bootstrap"}, ${record.auditActorId ?? "owner"}
+          ${record.auditActorType ?? "owner_bootstrap"}, ${record.auditActorId ?? "owner"}, ${record.expectedVersionId ?? null}, ${record.requireAbsent ?? false}
         ) RETURNING *
       `;
       await sql`
@@ -348,6 +399,16 @@ export class PostgresFileRepository implements FileRepository {
         SET state = ${state}, error_code = ${fields.errorCode ?? null}, updated_at = now()
         WHERE upload_id = ${id}
       `;
+      return upload(rows[0]);
+    });
+  }
+
+  retargetUpload(id: string, targetPath: string): Promise<UploadSession> {
+    return this.#database.transaction(async sql => {
+      const rows = await sql<UploadRow[]>`UPDATE upload_sessions SET target_path = ${targetPath}, updated_at = now()
+        WHERE id = ${id} AND status IN ('created', 'uploading', 'verifying', 'failed_retryable') RETURNING *`;
+      if (rows[0] === undefined) throw new Error("Upload destination cannot change during commit");
+      await sql`UPDATE operation_journal SET payload = payload || ${sql.json({ targetPath })}, updated_at = now() WHERE upload_id = ${id}`;
       return upload(rows[0]);
     });
   }
@@ -423,12 +484,14 @@ export class PostgresFileRepository implements FileRepository {
       const rows = await sql<ResourceRow[]>`SELECT * FROM resources WHERE storage_path = ${storagePath} LIMIT 1 FOR UPDATE`;
       const selected = rows[0];
       if (selected === undefined) return undefined;
+      if (selected.status === "purged" && selected.type === "file" && selected.sha256 === expectedSha256) return undefined;
       if (selected.type !== "file" || selected.status !== "active" || selected.sha256 !== expectedSha256 || selected.parent_id === null) {
         throw new Error("Catalog resource is not the expected backup artifact");
       }
-      await sql`UPDATE resources SET current_version_id = NULL WHERE id = ${selected.id}`;
-      await sql`DELETE FROM file_versions WHERE resource_id = ${selected.id}`;
-      await sql`DELETE FROM resources WHERE id = ${selected.id}`;
+      // Audit events and other historical records retain foreign keys to this
+      // artifact. Preserve its identity after retention removes the bytes.
+      await sql`UPDATE file_versions SET state = 'expired' WHERE resource_id = ${selected.id}`;
+      await sql`UPDATE resources SET status = 'purged', purge_after = NULL, updated_at = now() WHERE id = ${selected.id}`;
       await this.#adjustAncestorSizes(sql, selected.parent_id, -Number(selected.size_bytes));
       return resource(selected);
     });
@@ -502,6 +565,12 @@ export class PostgresFileRepository implements FileRepository {
     });
   }
 
+  expireVersion(resourceId: string, versionId: string): Promise<void> {
+    return this.#database.withSql(async sql => {
+      await sql`UPDATE file_versions SET state='expired' WHERE resource_id=${resourceId} AND id=${versionId} AND id <> (SELECT current_version_id FROM resources WHERE id=${resourceId})`;
+    });
+  }
+
   createOperation(record: {
     readonly id: string;
     readonly operationType: FileOperation["operationType"];
@@ -533,31 +602,37 @@ export class PostgresFileRepository implements FileRepository {
     });
   }
 
-  acquireLocks(operationId: string, lockKeys: readonly string[], expiresAt: Date): Promise<boolean> {
+  async acquireLocks(operationId: string, lockKeys: readonly string[], expiresAt: Date): Promise<boolean> {
     const uniqueKeys = [...new Set(lockKeys)].sort();
-    return this.#database.transaction(async (sql) => {
+    const contention = new Error("File lease is held by another operation");
+    try { return await this.#database.transaction(async (sql) => {
       await sql`DELETE FROM operation_locks WHERE expires_at <= now()`;
-      const acquiredKeys: string[] = [];
       for (const lockKey of uniqueKeys) {
         const rows = await sql<{ lock_key: string }[]>`
           INSERT INTO operation_locks (lock_key, operation_id, expires_at)
           VALUES (${lockKey}, ${operationId}, ${expiresAt})
-          ON CONFLICT (lock_key) DO NOTHING
+          ON CONFLICT (lock_key) DO UPDATE SET expires_at=EXCLUDED.expires_at
+            WHERE operation_locks.operation_id=EXCLUDED.operation_id
           RETURNING lock_key
         `;
-        if (rows.length > 0) acquiredKeys.push(lockKey);
+        if (rows.length === 0) throw contention;
       }
-      if (acquiredKeys.length === uniqueKeys.length) return true;
-      for (const lockKey of acquiredKeys) {
-        await sql`DELETE FROM operation_locks WHERE lock_key = ${lockKey} AND operation_id = ${operationId}`;
-      }
-      return false;
-    });
+      return true;
+    }); } catch (error) { if (error === contention) return false; throw error; }
   }
 
   releaseLocks(operationId: string): Promise<void> {
     return this.#database.withSql(async (sql) => {
       await sql`DELETE FROM operation_locks WHERE operation_id = ${operationId}`;
+    });
+  }
+
+  hasPendingPurge(resourceId: string): Promise<boolean> {
+    return this.#database.withSql(async sql => {
+      const rows = await sql<{ pending: boolean }[]>`SELECT EXISTS (SELECT 1 FROM operation_journal
+        WHERE resource_id = ${resourceId} AND operation_type = 'purge' AND state = 'storage_committing'
+          AND idempotency_key LIKE 'scheduled-purge:%' AND payload->>'kind' = 'trash') AS pending`;
+      return rows[0]?.pending ?? false;
     });
   }
 
@@ -642,7 +717,7 @@ export class PostgresFileRepository implements FileRepository {
       await this.#rewriteResourcePaths(sql, record.oldPath, record.trashPath);
       await sql`
         UPDATE resources SET status = 'trashed', updated_at = now()
-        WHERE storage_path = ${record.trashPath} OR storage_path LIKE ${`${record.trashPath}/%`}
+        WHERE storage_path = ${record.trashPath} OR starts_with(storage_path, ${`${record.trashPath}/`})
       `;
       const rows = await sql<ResourceRow[]>`
         UPDATE resources SET trashed_from_parent_id = ${original.parentId}, trashed_from_name = ${original.name},
@@ -672,7 +747,7 @@ export class PostgresFileRepository implements FileRepository {
       await this.#rewriteResourcePaths(sql, record.oldPath, record.restoredPath);
       await sql`
         UPDATE resources SET status = 'active', purge_after = NULL, updated_at = now()
-        WHERE storage_path = ${record.restoredPath} OR storage_path LIKE ${`${record.restoredPath}/%`}
+        WHERE storage_path = ${record.restoredPath} OR starts_with(storage_path, ${`${record.restoredPath}/`})
       `;
       const rows = await sql<ResourceRow[]>`
         UPDATE resources SET parent_id = ${record.parentId}, name = ${record.name},
@@ -697,12 +772,12 @@ export class PostgresFileRepository implements FileRepository {
         UPDATE file_versions SET state = 'expired'
         WHERE resource_id IN (
           SELECT id FROM resources
-          WHERE storage_path = ${existing.storagePath} OR storage_path LIKE ${`${existing.storagePath}/%`}
+          WHERE storage_path = ${existing.storagePath} OR starts_with(storage_path, ${`${existing.storagePath}/`})
         )
       `;
       await sql`
         UPDATE resources SET status = 'purged', purge_after = NULL, updated_at = now()
-        WHERE storage_path = ${existing.storagePath} OR storage_path LIKE ${`${existing.storagePath}/%`}
+        WHERE storage_path = ${existing.storagePath} OR starts_with(storage_path, ${`${existing.storagePath}/`})
       `;
       await sql`
         UPDATE operation_journal SET state = 'active', resource_id = ${record.resourceId}, updated_at = now()
@@ -750,9 +825,9 @@ export class PostgresFileRepository implements FileRepository {
       END
       WHERE version.id IN (
         SELECT current_version_id FROM resources
-        WHERE (storage_path = ${oldPath} OR storage_path LIKE ${`${oldPath}/%`})
+        WHERE (storage_path = ${oldPath} OR starts_with(storage_path, ${`${oldPath}/`}))
           AND current_version_id IS NOT NULL
-      ) AND (version.storage_path = ${oldPath} OR version.storage_path LIKE ${`${oldPath}/%`})
+      ) AND (version.storage_path = ${oldPath} OR starts_with(version.storage_path, ${`${oldPath}/`}))
     `;
   }
 
@@ -763,7 +838,7 @@ export class PostgresFileRepository implements FileRepository {
         WHEN storage_path = ${oldPath} THEN ${newPath}
         ELSE ${newPath} || substring(storage_path FROM char_length(${oldPath}) + 1)
       END, updated_at = now()
-      WHERE storage_path = ${oldPath} OR storage_path LIKE ${`${oldPath}/%`}
+      WHERE storage_path = ${oldPath} OR starts_with(storage_path, ${`${oldPath}/`})
     `;
   }
 

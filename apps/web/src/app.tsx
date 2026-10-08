@@ -1,11 +1,13 @@
+import { PlutoPipelineCard } from "./pluto-pipeline-card.js";
+import { displayOpaqueKey, editOpaqueKey, pasteOpaqueKey, OpaqueKeyInput } from "./opaque-key-input.js";
 import { ServiceLogsPanel } from "./ServiceLogsPanel";
+import { StorageAnalysisPanel } from "./storage-analysis-panel.js";
 import { openAgentInitialization, confirmAgentAction, type InitializationJob } from "./agent-initialize.js";
 import { BackupPolicyPanel } from "./service-agents";
 import { updateCookieHeaders } from "./update-overlay.js";
 import { request as agentRequest } from "./api";
 const policyHeaders = () => updateCookieHeaders(["vault_csrf_dev", "__Host-vault_csrf"], "X-Vault-CSRF");
 import { openSaturnUpdates } from "./update-flow.js";
-import { HelperRecoveryPanel } from "./helper-recovery-panel.js";
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type CSSProperties, type DragEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode, type SyntheticEvent } from "react";
 import DOMPurify from "dompurify";
 import { marked } from "marked";
@@ -45,7 +47,8 @@ import {
   type UpdateStatus,
 } from "./types.js";
 
-const saturnPlanet = "/saturn-favicon.png";
+const saturnPlanetAlpha = "/saturn-favicon.png";
+const saturnPlanetOnBlack = "/saturn-planet-on-black.png";
 
 type GatewayState = "checking" | "ready" | "degraded";
 type GatewayHealth = { readonly gateway: GatewayState };
@@ -73,10 +76,11 @@ const NAV_ITEMS: Readonly<Record<PrimaryViewName, { readonly label: string }>> =
 };
 const DEFAULT_NAVIGATION_ORDER: readonly PrimaryViewName[] = ["dashboard", "files", "inbox", "shared", "synchronization", "trash", "settings"];
 const DEFAULT_DASHBOARD_ORDER: readonly DashboardCardName[] = ["cpu", "ram", "disk", "uptime", "storage", "drop", "reachability", "tasks"];
-const DEFAULT_SETTINGS_ORDER: readonly SettingsCardName[] = ["appearance", "security", "backup", "gryphon", "updates", "logs"];
+const DEFAULT_SETTINGS_ORDER: readonly SettingsCardName[] = ["appearance", "security", "storage", "backup", "gryphon", "updates", "logs"];
 const SETTINGS_CARD_TITLES: Readonly<Record<SettingsCardName, string>> = {
   appearance: "Appearance",
   security: "Security",
+  storage: "Storage connection",
   backup: "Backup",
   gryphon: "Gryphon Connection",
   updates: "Updates",
@@ -159,9 +163,12 @@ function ownerPreferences(value: OwnerPreferences | Omit<OwnerPreferences, "upda
   const validSettingsOrder = knownSettingsOrder
     && settingsOrder.length === DEFAULT_SETTINGS_ORDER.length
   const typedSettingsOrder = knownSettingsOrder ? settingsOrder as SettingsCardName[] : undefined;
-  const normalizedSettingsOrder = typedSettingsOrder === undefined
-    ? DEFAULT_SETTINGS_ORDER
-    : [...typedSettingsOrder, ...DEFAULT_SETTINGS_ORDER.filter((item) => !typedSettingsOrder.includes(item))];
+  const migratedSettingsOrder = [...(typedSettingsOrder ?? DEFAULT_SETTINGS_ORDER)];
+  if (!migratedSettingsOrder.includes("storage")) {
+    const securityIndex = migratedSettingsOrder.indexOf("security");
+    migratedSettingsOrder.splice(securityIndex < 0 ? migratedSettingsOrder.length : securityIndex + 1, 0, "storage");
+  }
+  const normalizedSettingsOrder = [...migratedSettingsOrder, ...DEFAULT_SETTINGS_ORDER.filter((item) => !migratedSettingsOrder.includes(item))];
   const uploadBufferGiB = Number.isSafeInteger(value.uploadBufferGiB) && value.uploadBufferGiB >= 1 && value.uploadBufferGiB <= 8_192
     ? value.uploadBufferGiB
     : 110;
@@ -265,11 +272,11 @@ function compareResources(left: Resource, right: Resource, field: SortField, dir
   return (left.sizeBytes - right.sizeBytes || left.name.localeCompare(right.name, undefined, { numeric: true, sensitivity: "base" })) * multiplier;
 }
 
-function resourceExtension(resource: Resource): string {
+function resourceExtension(resource: Pick<Resource, "name">): string {
   return resource.name.split(".").pop()?.toLocaleLowerCase() ?? "";
 }
 
-function resourceKind(resource: Resource): FileKind {
+function resourceKind(resource: Pick<Resource, "type" | "name" | "mimeType">): FileKind {
   if (resource.type === "folder") return "folder";
   const mime = resource.mimeType?.toLocaleLowerCase() ?? "";
   const extension = resourceExtension(resource);
@@ -428,7 +435,7 @@ function MarkdownPreview({ resource }: { readonly resource: Resource }) {
 
 function VideoPreview({ resource }: { readonly resource: Resource }) {
   const [error, setError] = useState(false);
-  if (error) return <div className="quick-preview__media-error" role="alert"><p>This video codec is not supported by this browser.</p><a href={downloadUrl(resource.id)}>Download file</a></div>;
+  if (error) return <div className="quick-preview__media-error" role="alert"><p>This video codec is not supported by this browser.</p><a href={downloadUrl(resource.id)} onClick={(event) => { event.currentTarget.href = downloadUrl(resource.id); }}>Download file</a></div>;
   return <video
     src={downloadUrl(resource.id, true)}
     controls
@@ -443,7 +450,7 @@ function VideoPreview({ resource }: { readonly resource: Resource }) {
 function QuickPreview({ resource, onClose }: { readonly resource: Resource; readonly onClose: () => void }) {
   const kind = resourceKind(resource);
   return <div className="quick-preview" role="dialog" aria-modal="true" aria-label={`Preview ${resource.name}`} onMouseDown={(event) => { if (event.currentTarget === event.target) onClose(); }}>
-    <header><strong>{resource.name}</strong><span>{formatBytes(resource.sizeBytes)}</span><a href={downloadUrl(resource.id)}>Download</a><button type="button" onClick={onClose} aria-label="Close preview">×</button></header>
+    <header><strong>{resource.name}</strong><span>{formatBytes(resource.sizeBytes)}</span><a href={downloadUrl(resource.id)} onClick={(event) => { event.currentTarget.href = downloadUrl(resource.id); }}>Download</a><button type="button" onClick={onClose} aria-label="Close preview">×</button></header>
     <div className={`quick-preview__content quick-preview__content--${kind}`}>
       {kind === "image" ? <img src={downloadUrl(resource.id, true)} alt={resource.name} />
         : kind === "video" ? <VideoPreview resource={resource} />
@@ -476,6 +483,8 @@ function ResourceContextMenu({ state, canPaste, canCompress, canExtract, protect
   readonly onClose: () => void;
 }) {
   const menu = useRef<HTMLDivElement>(null);
+  const closeMenu = useRef(onClose);
+  useEffect(() => { closeMenu.current = onClose; }, [onClose]);
   const actions = [
     { id: "copy", label: "Copy", disabled: state.resource === undefined },
     { id: "cut", label: "Cut", disabled: state.resource === undefined || protectedRoot },
@@ -489,13 +498,13 @@ function ResourceContextMenu({ state, canPaste, canCompress, canExtract, protect
     { id: "compress", label: "Compress to ZIP", disabled: !canCompress },
   ] as const;
   useEffect(() => {
-    const close = () => onClose();
+    const close = () => closeMenu.current();
     window.addEventListener("pointerdown", close);
     window.addEventListener("resize", close);
     window.addEventListener("scroll", close, true);
     menu.current?.querySelector<HTMLButtonElement>("button:not(:disabled)")?.focus();
     return () => { window.removeEventListener("pointerdown", close); window.removeEventListener("resize", close); window.removeEventListener("scroll", close, true); };
-  }, [onClose]);
+  }, [state]);
   const keyboard = (event: ReactKeyboardEvent<HTMLDivElement>) => {
     if (event.key === "Escape") { event.preventDefault(); onClose(); return; }
     if (event.key !== "ArrowDown" && event.key !== "ArrowUp" && event.key !== "Home" && event.key !== "End") return;
@@ -542,14 +551,18 @@ function LoginView({ health, onAuthenticated }: { readonly health: GatewayState;
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
   const accessKeyInput = useRef<HTMLInputElement>(null);
+  const exactAccessKey = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    if (!pending && error) accessKeyInput.current?.focus();
+  }, [pending, error]);
   const clearAccessKey = () => {
     if (accessKeyInput.current !== null) accessKeyInput.current.value = "";
+    exactAccessKey.current=undefined;
   };
   const submit = async (event: SyntheticEvent<HTMLFormElement>) => {
     event.preventDefault();
-    const accessKey = accessKeyInput.current?.value ?? "";
+    const accessKey = exactAccessKey.current ?? accessKeyInput.current?.value ?? "";
     if (!accessKey || pending) return;
-    let refocusAccessKey = false;
     setPending(true);
     setError("");
     try {
@@ -561,10 +574,8 @@ function LoginView({ health, onAuthenticated }: { readonly health: GatewayState;
       setError(caught instanceof ApiError && caught.status === 429
         ? "Too many attempts. Wait before trying again."
         : "The access key was not accepted.");
-      refocusAccessKey = true;
     } finally {
       setPending(false);
-      if (refocusAccessKey) window.requestAnimationFrame(() => accessKeyInput.current?.focus());
     }
   };
   const reachabilityLabel = health === "checking"
@@ -578,7 +589,7 @@ function LoginView({ health, onAuthenticated }: { readonly health: GatewayState;
       <div className="login-composition">
         <header className="login-brand" aria-labelledby="login-title">
           <h1 id="login-title" className="wordmark" aria-label="Saturn">saturn</h1>
-          <span className="login-brand__icon" aria-hidden="true"><img src={saturnPlanet} alt="" /></span>
+          <span className="login-brand__icon" aria-hidden="true"><img src={saturnPlanetOnBlack} alt="" /></span>
         </header>
         <section className="login-panel" aria-labelledby="login-title">
           <div
@@ -602,7 +613,8 @@ function LoginView({ health, onAuthenticated }: { readonly health: GatewayState;
                 autoComplete="off"
                 autoCapitalize="none"
                 spellCheck={false}
-                maxLength={512}
+                onChange={event=>{exactAccessKey.current=editOpaqueKey(exactAccessKey.current??"",event.target.value);}}
+                onPaste={event=>{event.preventDefault();const raw=pasteOpaqueKey(event.currentTarget,exactAccessKey.current??event.currentTarget.value,event.clipboardData.getData("text"));exactAccessKey.current=raw;event.currentTarget.value=displayOpaqueKey(raw);}}
                 placeholder="Access Key..."
                 aria-describedby="login-error"
                 aria-invalid={error ? "true" : undefined}
@@ -691,7 +703,7 @@ function ConfirmDialog({ title, description, confirmLabel, danger = false, pendi
   readonly onClose: () => void;
 }) {
   return (
-    <Dialog title={title} description={description} onClose={onClose}>
+    <Dialog title={title} description={description} onClose={onClose} dismissible={!pending}>
       <div className="dialog__actions">
         <button className="button" type="button" onClick={onClose} disabled={pending}>Cancel</button>
         <button className={`button ${danger ? "button--danger" : "button--primary"}`} type="button" onClick={onConfirm} disabled={pending}>
@@ -735,6 +747,9 @@ function DropView({ health }: { readonly health: GatewayState }) {
   const [now, setNow] = useState(() => performance.now());
   const input = useRef<HTMLInputElement>(null);
   const dragDepth = useRef(0);
+  const uploadControllers = useRef(new Map<string, AbortController>());
+  const [cancelling, setCancelling] = useState<ReadonlySet<string>>(new Set());
+  useEffect(() => () => { for (const controller of uploadControllers.current.values()) controller.abort(); }, []);
   const activateSession = useCallback((value: DropSessionInfo) => {
     const localNow = performance.now();
     setSession(value);
@@ -816,15 +831,25 @@ function DropView({ health }: { readonly health: GatewayState }) {
     setPending(true); setMessage(initialMessage);
     for (const file of files) {
       const localId = crypto.randomUUID();
+      let uploadId: string = localId;
+      const controller = new AbortController();
       setJobs((current) => [...current, { id: localId, name: file.name, progress: 0, state: "uploading" }]);
       try {
-        const result = await uploadDropFile(file, (progress) => setJobs((current) => current.map((job) => job.id === localId ? { ...job, progress } : job)));
-        setJobs((current) => current.map((job) => job.id === localId ? { id: result.id, name: file.name, progress: 1, state: result.state } : job));
+        const result = await uploadDropFile(file, (progress) => setJobs((current) => current.map((job) => job.id === uploadId ? { ...job, progress } : job)), {
+          signal: controller.signal,
+          onCreated: (created) => {
+            uploadId = created.id;
+            uploadControllers.current.set(uploadId, controller);
+            setJobs((current) => current.some((job) => job.id === uploadId) ? current.filter((job) => job.id !== localId) : current.map((job) => job.id === localId ? { ...job, id: uploadId, state: created.state } : job));
+          },
+        });
+        setJobs((current) => current.map((job) => job.id === uploadId && !["stored", "cancelled"].includes(job.state) ? { ...job, progress: 1, state: result.state } : job));
       } catch (error) {
+        if (controller.signal.aborted) continue;
         if (error instanceof ApiError && error.status === 401) { setState("redeem"); setSession(undefined); setCountdownDeadline(undefined); }
-        setJobs((current) => current.map((job) => job.id === localId ? { ...job, state: "failed" } : job));
+        setJobs((current) => current.map((job) => job.id === uploadId ? { ...job, state: "failed" } : job));
         setMessage("An upload stopped before entering the verified buffer. No partial file is visible in Drop Point.");
-      }
+      } finally { uploadControllers.current.delete(uploadId); }
     }
     setPending(false); if (input.current !== null) input.current.value = "";
   };
@@ -837,10 +862,16 @@ function DropView({ health }: { readonly health: GatewayState }) {
   };
 
   const cancel = async (id: string) => {
-    setPending(true);
+    if (cancelling.has(id)) return;
+    setCancelling((current) => new Set([...current, id]));
+    uploadControllers.current.get(id)?.abort();
     try { const value = await dropApi.cancel(id); setJobs((current) => current.map((job) => job.id === id ? { ...job, state: value.state } : job)); }
-    catch { setMessage("This upload can no longer be removed because remote transfer has started."); }
-    finally { setPending(false); }
+    catch {
+      const status = await dropApi.status(id).catch(() => undefined);
+      if (status !== undefined) setJobs((current) => current.map((job) => job.id === id ? { ...job, state: status.state } : job));
+      setMessage("This upload could not be removed. Its current server state is shown in the queue.");
+    }
+    finally { setCancelling((current) => { const next = new Set(current); next.delete(id); return next; }); }
   };
 
   if (state === "checking") return <main className="boot-state">Checking Drop session…</main>;
@@ -873,7 +904,7 @@ function DropView({ health }: { readonly health: GatewayState }) {
             </button>
             <input ref={input} aria-label="Choose files for Drop" className="visually-hidden-input" type="file" multiple onChange={(event) => void upload([...event.target.files ?? []])} />
             {jobs.length === 0 ? null : <div className="drop-jobs" role="region" aria-live="polite" aria-label="Shared Drop upload queue">
-              {jobs.map((job) => <div className={`drop-job ${job.state === "stored" ? "drop-job--stored" : ""}`} key={job.id}><span>{job.name}</span><progress max={1} value={job.progress} /><strong>{job.state}</strong>{!expired && ["reserved", "uploading", "buffered"].includes(job.state) ? <button type="button" onClick={() => void cancel(job.id)} disabled={pending}>Remove</button> : null}</div>)}
+              {jobs.map((job) => <div className={`drop-job ${job.state === "stored" ? "drop-job--stored" : ""}`} key={job.id}><span>{job.name}</span><progress max={1} value={job.progress} /><strong>{job.state}</strong>{!expired && ["reserved", "uploading", "buffered"].includes(job.state) ? <button type="button" onClick={() => void cancel(job.id)} disabled={cancelling.has(job.id) || (pending && !uploadControllers.current.has(job.id) && job.state !== "buffered")}>Remove</button> : null}</div>)}
             </div>}
           </div>
           {session?.buffer === undefined || session.buffer.state === "available" ? null : <p className={`buffer-state buffer-state--${session.buffer.state}`}>Local buffer {session.buffer.state.toUpperCase()} · {formatBytes(session.buffer.reservedBytes)} reserved of {formatBytes(session.buffer.maxBytes)}</p>}
@@ -1331,7 +1362,7 @@ function FilesView({ initialFolderId, title, routeSegments, onPathChange, shareC
 
   const showVersions = async (resource: Resource) => {
     try {
-      setVersions({ resource, items: await api.versions(resource.id) });
+      setVersions({ resource, items: (await api.versions(resource.id)).filter(version => version.state === "active") });
     } catch (error) {
       handleError(error, "Versions could not be loaded.");
     }
@@ -1489,9 +1520,14 @@ function InternalDropUploader({ health, addNotice, onUnauthorized, onStored }: {
   const input = useRef<HTMLInputElement>(null);
   const sessionExpiresAt = useRef(0);
   const dragDepth = useRef(0);
+  const uploadControllers = useRef(new Map<string, AbortController>());
+  const [cancelling, setCancelling] = useState<ReadonlySet<string>>(new Set());
+  const mounted = useRef(true);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; for (const controller of uploadControllers.current.values()) controller.abort(); }; }, []);
   const monitor = async (id: string) => {
     for (;;) {
       await new Promise((resolve) => window.setTimeout(resolve, 1_000));
+      if (!mounted.current) return;
       try {
         const status = await dropApi.status(id);
         setJobs((current) => current.map((job) => job.id === id ? { ...job, progress: status.expectedSize === 0 ? 1 : status.receivedSize / status.expectedSize, state: status.state } : job));
@@ -1515,22 +1551,44 @@ function InternalDropUploader({ health, addNotice, onUnauthorized, onStored }: {
       setPending(false);
       return;
     }
+    let failed = 0;
+    let accepted = 0;
     for (const file of files) {
       const id = crypto.randomUUID();
+      let uploadId: string = id;
+      const controller = new AbortController();
       setJobs((current) => [...current, { id, name: file.name, progress: 0, state: "uploading" }]);
       try {
-        const result = await uploadDropFile(file, (progress) => setJobs((current) => current.map((job) => job.id === id ? { ...job, progress } : job)));
-        setJobs((current) => current.map((job) => job.id === id ? { id: result.id, name: file.name, progress: 1, state: result.state } : job));
+        const result = await uploadDropFile(file, (progress) => setJobs((current) => current.map((job) => job.id === uploadId ? { ...job, progress } : job)), {
+          signal: controller.signal,
+          onCreated: (created) => { uploadId = created.id; uploadControllers.current.set(uploadId, controller); setJobs((current) => current.map((job) => job.id === id ? { ...job, id: uploadId, state: created.state } : job)); },
+        });
+        accepted += 1;
+        setJobs((current) => current.map((job) => job.id === uploadId ? { ...job, progress: 1, state: result.state } : job));
         if (result.state === "stored") onStored();
         if (!["stored", "failed", "cancelled"].includes(result.state)) void monitor(result.id);
       } catch (error) {
+        if (controller.signal.aborted) continue;
+        failed += 1;
         if (error instanceof ApiError && error.status === 401) onUnauthorized();
-        setJobs((current) => current.map((job) => job.id === id ? { ...job, state: "failed" } : job));
-      }
+        setJobs((current) => current.map((job) => job.id === uploadId ? { ...job, state: "failed" } : job));
+      } finally { uploadControllers.current.delete(uploadId); }
     }
     setPending(false);
     if (input.current !== null) input.current.value = "";
-    addNotice("success", "Files entered the in-house Drop buffer.");
+    if (failed > 0) addNotice("error", `${String(failed)} file(s) could not enter the verified Drop buffer.`);
+    if (accepted > 0) addNotice("success", `${String(accepted)} file(s) entered the in-house Drop buffer.`);
+  };
+  const cancel = async (id: string) => {
+    if (cancelling.has(id)) return;
+    setCancelling((current) => new Set([...current, id]));
+    uploadControllers.current.get(id)?.abort();
+    try { const value = await dropApi.cancel(id); setJobs((current) => current.map((job) => job.id === id ? { ...job, state: value.state } : job)); }
+    catch {
+      const status = await dropApi.status(id).catch(() => undefined);
+      if (status !== undefined) setJobs((current) => current.map((job) => job.id === id ? { ...job, state: status.state } : job));
+      addNotice("error", "This upload could not be removed. Its current server state is shown in the queue.");
+    } finally { setCancelling((current) => { const next = new Set(current); next.delete(id); return next; }); }
   };
   const acceptDrop = (dataTransfer: DataTransfer) => {
     const dropped = droppedPayload(dataTransfer);
@@ -1545,7 +1603,7 @@ function InternalDropUploader({ health, addNotice, onUnauthorized, onStored }: {
     <div className={`drop-upload-stage ${jobs.length > 0 ? "drop-upload-stage--with-jobs" : ""}`}>
       <button className="drop-target" type="button" disabled={pending} onClick={() => input.current?.click()}><span>{dragging ? "Release to upload" : "Drop and drag files here"}</span><small>or choose files - up to {formatStorageBytes(session?.maxFileBytes ?? session?.maxBytes ?? 20 * 1024 ** 3).replace(".0 ", " ")}</small></button>
       <input ref={input} className="visually-hidden-input" type="file" multiple aria-label="Choose files for in-house Drop" onChange={(event) => void upload([...event.target.files ?? []])} />
-      {jobs.length === 0 ? null : <div className="drop-jobs" role="region" aria-live="polite" aria-label="In-house upload queue">{jobs.map((job) => <div className={`drop-job ${job.state === "stored" ? "drop-job--stored" : ""}`} key={job.id}><span>{job.name}</span><progress max={1} value={job.progress} /><strong>{job.state}</strong></div>)}</div>}
+      {jobs.length === 0 ? null : <div className="drop-jobs" role="region" aria-live="polite" aria-label="In-house upload queue">{jobs.map((job) => <div className={`drop-job ${job.state === "stored" ? "drop-job--stored" : ""}`} key={job.id}><span>{job.name}</span><progress max={1} value={job.progress} /><strong>{job.state}</strong>{["reserved", "uploading", "buffered"].includes(job.state) ? <button type="button" onClick={() => void cancel(job.id)} disabled={cancelling.has(job.id) || (pending && !uploadControllers.current.has(job.id) && job.state !== "buffered")}>Remove</button> : null}</div>)}</div>}
     </div>
   </aside>;
 }
@@ -1839,8 +1897,15 @@ function PublicShareView({ token }: { readonly token: string }) {
     setPending(true);
     setMessage("");
     try {
-      const value = await publicShareApi.preparePackage(token);
+      let value = await publicShareApi.preparePackage(token);
+      const deadline = Date.now() + 15 * 60_000;
+      while (value.state === "preparing" && Date.now() < deadline) {
+        setMessage("Preparing folder download…");
+        await new Promise<void>(resolve => setTimeout(resolve, 2_000));
+        value = await publicShareApi.packageStatus(token);
+      }
       if (value.state !== "ready") throw new Error("Share package is not ready");
+      setMessage("");
       const download = document.createElement("a");
       download.href = publicShareApi.packageUrl(token);
       download.download = `${share?.resourceName ?? "shared-folder"}.zip`;
@@ -1874,7 +1939,8 @@ function PublicShareView({ token }: { readonly token: string }) {
   const expiry = share?.expiresAt === undefined ? "none" : new Date(share.expiresAt).toLocaleString();
   const modeLabel = share?.mode === "view" ? "View only Gateway" : share?.mode === "browse" ? "Browse Gateway" : "Download only Gateway";
   const bulkSize = share?.resourceSize ?? knownTotal;
-  return (
+  const legacyMode = new URLSearchParams(window.location.search).get("legacy") === "1";
+  if (legacyMode) return (
     <main className={`share-public-view ${share?.locked === true ? "share-public-view--locked" : "share-public-view--opened"}`}>
       {share === undefined ? unavailable ? <div className="not-found-state"><strong>404</strong><span>Shared link not found</span></div> : <p className="share-public-loading">{message || "Checking share…"}</p> : share.locked ? <div className="share-locked-composition">
         <form className="share-password-gate" aria-labelledby="shared-password-title" onSubmit={(event) => void unlock(event)}>
@@ -1902,13 +1968,83 @@ function PublicShareView({ token }: { readonly token: string }) {
               {entries.length === 0 ? <p className="share-browser__empty">This shared folder is empty.</p> : entries.map((child) => <div className="share-browser__row" role="row" key={child.id}>
                 <span role="cell">{child.type === "folder" ? <button className="share-browser__name share-browser__name--folder" type="button" onClick={() => void openFolder(child.id)} disabled={pending}>{child.name}</button> : <span className="share-browser__name share-browser__name--file">{child.name}</span>}</span>
                 <span role="cell">{formatBytes(child.sizeBytes)}</span>
-                <span role="cell">{child.type === "file" && share.mode !== "browse" ? <a className="share-browser__download" aria-label={`${share.mode === "view" ? "Open" : "Download"} ${child.name}`} href={share.resourceType === "file" ? publicShareApi.contentUrl(token) : publicShareApi.contentUrl(token, child.id)}>{share.mode === "view" ? "↗" : "↓"}</a> : null}</span>
+                <span role="cell">{child.type === "file" && share.mode !== "browse" ? <a className="share-browser__download" aria-label={`${share.mode === "view" ? "Open" : "Download"} ${child.name}`} href={publicShareApi.contentUrl(token, share.resourceType === "file" ? undefined : child.id, share.mode !== "view")} onClick={(event) => { if (share.mode !== "view") event.currentTarget.href = publicShareApi.contentUrl(token, share.resourceType === "file" ? undefined : child.id, true); }}>{share.mode === "view" ? "↗" : "↓"}</a> : null}</span>
               </div>)}
             </div>
           </div>
-          {share.resourceType === "file" ? <a className="share-public-download-all" href={publicShareApi.contentUrl(token)}>{share.mode === "view" ? "Open file" : "Download all"} - {formatBytes(share.resourceSize)}</a> : share.mode === "download_folder" ? <button className="share-public-download-all" type="button" onClick={() => void prepareAndDownload()} disabled={pending}>{pending ? "Preparing..." : `Download all - ${formatBytes(bulkSize)}`}</button> : share.mode === "browse" ? <button className="share-public-download-all" type="button" disabled>{`Download all - ${formatBytes(bulkSize)}`}</button> : null}
+          {share.resourceType === "file" ? <a className="share-public-download-all" href={publicShareApi.contentUrl(token, undefined, share.mode !== "view")} onClick={(event) => { if (share.mode !== "view") event.currentTarget.href = publicShareApi.contentUrl(token, undefined, true); }}>{share.mode === "view" ? "Open file" : "Download all"} - {formatBytes(share.resourceSize)}</a> : share.mode === "download_folder" ? <button className="share-public-download-all" type="button" onClick={() => void prepareAndDownload()} disabled={pending}>{pending ? "Preparing..." : `Download all - ${formatBytes(bulkSize)}`}</button> : share.mode === "browse" ? <button className="share-public-download-all" type="button" disabled>{`Download all - ${formatBytes(bulkSize)}`}</button> : null}
           <p className="share-public-error" role="alert">{message}</p>
         </section>
+      </div>}
+    </main>
+  );
+  const accessLabel = share?.mode === "view" ? "View only" : share?.mode === "browse" ? "Browse only" : "Download allowed";
+  const expiryLabel = share?.expiresAt === undefined ? "No expiration" : `Available until ${new Date(share.expiresAt).toLocaleString()}`;
+  const itemLabel = `${String(entries.length)} ${entries.length === 1 ? "item" : "items"}`;
+  const primaryAction = share === undefined || share.locked ? null
+    : share.resourceType === "file"
+      ? <a className="share-client-primary-action" href={publicShareApi.contentUrl(token, undefined, share.mode !== "view")} onClick={(event) => { if (share.mode !== "view") event.currentTarget.href = publicShareApi.contentUrl(token, undefined, true); }}>{share.mode === "view" ? "Open file" : "Download"}</a>
+      : share.mode === "download_folder"
+        ? <button className="share-client-primary-action" type="button" onClick={() => void prepareAndDownload()} disabled={pending}>{pending ? "Preparing…" : "Download all"}</button>
+        : <button className="share-client-primary-action share-client-primary-action--disabled" type="button" disabled>Download unavailable</button>;
+  return (
+    <main className={`share-public-view share-public-view--client ${share?.locked === true ? "share-public-view--client-locked" : "share-public-view--client-opened"}`}>
+      {share === undefined ? unavailable ? <div className="share-client-not-found"><strong>404</strong><span>Shared link not found</span></div> : <p className="share-client-loading">{message || "Checking share…"}</p> : share.locked ? <div className="share-client-lock-shell">
+        <header className="share-client-brand share-client-lock-wordmark" aria-label="Saturn"><strong>saturn</strong></header>
+        <section className="share-client-lock-card" aria-labelledby="shared-password-title">
+          <span className="share-client-lock-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none">
+              <path d="M7.5 10V7.5a4.5 4.5 0 0 1 9 0V10" />
+              <rect x="5" y="10" width="14" height="11" rx="1" />
+              <path d="M12 14v3" />
+            </svg>
+          </span>
+          <p className="share-client-kicker">Private shared link</p>
+          <h1 id="shared-password-title">This link is protected</h1>
+          <p>Enter the password provided by the sender to view the shared content.</p>
+          <form onSubmit={(event) => void unlock(event)}>
+            <label htmlFor="shared-link-password">Password</label>
+            <input id="shared-link-password" type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="current-password" placeholder="Enter password" required autoFocus />
+            <button type="submit" disabled={pending}>{pending ? "Checking…" : "Continue"}</button>
+          </form>
+          <p className="share-client-password-error" role="alert">{message}</p>
+        </section>
+        {health.gateway === "degraded" ? <div className="share-client-service-error" role="status">Saturn is temporarily unavailable. Please try again shortly.</div> : null}
+        <p className="share-client-footer">Shared securely with Saturn</p>
+      </div> : <div className="share-client-shell">
+        <header className="share-client-topbar">
+          <div className="share-client-brand" aria-label="Saturn"><img src={saturnPlanetAlpha} alt="" /><strong>saturn</strong></div>
+          <div className="share-client-status"><span>{accessLabel}</span><small>{expiryLabel}</small></div>
+        </header>
+        <section className="share-client-content" aria-labelledby="public-share-title">
+          <header className="share-client-content__head">
+            <div>
+              <p className="share-client-kicker">Shared {share.resourceType}</p>
+              <h1 id="public-share-title">{share.resourceName}</h1>
+              <span>{itemLabel} · {formatBytes(bulkSize)}</span>
+            </div>
+            {primaryAction}
+          </header>
+          {health.gateway === "degraded" ? <div className="share-client-service-error" role="status">Saturn is temporarily unavailable. Some actions may not work.</div> : null}
+          <div className="share-client-toolbar">
+            <div>{history.length > 0 ? <button className="share-client-back" type="button" onClick={() => void back()} disabled={pending}>← Back</button> : <span>{share.resourceType === "folder" ? "Files and folders" : "Shared file"}</span>}</div>
+            <div className="share-client-sort" aria-label="Sort shared content"><SortButton field="name" activeField={sort.field} direction={sort.direction} onChange={changeSort}>Name</SortButton><SortButton field="size" activeField={sort.field} direction={sort.direction} onChange={changeSort}>Size</SortButton></div>
+          </div>
+          <div className="share-client-grid" aria-label={`Shared files in ${share.resourceName}`}>
+            {entries.length === 0 ? <p className="share-client-empty">This shared folder is empty.</p> : entries.map((child) => {
+              const kind = resourceKind(child);
+              const hasThumbnail = child.type === "file" && ["image", "video", "pdf"].includes(kind);
+              return <article className="share-client-file" key={child.id}>
+                {child.type === "folder" ? <button className="share-client-file__open" type="button" onClick={() => void openFolder(child.id)} disabled={pending} aria-label={`Open folder ${child.name}`}><span className={`share-client-file__visual share-client-file__visual--${kind}`}><FileKindIcon kind={kind} /></span></button> : <span className={`share-client-file__visual share-client-file__visual--${kind}`}><FileKindIcon kind={kind} />{hasThumbnail ? <img className="share-client-file__thumbnail" src={publicShareApi.thumbnailUrl(token, child.id)} alt="" loading="lazy" onError={(event) => { event.currentTarget.hidden = true; }} /> : null}</span>}
+                <div className="share-client-file__meta"><strong title={child.name}>{child.name}</strong><span>{child.type === "folder" ? `Folder · ${formatBytes(child.sizeBytes)}` : formatBytes(child.sizeBytes)}</span></div>
+                {child.type === "file" && share.mode !== "browse" ? <a className="share-client-file__action" aria-label={`${share.mode === "view" ? "Open" : "Download"} ${child.name}`} href={publicShareApi.contentUrl(token, share.resourceType === "file" ? undefined : child.id, share.mode !== "view")} onClick={(event) => { if (share.mode !== "view") event.currentTarget.href = publicShareApi.contentUrl(token, share.resourceType === "file" ? undefined : child.id, true); }}>{share.mode === "view" ? "Open" : "Download"}</a> : null}
+              </article>;
+            })}
+          </div>
+          <details className="share-client-about"><summary>About access</summary><p>Any content displayed in a browser can still be copied. Saturn does not promise impossible download prevention.{share.mode === "browse" ? " Download permission is not granted for this link." : ""}</p></details>
+          <p className="share-client-error" role="alert">{message}</p>
+        </section>
+        <footer className="share-client-footer">Shared via Saturn</footer>
       </div>}
     </main>
   );
@@ -2043,8 +2179,8 @@ function TransferTasksBody({ overview, controllingTaskId, onControl }: {
     <div className="transfer-list" aria-live="polite">
       {transfers === undefined ? <p className="transfer-empty">Transfer telemetry unavailable.</p> : tasks.length === 0 ? <p className="transfer-empty">No active or queued file transfers.</p> : tasks.map((task) => <article className="transfer-task" key={`${task.direction}:${task.id}`}>
         <div className="transfer-task__identity"><span>{task.direction === "upload" ? "UPLOAD" : task.direction === "download" ? "DOWNLOAD" : "ARCHIVE"}</span><strong title={task.filename}>{task.filename}</strong></div>
-        <div className="transfer-task__state"><span>{TRANSFER_STATE_LABELS[task.state]}{task.queuePosition === undefined ? "" : ` · #${String(task.queuePosition)}`}</span><strong>{task.percent.toFixed(1)}%</strong></div>
-        <div className="transfer-task__progress"><progress max={100} value={task.percent} aria-label={`${task.filename} ${task.percent.toFixed(1)}%`} /><span>{formatBytes(task.transferredBytes)} / {formatBytes(task.totalBytes)}</span></div>
+        <div className="transfer-task__state"><span>{TRANSFER_STATE_LABELS[task.state]}{task.queuePosition === undefined ? "" : ` · #${String(task.queuePosition)}`}</span><strong>{task.sizeKnown === false ? "Streaming" : `${task.percent.toFixed(1)}%`}</strong></div>
+        <div className="transfer-task__progress"><progress max={100} value={task.sizeKnown === false ? undefined : task.percent} aria-label={`${task.filename} ${task.sizeKnown === false ? "streaming" : `${task.percent.toFixed(1)}%`}`} /><span>{task.sizeKnown === false ? `${formatBytes(task.transferredBytes)} transferred` : `${formatBytes(task.transferredBytes)} / ${formatBytes(task.totalBytes)}`}</span></div>
         <strong className="transfer-task__rate">{formatRate(task.bytesPerSecond)}</strong>
         <div className="transfer-task__actions" aria-label={`Controls for ${task.filename}`}>
           <button className="button" type="button" disabled={!task.canPause || controllingTaskId !== undefined} onClick={() => onControl(task, "pause")}>Pause</button>
@@ -2198,8 +2334,9 @@ function DashboardView({ preferences, setPreferences, addNotice }: {
     if (file === undefined || task === undefined || controllingTaskId !== undefined) return;
     setControllingTaskId(task.id);
     try {
-      if (task.state === "paused") await api.controlTransferTask(task.id, "resume");
-      await resumeOwnerUpload(task.id, file, () => undefined);
+      await resumeOwnerUpload(task.id, file, () => undefined, async () => {
+        if (task.state === "paused") await api.controlTransferTask(task.id, "resume");
+      });
       addNotice("success", "Upload resumed from its verified server offset and completed.");
       await load();
     } catch (error) {
@@ -2293,7 +2430,7 @@ function DocumentationView() {
       <UniversalCard ordinal={1} title="Storage model"><p>All storage access passes through Saturn Gateway. The owner UI never receives Storage Box credentials.</p><p>Preinstalled root folders are rename-only; ordinary root folders remain fully manageable.</p></UniversalCard>
       <UniversalCard ordinal={2} title="Access model"><p>The owner workspace uses one Access Key. Drop sessions, shared links, devices and backup producers use separate scoped capabilities.</p></UniversalCard>
       <UniversalCard ordinal={3} title="Operations"><p>Implementation, verification and recovery runbooks are maintained in the project documentation directory on the Saturn host.</p></UniversalCard>
-      <UniversalCard ordinal={4} title="Changing storage"><p>Settings → Security can validate and select an independent SFTP target from an authenticated owner session. Saturn migrates zero file bytes, rebuilds the visible catalog and revokes capabilities that belonged to the previous file set.</p><p>The previous storage remains untouched. Selecting it again requires its credential and performs another validated index rebuild.</p></UniversalCard>
+      <UniversalCard ordinal={4} title="Changing storage"><p>Settings → Storage connection can validate and select an independent SFTP target from an authenticated owner session. Saturn migrates zero file bytes, rebuilds the visible catalog and revokes capabilities that belonged to the previous file set.</p><p>The previous storage remains untouched. Selecting it again requires its credential and performs another validated index rebuild.</p><p>For unseen changes on the active storage, use Analyze storage in the same card. Review the saved report, then confirm Synchronize catalog to import new files, update changed metadata and mark absent files as missing. Existing resource IDs and file bytes are preserved; affected shared links are revoked. A stale report requires another analysis.</p></UniversalCard>
     </div>
   </section>;
 }
@@ -2302,14 +2439,33 @@ function StatusRow({ label, state, detail }: { readonly label: string; readonly 
   return <div className="status-row"><span>{label}</span><span className={`semantic-status semantic-status--${state}`}>{detail ?? (state === "ready" ? "Service Reachability" : state === "busy" ? "Busy" : "Unavailable")}<i aria-hidden="true" /></span></div>;
 }
 
-function NeptunePipelineRow({ service, agent, pending, reauthed, onSetup, onRotate, onRevoke }: {
+const INTERNAL_PIPELINE_TYPES = [
+  { namespace: "kernel", label: "Kernel" },
+  { namespace: "chronos", label: "Chronos" },
+  { namespace: "saturn", label: "Saturn" },
+  { namespace: "laboratory", label: "Laboratory" },
+] as const;
+type SynchronizationPipelineType = "host_updater" | "host_neptune" | "host_gryphon" | "host_wyvern"
+  | typeof INTERNAL_PIPELINE_TYPES[number]["namespace"] | "volt" | "mastermind" | "windows" | "pluto";
+
+function backupPipelineTypeLabel(service: BackupServiceInfo): string {
+  if (service.pipelineKind === "host_service") {
+    const labels: Record<string, string> = { updater: "Updater recovery", neptune: "Neptune recovery", gryphon: "Gryphon recovery", wyvern: "Wyvern recovery" };
+    return labels[service.namespaceSlug] ?? `Host recovery · ${service.namespaceSlug}`;
+  }
+  if (service.pipelineKind === "volt" || service.pipelineKind === "mastermind") {
+    const channels = [service.archivePipeline === false ? "" : "archive", service.mirrorRoot ? service.pipelineKind === "volt" ? "personal.volt mirror" : "full vault tree mirror" : ""].filter(Boolean);
+    return `${service.pipelineKind === "volt" ? "Volt" : "Mastermind"} · ${channels.join(" + ")}`;
+  }
+  return INTERNAL_PIPELINE_TYPES.find(type => type.namespace === service.namespaceSlug)?.label ?? service.namespaceSlug;
+}
+
+function NeptunePipelineRow({ service, agent, pending, onSetup, onRevoke }: {
   readonly service: BackupServiceInfo;
   readonly agent?: NeptuneAgentInfo | undefined;
   readonly pending: boolean;
-  readonly reauthed: boolean;
   readonly onSetup: (id: string) => Promise<void>;
-  readonly onRotate: (id: string) => Promise<void>;
-  readonly onRevoke: (id: string) => Promise<void>;
+  readonly onRevoke: () => void;
 }) {
   const [runs, setRuns] = useState<readonly BackupRunInfo[]>([]);
   useEffect(() => {
@@ -2329,129 +2485,126 @@ function NeptunePipelineRow({ service, agent, pending, reauthed, onSetup, onRota
   const archiveLastAttempt = typeof agent?.observed.archive["lastAttemptAt"] === "string" ? agent.observed.archive["lastAttemptAt"] : undefined;
   const archiveLastSuccess = typeof agent?.observed.archive["lastSuccessAt"] === "string" ? agent.observed.archive["lastSuccessAt"] : service.usage.lastCompletedAt;
   const archiveNextRun = typeof agent?.observed.archive["nextRunAt"] === "string" ? agent.observed.archive["nextRunAt"] : undefined;
-  return <article className="fleet-agent">
-    <div className="fleet-agent__summary"><strong>{service.name}</strong><span>{service.namespaceSlug}/{service.deploymentId} · {service.state} · {formatBytes(service.usage.storedBytes)}/{formatBytes(service.storedQuotaBytes)} stored</span><span>{heartbeat} · {applied ? "schedule applied" : "schedule pending"}{versionPending ? ` · update ${agent.desired.version} pending` : ""}</span><span>{archiveLastSuccess === undefined ? "no successful ZIP reported" : `last ZIP ${new Date(archiveLastSuccess).toLocaleString()}`}{archiveNextRun === undefined ? "" : ` · next ${new Date(archiveNextRun).toLocaleString()}`}{archiveLastAttempt === undefined || archiveLastAttempt === archiveLastSuccess ? "" : ` · last attempt ${new Date(archiveLastAttempt).toLocaleString()}`}</span>{agent?.observed.latestError === undefined ? null : <span className="danger-text">{agent.observed.latestError}</span>}</div>
+  return <article className="pipeline-connection-card fleet-agent" aria-label={service.name}>
+    <div className="fleet-agent__summary"><span className="pipeline-identity__label">Connection name</span><strong>{service.name}</strong><span className="pipeline-identity__type">{backupPipelineTypeLabel(service)}</span><span>Host name: {service.deploymentId}</span><span>Namespace: {service.namespaceSlug} · {service.state} · {formatBytes(service.usage.storedBytes)}/{formatBytes(service.storedQuotaBytes)} stored</span><span>{heartbeat} · {applied ? "schedule applied" : "schedule pending"}{versionPending ? ` · update ${agent.desired.version} pending` : ""}</span><span>{service.archivePipeline === false ? "Archive pipeline not selected" : archiveLastSuccess === undefined ? "no successful ZIP reported" : `last ZIP ${new Date(archiveLastSuccess).toLocaleString()}`}{archiveNextRun === undefined ? "" : ` · next ${new Date(archiveNextRun).toLocaleString()}`}{archiveLastAttempt === undefined || archiveLastAttempt === archiveLastSuccess ? "" : ` · last attempt ${new Date(archiveLastAttempt).toLocaleString()}`}</span>{agent?.observed.latestError === undefined ? null : <span className="danger-text">{agent.observed.latestError}</span>}</div>
     <p>Automatic backup schedules are controlled from each service’s Settings → Backup. This panel shows observed state and manages identity, enrollment and access.</p>
-    <div className="inline-actions"><button className="button" type="button" disabled={pending || !reauthed || service.state !== "active"} onClick={() => void onSetup(service.id)}>Setup code</button><button className="button" type="button" disabled={pending || !reauthed || service.state !== "active"} onClick={() => void onRotate(service.id)}>Rotate archive token</button><button className="button button--danger" type="button" disabled={pending || !reauthed || service.state !== "active"} onClick={() => void onRevoke(service.id)}>Revoke</button></div>
-    <details className="fleet-agent__runs"><summary>Recent ZIP runs ({runs.length})</summary>{runs.length === 0 ? <p className="empty-state">No runs recorded.</p> : <div className="compact-list">{runs.map((run) => <div className="compact-row" key={run.id}><span>{run.state} · {new Date(run.updatedAt).toLocaleString()} · {formatBytes(run.expectedSize)}</span><span>{run.receipt?.logicalPath ?? run.failureCode ?? run.filename}</span></div>)}</div>}</details>
+    <div className="inline-actions"><button className="button" type="button" disabled={pending || service.state !== "active"} onClick={() => void onSetup(service.id)}>Setup code</button><button className="button button--danger" type="button" disabled={pending || service.state !== "active"} onClick={onRevoke}>Revoke</button></div>
+    {service.archivePipeline === false ? null : <details className="fleet-agent__runs"><summary>Recent ZIP runs ({runs.length})</summary>{runs.length === 0 ? <p className="empty-state">No runs recorded.</p> : <div className="compact-list">{runs.map((run) => <div className="compact-row" key={run.id}><span>{run.state} · {new Date(run.updatedAt).toLocaleString()} · {formatBytes(run.expectedSize)}</span><span>{run.receipt?.logicalPath ?? run.failureCode ?? run.filename}</span></div>)}</div>}</details>}
   </article>;
 }
 
 function SynchronizationView({ addNotice }: { readonly addNotice: (kind: Notice["kind"], message: string) => void }) {
   const [pending, setPending] = useState(false);
-  const [accessKey, setAccessKey] = useState("");
-  const [reauthed, setReauthed] = useState(false);
   const [agents, setAgents] = useState<readonly NeptuneAgentInfo[]>([]);
   const [services, setServices] = useState<readonly BackupServiceInfo[]>([]);
   const [devices, setDevices] = useState<readonly DeviceInfo[]>([]);
-  const [pipeline, setPipeline] = useState<"archive" | "volt" | "mastermind">("archive");
-  const [serviceName, setServiceName] = useState("");
-  const [namespace, setNamespace] = useState("");
-  const [deployment, setDeployment] = useState("");
-  const [maxConcurrentRuns, setMaxConcurrentRuns] = useState(4);
-  const [enrollment, setEnrollment] = useState<{ readonly code: string; readonly expiresAt: string } | undefined>();
-  const [producerToken, setProducerToken] = useState<string | undefined>();
-  const [windowsName, setWindowsName] = useState("");
-  const [windowsToken, setWindowsToken] = useState<string | undefined>();
+  const [revokeCandidate, setRevokeCandidate] = useState<{ readonly kind: "service" | "windows" | "pluto"; readonly id: string; readonly name: string }>();
+  const [pipeline, setPipeline] = useState<SynchronizationPipelineType>("host_updater");
+  const [connectionName, setConnectionName] = useState("");
+  const [hostName, setHostName] = useState("");
+  const [archivePipeline, setArchivePipeline] = useState(true);
+  const [mirrorPipeline, setMirrorPipeline] = useState(true);
+  const [enrollments, setEnrollments] = useState<readonly { readonly label: string; readonly code: string; readonly expiresAt: string }[]>([]);
 
   const loadAgents = async () => { try { setAgents(await api.neptuneAgents()); } catch { addNotice("error", "Remote Neptune state could not be loaded."); } };
   const loadServices = async () => { try { setServices(await api.backupServices()); } catch { addNotice("error", "Neptune identities could not be loaded."); } };
   const loadDevices = async () => { try { setDevices(await api.devices()); } catch { addNotice("error", "Synchronization clients could not be loaded."); } };
   useEffect(() => { void Promise.all([loadAgents(), loadServices(), loadDevices()]); }, []);
-  useEffect(() => { const timer = window.setInterval(() => { void loadAgents(); }, 15_000); return () => window.clearInterval(timer); }, []);
-  useEffect(() => {
-    if (!reauthed) return;
-    const timeout = window.setTimeout(() => setReauthed(false), 5 * 60_000);
-    return () => window.clearTimeout(timeout);
-  }, [reauthed]);
-
-  const reauthenticate = async (event: SyntheticEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    if (!accessKey) return;
-    setPending(true);
-    try { await api.reauthenticate(accessKey); setAccessKey(""); setReauthed(true); addNotice("success", "Synchronization management unlocked."); }
-    catch { setAccessKey(""); setReauthed(false); addNotice("error", "Re-authentication failed."); }
-    finally { setPending(false); }
-  };
-  const changePipeline = (value: "archive" | "volt" | "mastermind") => {
-    setPipeline(value);
-    if (value === "volt" || value === "mastermind") setNamespace(value);
-  };
+  useEffect(() => { const timer = window.setInterval(() => { void Promise.all([loadAgents(), loadDevices()]); }, 15_000); return () => window.clearInterval(timer); }, []);
+  const internalService = INTERNAL_PIPELINE_TYPES.find(type => type.namespace === pipeline);
+  const hostComponent = pipeline.startsWith("host_") ? pipeline.slice(5) as "updater" | "neptune" | "gryphon" | "wyvern" : undefined;
   const createService = async (event: SyntheticEvent<HTMLFormElement>) => {
     event.preventDefault();
-    const selectedNamespace = pipeline === "archive" ? namespace : pipeline;
-    if (!serviceName || !selectedNamespace || !deployment) return;
+    if (pipeline === "windows" || pipeline === "pluto" ? !connectionName : !hostName) return;
+    if ((pipeline === "volt" || pipeline === "mastermind") && !archivePipeline && !mirrorPipeline) { addNotice("error", "Select at least one pipeline."); return; }
     setPending(true);
     try {
-      const created = await api.createBackupEnrollment({
-        name: serviceName,
-        namespaceSlug: selectedNamespace,
-        deploymentId: deployment,
-        requireEncryption: false,
-        maxConcurrentRuns,
-        ...(pipeline === "archive" ? {} : { mirrorRoot: pipeline }),
-      });
-      setEnrollment({ code: created.code, expiresAt: created.expiresAt });
-      setServiceName(""); setDeployment("");
-      if (pipeline === "archive") setNamespace("");
-      await Promise.all([loadServices(), loadAgents()]);
-      addNotice("success", "One-time Neptune setup code created.");
+      if (pipeline === "windows" || pipeline === "pluto") {
+        const created = await api.createDeviceEnrollment(connectionName, pipeline === "pluto" ? "pluto" : undefined);
+        setEnrollments([{ label: `${connectionName} · ${pipeline === "pluto" ? "Pluto" : "Windows"}`, code: created.code, expiresAt: created.expiresAt }]);
+      } else {
+        const selectedNamespace = hostComponent ?? pipeline;
+        const selectedKind: BackupServiceInfo["pipelineKind"] = hostComponent ? "host_service" : internalService ? "service" : pipeline === "volt" ? "volt" : "mastermind";
+        const created = await api.createBackupEnrollment({
+          name: hostComponent ? `${hostComponent} · ${hostName}` : internalService?.label ?? (pipeline === "volt" ? "Volt" : "Mastermind"), namespaceSlug: selectedNamespace, deploymentId: hostName,
+          pipelineKind: selectedKind, requireEncryption: hostComponent !== undefined, maxConcurrentRuns: 4,
+          ...(pipeline === "volt" || pipeline === "mastermind" ? { archivePipeline, ...(mirrorPipeline ? { mirrorRoot: pipeline } : {}) } : {}),
+        });
+        setEnrollments([{ label: created.service.name, code: created.code, expiresAt: created.expiresAt }]);
+      }
+      setConnectionName(""); setHostName("");
+      await Promise.all([loadServices(), loadDevices(), loadAgents()]);
+      addNotice("success", "One-time setup code created.");
     } catch (error) {
-      if (error instanceof ApiError && error.code === "reauth_required") { setReauthed(false); addNotice("error", "Owner proof expired. Unlock management again."); }
-      else if (error instanceof ApiError && (error.code === "identity_conflict" || error.code === "conflict")) addNotice("error", "This project/server pair or dedicated mirror root is already active. Use Setup code on the existing identity.");
-      else addNotice("error", "Linux pipeline could not be created.");
+      if (error instanceof ApiError && (error.code === "identity_conflict" || error.code === "conflict")) addNotice("error", "This service/host pair or dedicated mirror root is already active. Use Setup code on the existing connection.");
+      else addNotice("error", "Synchronization pipeline could not be created.");
     }
     finally { setPending(false); }
   };
   const createEnrollment = async (id: string) => {
     setPending(true);
-    try { const created = await api.createBackupServiceEnrollment(id); setEnrollment({ code: created.code, expiresAt: created.expiresAt }); addNotice("success", "Replacement setup code created."); }
-    catch { addNotice("error", "Creating a setup code requires recent owner proof."); }
-    finally { setPending(false); }
-  };
-  const rotateService = async (id: string) => {
-    setPending(true);
-    try { const rotated = await api.rotateBackupService(id); setProducerToken(rotated.token); await loadServices(); addNotice("success", "Archive producer token rotated."); }
-    catch { addNotice("error", "Token rotation requires recent owner proof."); }
+    try { const created = await api.createBackupServiceEnrollment(id); setEnrollments([{ label: created.service.name, code: created.code, expiresAt: created.expiresAt }]); addNotice("success", "Replacement setup code created."); }
+    catch { addNotice("error", "Neptune setup code could not be created."); }
     finally { setPending(false); }
   };
   const revokeService = async (id: string) => {
     setPending(true);
-    try { await api.revokeBackupService(id); await Promise.all([loadServices(), loadDevices(), loadAgents()]); addNotice("success", "Neptune identity and its linked mirror access were revoked."); }
-    catch { addNotice("error", "Revocation requires recent owner proof."); }
+    try { await api.revokeBackupService(id); setRevokeCandidate(undefined); setEnrollments([]); await Promise.all([loadServices(), loadDevices(), loadAgents()]); addNotice("success", "Neptune identity and its linked mirror access were revoked."); }
+    catch { addNotice("error", "Neptune identity could not be revoked."); }
     finally { setPending(false); }
   };
-  const createWindowsClient = async (event: SyntheticEvent<HTMLFormElement>) => {
-    event.preventDefault(); if (!windowsName) return; setPending(true);
-    try {
-      const created = await api.createDevice({ name: windowsName, scopeIds: [SYNC_RESOURCE_ID], rights: { read: true, write: true, move: true, delete: true } });
-      setWindowsToken(created.token); setWindowsName(""); await loadDevices(); addNotice("success", "Windows sync client created.");
-    } catch { addNotice("error", "Creating a Windows client requires recent owner proof."); }
-    finally { setPending(false); }
-  };
+  const createWindowsEnrollment = async (id: string) => { setPending(true); try { const created = await api.createDeviceReplacementEnrollment(id); setEnrollments([{ label: created.device.name, code: created.code, expiresAt: created.expiresAt }]); addNotice("success", created.device.deviceKind === "pluto" ? "Replacement Pluto setup code created." : "Replacement Windows setup code created."); } catch { addNotice("error", "Pipeline setup code could not be created."); } finally { setPending(false); } };
   const revokeDevice = async (id: string) => {
     setPending(true);
-    try { await api.revokeDevice(id); await loadDevices(); addNotice("success", "Windows synchronization access revoked."); }
-    catch { addNotice("error", "Revocation requires recent owner proof."); }
+    try { await api.revokeDevice(id); setRevokeCandidate(undefined); setEnrollments([]); await loadDevices(); addNotice("success", revokeCandidate?.kind === "pluto" ? "Pluto pipeline access revoked." : "Windows synchronization access revoked."); }
+    catch { addNotice("error", "Pipeline access could not be revoked."); }
     finally { setPending(false); }
   };
 
-  const archiveServices = services.filter((service) => service.mirrorRoot === undefined);
-  const mirrorServices = services.filter((service) => service.mirrorRoot !== undefined);
-  const linkedMirrorDevices = new Set(mirrorServices.flatMap((service) => service.mirrorDeviceId === undefined ? [] : [service.mirrorDeviceId]));
-  const windowsDevices = devices.filter((device) => device.scopeIds.length === 1 && device.scopeIds[0] === SYNC_RESOURCE_ID && !linkedMirrorDevices.has(device.id));
-  const identityList = (items: readonly BackupServiceInfo[]) => <div className="compact-list fleet-list">{items.length === 0 ? <p className="empty-state">No identities configured.</p> : items.map((service) => <NeptunePipelineRow key={service.id} service={service} agent={agents.find((agent) => agent.serviceId === service.id)} pending={pending} reauthed={reauthed} onSetup={createEnrollment} onRotate={rotateService} onRevoke={revokeService} />)}</div>;
+  const confirmRevoke = () => {
+    if (revokeCandidate === undefined || pending) return;
+    void (revokeCandidate.kind === "service" ? revokeService(revokeCandidate.id) : revokeDevice(revokeCandidate.id));
+  };
+
+  const hostServices = services.filter((service) => service.state === "active" && service.pipelineKind === "host_service");
+  const servicePipelines = services.filter((service) => service.state === "active" && service.pipelineKind !== "host_service");
+  const windowsDevices = devices.filter((device) => device.state === "active" && device.deviceKind === "windows_sync");
+  const plutoDevices = devices.filter(device => device.state === "active" && device.deviceKind === "pluto");
+  const activePluto = plutoDevices.filter(device => device.lastSeenAt !== undefined && Date.now() - new Date(device.lastSeenAt).getTime() < 60_000).length;
+  const activeLinux = agents.filter((agent) => agent.observed.online).length;
+  const activeWindows = windowsDevices.filter((device) => device.lastSeenAt !== undefined && Date.now() - new Date(device.lastSeenAt).getTime() < 6 * 60_000).length;
+  const identityList = (items: readonly BackupServiceInfo[], emptyMessage: string) => <div className="pipeline-connections">{items.length === 0 ? <p className="empty-state">{emptyMessage}</p> : items.map((service) => <NeptunePipelineRow key={service.id} service={service} agent={agents.find((agent) => agent.serviceId === service.id)} pending={pending} onSetup={createEnrollment} onRevoke={() => setRevokeCandidate({ kind: "service", id: service.id, name: service.name })} />)}</div>;
 
   return <section className="workspace synchronization" aria-labelledby="synchronization-title">
     <PageHeader title="synchronization" id="synchronization-title" />
-    <div className="synchronization-intro"><p>Three isolated pipelines share Saturn storage without sharing credentials or schedules. Linux ZIP archives are immutable recovery points; Linux mirrors keep dedicated roots current; Windows clients mirror selected folders into unique <code>sync/&lt;folder&gt;</code> destinations.</p><form className="reauth-form" onSubmit={(event) => void reauthenticate(event)}><label>Current Access Key<input type="password" value={accessKey} onChange={(event) => setAccessKey(event.target.value)} autoComplete="current-password" required /></label><button className="button" type="submit" disabled={pending || !accessKey}>{reauthed ? "Owner verified" : "Unlock management"}</button></form></div>
     <div className="card-grid synchronization-grid">
-      <UniversalCard ordinal={1} title="Linux · recovery archives" className="synchronization-card"><p>Each remote Neptune checks in over outbound HTTPS, applies the policy configured in its own service and creates immutable recovery ZIPs under <code>backups/&lt;project&gt;/&lt;server&gt;</code>.</p>{identityList(archiveServices)}</UniversalCard>
-      <UniversalCard ordinal={2} title="Linux · dedicated mirrors" className="synchronization-card"><p>Volt publishes <code>personal.volt</code> into <code>/volt</code>; Mastermind publishes its vault tree into <code>/mastermind</code>. Archive and mirror execution states remain independent; their automatic schedules are configured together in the owning service.</p>{identityList(mirrorServices)}</UniversalCard>
-      <UniversalCard ordinal={3} title="Windows · folder synchronization" className="synchronization-card"><div className="settings-groups"><section className="settings-group"><p>Create one client password per PC. The desktop app chooses local directories and a unique destination name; every destination is an exact one-way mirror under <code>sync/&lt;name&gt;</code>.</p><form className="device-form" onSubmit={(event) => void createWindowsClient(event)}><label>PC / client name<input value={windowsName} onChange={(event) => setWindowsName(event.target.value)} maxLength={80} placeholder="Office PC" required /></label><button className="button" type="submit" disabled={pending || !reauthed}>Create Windows client password</button></form>{windowsToken === undefined ? null : <div className="one-time-code" role="status"><span>Paste this one-time password into Neptune for Windows</span><strong>{windowsToken}</strong><small>It is held only in this page memory.</small></div>}<div className="compact-list">{windowsDevices.length === 0 ? <p className="empty-state">No Windows clients configured.</p> : windowsDevices.map((device) => <article key={device.id}><div><strong>{device.name}</strong><span>{device.state} · last used {device.lastUsedAt === undefined ? "never" : new Date(device.lastUsedAt).toLocaleString()}</span></div><button className="button button--danger" type="button" disabled={pending || !reauthed || device.state !== "active"} onClick={() => void revokeDevice(device.id)}>Revoke</button></article>)}</div></section></div></UniversalCard>
-      <UniversalCard ordinal={4} title="Add Linux pipeline" className="synchronization-card"><form className="backup-service-form" onSubmit={(event) => void createService(event)}><label>Pipeline<select value={pipeline} onChange={(event) => changePipeline(event.target.value as "archive" | "volt" | "mastermind")}><option value="archive">Recovery ZIP only</option><option value="volt">Volt ZIP + personal.volt mirror</option><option value="mastermind">Mastermind ZIP + vault mirror</option></select></label><label>Connection name<input value={serviceName} onChange={(event) => setServiceName(event.target.value)} maxLength={100} required /></label><label>Project namespace<input value={pipeline === "archive" ? namespace : pipeline} disabled={pipeline !== "archive"} onChange={(event) => setNamespace(event.target.value.toLowerCase())} pattern="[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?" maxLength={63} placeholder="chronos" required /></label><label>Server ID<input value={deployment} onChange={(event) => setDeployment(event.target.value.toLowerCase())} pattern="[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?" maxLength={63} placeholder="vps-1" required /></label><label>Parallel archive runs<input type="number" min={1} max={32} value={maxConcurrentRuns} onChange={(event) => setMaxConcurrentRuns(Number(event.target.value))} required /></label><button className="button button--primary" type="submit" disabled={pending || !reauthed}>Create setup code</button></form>{enrollment === undefined ? null : <div className="one-time-code" role="status"><span>Enter this in the simplified Neptune Linux installer</span><strong>{enrollment.code}</strong><small>One use · expires {new Date(enrollment.expiresAt).toLocaleString()}.</small></div>}{producerToken === undefined ? null : <div className="one-time-code" role="status"><span>Rotated archive producer token</span><strong>{producerToken}</strong><small>Use only when repairing an existing installation.</small></div>}</UniversalCard>
-      <UniversalCard ordinal={5} title="Neptune fleet" className="synchronization-card"><p>Connected Linux agents report their version and last heartbeat on the pipeline rows above. Service-owned policies are applied through outbound polling, so no inbound server port is required.</p><p className="setting-meta">Windows clients continue to check and install their Windows release from the desktop application.</p></UniversalCard>
+      <UniversalCard ordinal={1} title="Add pipeline" className="synchronization-card">
+        <form className="backup-service-form synchronization-create" onSubmit={event => void createService(event)}>
+          <label className="pipeline-create__type">Type<select aria-label="Type" value={pipeline} onChange={event => { setPipeline(event.target.value as typeof pipeline); setEnrollments([]); }}>
+            <optgroup label="Host recovery"><option value="host_updater">Updater recovery</option><option value="host_neptune">Neptune recovery</option><option value="host_gryphon">Gryphon recovery</option><option value="host_wyvern">Wyvern recovery</option></optgroup>
+            <optgroup label="Service pipelines">{INTERNAL_PIPELINE_TYPES.map(type => <option key={type.namespace} value={type.namespace}>{type.label}</option>)}<option value="volt">Volt</option><option value="mastermind">Mastermind</option></optgroup>
+            <option className="pipeline-type-option--windows" value="windows">Windows files · Neptune client</option>
+            <optgroup label="Outdoor files"><option value="pluto">Pluto · Linux files and folders</option></optgroup>
+          </select></label>
+          {pipeline === "windows" || pipeline === "pluto" ? <label className="pipeline-create__wide">Connection name<input value={connectionName} onChange={event => setConnectionName(event.target.value)} maxLength={80} placeholder={pipeline === "pluto" ? "External backups" : "Office PC"} required /></label> : <label className="pipeline-create__wide">Host name<input value={hostName} onChange={event => setHostName(event.target.value.toLowerCase())} pattern="[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?" maxLength={63} placeholder="vps-1" required /></label>}
+          {(pipeline === "volt" || pipeline === "mastermind") && <fieldset className="pipeline-channels">
+            <legend>Activate pipelines</legend>
+            <label><input type="checkbox" checked={archivePipeline} onChange={event => setArchivePipeline(event.target.checked)} />Recovery archives</label>
+            <label><input type="checkbox" checked={mirrorPipeline} onChange={event => setMirrorPipeline(event.target.checked)} />{pipeline === "volt" ? "personal.volt mirror" : "Full vault tree mirror"}</label>
+            <small>Select one or both. Automatic scheduling is managed in service Settings.</small>
+          </fieldset>}
+          <p className="pipeline-preview">Namespace: <code>{hostComponent ?? (pipeline === "windows" ? `sync/${connectionName || "<connection>"}` : pipeline === "pluto" ? `backups/pluto/${connectionName || "<connection>"}` : pipeline)}</code></p>
+          <button className="button button--primary" type="submit" disabled={pending}>Create setup code</button>
+        </form>
+        {enrollments.map(enrollment => <div className="one-time-code" role="status" key={`${enrollment.label}:${enrollment.code}`}><span>{enrollment.label}</span><strong>{enrollment.code}</strong><small>One use · expires {new Date(enrollment.expiresAt).toLocaleString()}.</small></div>)}
+      </UniversalCard>
+      <UniversalCard ordinal={2} title="Neptune fleet" className="synchronization-card"><div className="fleet-counters"><div><span>Linux agents</span><strong>{activeLinux}</strong><small>{agents.length} registered</small></div><div><span>Windows agents</span><strong>{activeWindows}</strong><small>{windowsDevices.length} registered</small></div><div><span>Pluto agents</span><strong>{activePluto}</strong><small>{plutoDevices.length} registered</small></div></div><p className="setting-meta">Active means a heartbeat observed within the current presence window. This card is informational; access is managed on each connection below.</p></UniversalCard>
+      <UniversalCard ordinal={3} title="Host services" className="synchronization-card"><p>Active host recovery connections. Each installed service has an independent identity, setup code and revoke lifecycle, and writes only into <code>backups/&lt;service&gt;/&lt;host&gt;</code>.</p>{identityList(hostServices, "No active host pipelines.")}</UniversalCard>
+      <UniversalCard ordinal={4} title="Service pipelines" className="synchronization-card"><p>Active service connections. Internal services store recovery archives; Volt and Mastermind use the archive and mirror pipelines selected during registration.</p>{identityList(servicePipelines, "No active service pipelines.")}</UniversalCard>
+      <UniversalCard ordinal={5} title="Windows synchronization" className="synchronization-card"><p>Each Neptune Windows client mirrors its selected folders under <code>sync/&lt;connection&gt;</code>. Setup codes are one-time; the resulting credential is returned only to Neptune.</p><div className="pipeline-connections">{windowsDevices.length === 0 ? <p className="empty-state">No active Windows pipelines.</p> : windowsDevices.map((device) => <article className="pipeline-connection-card pipeline-connection-card--windows" aria-label={device.name} key={device.id}><div className="pipeline-identity"><span className="pipeline-identity__label">Connection name</span><strong>{device.name}</strong><span className="pipeline-identity__type">{device.syncFolderName ? `sync/${device.syncFolderName}` : "Setup required · isolated folder not assigned"}</span><span>{device.state} · {device.lastSeenAt === undefined ? "waiting for first heartbeat" : `last heartbeat ${new Date(device.lastSeenAt).toLocaleString()}`}{device.clientVersion === undefined ? "" : ` · Neptune ${device.clientVersion}`}</span></div><div className="inline-actions"><button className="button" type="button" disabled={pending || device.state !== "active"} onClick={() => void createWindowsEnrollment(device.id)}>Setup code</button><button className="button button--danger" type="button" disabled={pending || device.state !== "active"} onClick={() => setRevokeCandidate({ kind: "windows", id: device.id, name: device.name })}>Revoke</button></div></article>)}</div></UniversalCard>
+    <UniversalCard ordinal={6} title="Outdoor backups · Pluto" className="synchronization-card"><p>Standalone Linux agents copy selected files and folders. Configure sources, interval and enable copying in Pluto TUI.</p><div className="pipeline-connections">{plutoDevices.length === 0 ? <p className="empty-state">No active Pluto pipelines.</p> : plutoDevices.map(device => <PlutoPipelineCard key={device.id} device={device} pending={pending} onSetup={() => void createWindowsEnrollment(device.id)} onRevoke={() => setRevokeCandidate({ kind: "pluto", id: device.id, name: device.name })} />)}</div></UniversalCard>
     </div>
+    {revokeCandidate === undefined ? null : <ConfirmDialog title={`Revoke ${revokeCandidate.name}?`} description={revokeCandidate.kind === "pluto" ? "This disconnects Pluto and stops access to this pipeline. Stored files and their versions remain unchanged." : revokeCandidate.kind === "windows" ? "This disconnects the Windows synchronization pipeline and revokes this client's access. Stored files remain unchanged." : "This disconnects the pipeline and revokes its backup and linked mirror access. Stored files and recovery archives remain unchanged."} confirmLabel="Revoke pipeline" danger pending={pending} onConfirm={confirmRevoke} onClose={() => setRevokeCandidate(undefined)} />}
   </section>;
 }
 
@@ -2466,7 +2619,6 @@ function SettingsView({ preferences, setPreferences, addNotice, onAnonymous }: {
   const [uploadBufferDraft, setUploadBufferDraft] = useState(preferences.uploadBufferGiB);
   const [maximumUploadFileDraft, setMaximumUploadFileDraft] = useState(preferences.maximumUploadFileGiB);
   const [pending, setPending] = useState(false);
-  const [revokeDialog, setRevokeDialog] = useState(false);
   const [accessKeyDialog, setAccessKeyDialog] = useState(false);
   const [accessKeyChange, setAccessKeyChange] = useState({ currentAccessKey: "", newAccessKey: "", confirmation: "" });
   const [kernelTokenDialog, setKernelTokenDialog] = useState(false);
@@ -2617,12 +2769,6 @@ function SettingsView({ preferences, setPreferences, addNotice, onAnonymous }: {
     event.preventDefault(); if (!kernelToken) return; setPending(true);
     try { const value = await api.rotateKernelToken(kernelToken); setKernel(value); setKernelToken(""); setKernelTokenDialog(false); addNotice("success", "Kernel token validated and activated."); }
     catch { setKernelToken(""); addNotice("error", "Kernel token validation failed; the previous token remains active."); }
-    finally { setPending(false); }
-  };
-  const revoke = async () => {
-    setPending(true);
-    try { const result = await api.revokeSessions(); addNotice("info", `${String(result.revoked)} owner session(s) revoked.`); onAnonymous(); }
-    catch { addNotice("error", "Session revocation failed."); setRevokeDialog(false); }
     finally { setPending(false); }
   };
   const openStorageDialog = () => {
@@ -2779,23 +2925,22 @@ function SettingsView({ preferences, setPreferences, addNotice, onAnonymous }: {
     security: <div className="settings-groups">
       <section className="settings-group settings-group--access"><h3>Changing Access Key</h3><p>Replacement is atomic and revokes every other active browser session.</p><button className="button settings-action" type="button" disabled={pending} onClick={() => setAccessKeyDialog(true)}>Start Access Key change</button></section>
       <section className="settings-group settings-group--kernel"><h3>Connection with Kernel</h3><form className="kernel-url-form" onSubmit={(event) => { event.preventDefault(); void changeKernelUrl(); }}><input aria-label="Kernel URL" title="Press Enter or leave the field to validate a changed endpoint" type="url" value={kernelUrl} onChange={(event) => setKernelUrl(event.target.value)} onBlur={() => void changeKernelUrl()} placeholder="https://kernel.example.net" /><StatusRow label={`${kernel?.identity ?? "Kernel Core"} · revision ${String(kernel?.revision ?? 0)}`} state={kernel === undefined ? "busy" : kernel.reachability === "ready" ? "ready" : "unavailable"} detail={kernel === undefined ? "Checking" : kernel.reachability === "ready" ? "Service Reachability" : kernel.configured ? "Unreachable" : "Not configured"} /></form><button className="button button--wide" type="button" disabled={pending || !kernelUrl} onClick={() => setKernelTokenDialog(true)}>Change secure Kernel access token</button></section>
-      <details className="settings-group auxiliary-settings security-advanced"><summary>Advanced security</summary><div className="settings-subgroups">
-        <section className="settings-subgroup storage-connection"><h3>Storage connection</h3><p>The active SFTP profile is Gateway-only. Credentials are write-only and are never returned to this page.</p><StatusRow label={storage === undefined ? "Storage profile" : `${storage.username}@${storage.host}:${String(storage.port)} · ${storage.root}`} state={storage === undefined ? "busy" : storage.reachability === "ready" ? "ready" : "unavailable"} detail={storage === undefined ? "Checking" : `${storage.source} · revision ${String(storage.revision)}`} /><p className="setting-meta">Changing this profile does not migrate files. Saturn validates and indexes the target as an independent file set.</p><button className="button settings-action" type="button" disabled={pending} onClick={openStorageDialog}>Configure storage</button></section>
-        <section className="settings-subgroup"><h3>Drop upload buffer</h3><p>Public, in-house and owner uploads share one maximum file size. Drop uploads are accepted locally, verified and drained to Storage Box by bounded workers.</p><StatusRow label="Local upload buffer" state={dropBuffer?.capacity?.state === "available" || dropBuffer?.capacity?.state === "warning" ? "ready" : "unavailable"} detail={dropBuffer?.capacity === undefined ? "Unavailable" : `${dropBuffer.capacity.state} · ${formatBytes(dropBuffer.capacity.reservedBytes)} / ${formatBytes(dropBuffer.capacity.maxBytes)}`} /><form className="upload-limits-form" onSubmit={(event) => void applyUploadLimits(event)}><label>Buffer capacity, GiB<input aria-label="Upload buffer capacity, GiB" type="number" min={1} max={8_192} step={1} value={uploadBufferDraft} onChange={(event) => setUploadBufferDraft(Number(event.target.value))} required /></label><label>Maximum file size, GiB<input aria-label="Maximum upload file size, GiB" type="number" min={1} max={4_096} step={1} value={maximumUploadFileDraft} onChange={(event) => setMaximumUploadFileDraft(Number(event.target.value))} required /></label><button className="button" type="submit" disabled={pending || (uploadBufferDraft === preferences.uploadBufferGiB && maximumUploadFileDraft === preferences.maximumUploadFileGiB)}>Save upload limits</button></form><p className="setting-meta">Maximum file size must remain at or below 90% of buffer capacity. New limits apply without restarting Saturn.{dropBuffer === undefined ? " Runtime status is unavailable." : ` ${String(dropBuffer.workers)} workers · ${String(Math.round(dropBuffer.sessionTtlMs / 60_000))} min absolute session · ${formatBytes(dropBuffer.maximumFileBytes)} maximum file.`}</p><button className="button settings-action" type="button" onClick={() => void loadDropBuffer()} disabled={pending}>Refresh buffer</button></section>
-        <section className="settings-subgroup"><h3>Trash retention</h3><p>Sets how many days a newly trashed file or folder remains recoverable before automatic permanent deletion.</p><form className="reauth-form trash-retention-form" onSubmit={(event) => void applyTrashRetention(event)}><label>Retention period, days<input aria-label="Trash retention, days" type="number" min={1} max={365} step={1} value={trashRetentionDraft} onChange={(event) => setTrashRetentionDraft(Number(event.target.value))} required /></label><button className="button" type="submit" disabled={pending || trashRetentionDraft === preferences.trashRetentionDays}>Save retention</button></form><p className="setting-meta">Applies to items moved to Trash after saving. Existing deletion deadlines remain unchanged.</p></section>
-        <section className="settings-subgroup settings-group--danger"><h3>Sessions</h3><p>Revoke every active browser session, including this one. Stored files remain unchanged.</p><button className="button button--danger settings-action" type="button" disabled={pending} onClick={() => setRevokeDialog(true)}>Revoke all sessions</button></section>
-      </div></details>
+      <section className="settings-group settings-group--upload-buffer"><h3>Drop upload buffer</h3><p>Public, in-house and owner uploads share one maximum file size. Drop uploads are accepted locally, verified and drained to Storage Box by bounded workers.</p><StatusRow label="Local upload buffer" state={dropBuffer?.capacity?.state === "available" || dropBuffer?.capacity?.state === "warning" ? "ready" : "unavailable"} detail={dropBuffer?.capacity === undefined ? "Unavailable" : `${dropBuffer.capacity.state} · ${formatBytes(dropBuffer.capacity.reservedBytes)} / ${formatBytes(dropBuffer.capacity.maxBytes)}`} /><form className="upload-limits-form" onSubmit={(event) => void applyUploadLimits(event)}><label>Buffer capacity, GiB<input aria-label="Upload buffer capacity, GiB" type="number" min={1} max={8_192} step={1} value={uploadBufferDraft} onChange={(event) => setUploadBufferDraft(Number(event.target.value))} required /></label><label>Maximum file size, GiB<input aria-label="Maximum upload file size, GiB" type="number" min={1} max={4_096} step={1} value={maximumUploadFileDraft} onChange={(event) => setMaximumUploadFileDraft(Number(event.target.value))} required /></label><button className="button" type="submit" disabled={pending || (uploadBufferDraft === preferences.uploadBufferGiB && maximumUploadFileDraft === preferences.maximumUploadFileGiB)}>Save upload limits</button></form><p className="setting-meta">Maximum file size must remain at or below 90% of buffer capacity. New limits apply without restarting Saturn.{dropBuffer === undefined ? " Runtime status is unavailable." : ` ${String(dropBuffer.workers)} workers · ${String(Math.round(dropBuffer.sessionTtlMs / 60_000))} min absolute session · ${formatBytes(dropBuffer.maximumFileBytes)} maximum file.`}</p><button className="button settings-action" type="button" onClick={() => void loadDropBuffer()} disabled={pending}>Refresh buffer</button></section>
+      <section className="settings-group"><h3>Trash retention</h3><p>Sets how many days a newly trashed file or folder remains recoverable before automatic permanent deletion.</p><form className="reauth-form trash-retention-form" onSubmit={(event) => void applyTrashRetention(event)}><label>Retention period, days<input aria-label="Trash retention, days" type="number" min={1} max={365} step={1} value={trashRetentionDraft} onChange={(event) => setTrashRetentionDraft(Number(event.target.value))} required /></label><button className="button" type="submit" disabled={pending || trashRetentionDraft === preferences.trashRetentionDays}>Save retention</button></form><p className="setting-meta">Applies to items moved to Trash after saving. Existing deletion deadlines remain unchanged.</p></section>
+    </div>,
+    storage: <div className="settings-groups">
+      <section className="settings-group storage-connection"><h3>Active SFTP profile</h3><p>The active SFTP profile is Gateway-only. Credentials are write-only and are never returned to this page.</p><StatusRow label={storage === undefined ? "Storage profile" : `${storage.username}@${storage.host}:${String(storage.port)} · ${storage.root}`} state={storage === undefined ? "busy" : storage.reachability === "ready" ? "ready" : "unavailable"} detail={storage === undefined ? "Checking" : `${storage.source} · revision ${String(storage.revision)}`} /><p className="setting-meta">Changing this profile does not migrate files. Saturn validates and indexes the target as an independent file set.</p><button className="button settings-action" type="button" disabled={pending} onClick={openStorageDialog}>Configure storage</button></section>
+      <StorageAnalysisPanel profileId={storage?.profileId} profileRevision={storage?.revision} disabled={pending || storage?.reachability !== "ready"} addNotice={addNotice} />
     </div>,
     backup: <div className="settings-groups backup-content">
-      <section className="settings-group"><h3>Manual snapshot</h3><p>Logical snapshots contain authoritative state and personalization, but no plaintext passwords or service tokens.</p><button className="button settings-action" type="button" disabled={pending || !recovery?.exportEnabled} title={recovery?.reason} onClick={() => void createRecoverySnapshot()}>{pending ? "Creating snapshot…" : "Create and download snapshot"}</button></section>
-      <section className="settings-group"><h3>Automatic backup to Saturn</h3><p>Neptune exports the same ZIP as the manual action and uploads it without changing its bytes.</p>
-        <StatusRow label="Local Neptune agent:" state={neptune?.state === "linked" ? "ready" : "unavailable"} detail={!neptune ? "Checking" : neptune.state === "linked" ? "Linked" : neptune.state === "unlinking" ? "Unlinking" : neptune.state === "unlinked" ? "Not linked" : neptune.state === "authorization_failed" ? "Authorization failed" : neptune.linked ? "Unavailable · last known linked" : "Unavailable · installation unknown"} />
+      <section className="settings-group backup-manual-group"><h3>Manual snapshot</h3><p>Logical snapshots contain authoritative state and personalization, but no plaintext passwords or service tokens.</p><button className="button settings-action" type="button" disabled={pending || !recovery?.exportEnabled} title={recovery?.reason} onClick={() => void createRecoverySnapshot()}>{pending ? "Creating snapshot…" : "Create and download snapshot"}</button></section>
+      <section className="settings-group backup-neptune-group"><h3>Automatic backup to Saturn</h3><p>Neptune exports the same ZIP as the manual action and uploads it without changing its bytes.</p>
+        <StatusRow label="Local Neptune agent:" state={!neptune ? "busy" : neptune.state === "linked" || neptune.state === "unlinking" || neptune.state === "unlinked" && neptune.installed === true ? "ready" : "unavailable"} detail={!neptune ? "Checking" : neptune.state === "linked" ? "Reachability" : neptune.state === "unlinking" ? "Reachability · Unlinking" : neptune.state === "unlinked" ? neptune.installed ? "Reachability · Not linked" : "Not installed" : neptune.state === "authorization_failed" ? "Authorization failed" : neptune.linked ? "Unavailable · last known linked" : "Unavailable · installation unknown"} />
         <BackupPolicyPanel service="saturn" base="/api/v1/operator/neptune/policy" headers={policyHeaders} />
-        {neptune?.state === "linked" || neptune?.linked === true ? <button className="button settings-action backup-unlink-action" type="button" disabled={pending || neptuneUnlinking || !["linked", "unlinking"].includes(neptune.state)} onClick={() => void unlinkNeptune()}>{neptuneUnlinking ? "Unlinking Neptune…" : neptune.state === "unlinking" ? "Retry Neptune unlink" : "Unlink Neptune agent"}</button>
+        {neptune?.state === "linked" || neptune?.linked === true ? <button className="button button--danger settings-action backup-unlink-action" type="button" disabled={pending || neptuneUnlinking || !["linked", "unlinking"].includes(neptune.state)} onClick={() => void unlinkNeptune()}>{neptuneUnlinking ? "Unlinking Neptune…" : neptune.state === "unlinking" ? "Retry Neptune unlink" : "Unlink Neptune agent"}</button>
           : <button className="button settings-action backup-link-action" type="button" disabled={!neptune || neptune.state === "unavailable" && neptune.linked !== false} onClick={() => initializeAgent()}>{neptune?.state === "authorization_failed" ? "Repair Neptune connection" : "Link Neptune agent"}</button>}
         </section>
-      <section className="settings-group"><h3>Restore snapshot</h3><p>Restore validates the complete archive before replacement and rolls back if post-restore health fails.</p><button className="button settings-action" type="button" disabled={pending || !recovery?.restoreEnabled} title={recovery?.reason} onClick={openRestore}>Browse local snapshot archive</button></section>
-      <details><summary>Advanced helper recovery</summary><HelperRecoveryPanel enabled={updates?.updater.state === "ready"} /></details>
+      <section className="settings-group backup-restore-group"><h3>Restore snapshot</h3><p>Restore validates the complete archive before replacement and rolls back if post-restore health fails.</p><button className="button settings-action" type="button" disabled={pending || !recovery?.restoreEnabled} title={recovery?.reason} onClick={openRestore}>Browse local snapshot archive</button></section>
     </div>,
     gryphon: <div className="settings-groups bot-connection-groups">
       <section className="settings-group"><h3>Gryphon bot binding</h3><p>Gryphon owns the Telegram connection, service receives only service-scoped commands.</p>
@@ -2817,7 +2962,7 @@ function SettingsView({ preferences, setPreferences, addNotice, onAnonymous }: {
     <div className="card-grid card-grid--settings">
       {preferences.settingsOrder.map((id, index) => <UniversalCard ordinal={index + 1} title={SETTINGS_CARD_TITLES[id]} className={`settings-card settings-card--${id}${dropCard === id ? " universal-card--drop-target" : ""}`} draggable handleLabel={`Reorder ${id} settings card`} onHandleKeyDown={(event) => moveSettingsCardByKeyboard(event, id)} onDragStart={(event) => { setDraggingCard(id); event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", id); }} onDragOver={(event) => { if (draggingCard !== undefined && draggingCard !== id) { event.preventDefault(); setDropCard(id); } }} onDrop={(event) => { event.preventDefault(); if (draggingCard !== undefined) moveSettingsCard(draggingCard, id); setDraggingCard(undefined); setDropCard(undefined); }} onDragEnd={() => { setDraggingCard(undefined); setDropCard(undefined); }} key={id}>{cards[id]}</UniversalCard>)}
     </div>
-    {accessKeyDialog ? <Dialog title="Change Access Key" description="Enter the current key, then the replacement twice. No field is preloaded." onClose={() => { setAccessKeyDialog(false); setAccessKeyChange({ currentAccessKey: "", newAccessKey: "", confirmation: "" }); }}><form className="dialog-form" onSubmit={(event) => void changeOwnerAccessKey(event)}><label>Current Access Key<input type="password" autoComplete="current-password" value={accessKeyChange.currentAccessKey} onChange={(event) => setAccessKeyChange({ ...accessKeyChange, currentAccessKey: event.target.value })} required /></label><label>New Access Key<input type="password" autoComplete="new-password" minLength={32} value={accessKeyChange.newAccessKey} onChange={(event) => setAccessKeyChange({ ...accessKeyChange, newAccessKey: event.target.value })} required /></label><label>Confirm new Access Key<input type="password" autoComplete="new-password" minLength={32} value={accessKeyChange.confirmation} onChange={(event) => setAccessKeyChange({ ...accessKeyChange, confirmation: event.target.value })} required /></label><div className="dialog__actions"><button className="button" type="button" onClick={() => { setAccessKeyDialog(false); setAccessKeyChange({ currentAccessKey: "", newAccessKey: "", confirmation: "" }); }}>Cancel</button><button className="button button--primary" type="submit" disabled={pending || accessKeyChange.newAccessKey.length < 32 || accessKeyChange.confirmation !== accessKeyChange.newAccessKey}>Change Access Key</button></div></form></Dialog> : null}
+    {accessKeyDialog ? <Dialog title="Change Access Key" description="Enter the current key, then the replacement twice. No field is preloaded." onClose={() => { setAccessKeyDialog(false); setAccessKeyChange({ currentAccessKey: "", newAccessKey: "", confirmation: "" }); }}><form className="dialog-form" onSubmit={(event) => void changeOwnerAccessKey(event)}><label>Current Access Key<OpaqueKeyInput type="password" autoComplete="current-password" value={accessKeyChange.currentAccessKey} onValue={(value) => setAccessKeyChange({ ...accessKeyChange, currentAccessKey: value })} required /></label><label>New Access Key<OpaqueKeyInput type="password" autoComplete="new-password" value={accessKeyChange.newAccessKey} onValue={(value) => setAccessKeyChange({ ...accessKeyChange, newAccessKey: value })} required /></label><label>Confirm new Access Key<OpaqueKeyInput type="password" autoComplete="new-password" value={accessKeyChange.confirmation} onValue={(value) => setAccessKeyChange({ ...accessKeyChange, confirmation: value })} required /></label><div className="dialog__actions"><button className="button" type="button" onClick={() => { setAccessKeyDialog(false); setAccessKeyChange({ currentAccessKey: "", newAccessKey: "", confirmation: "" }); }}>Cancel</button><button className="button button--primary" type="submit" disabled={pending || accessKeyChange.newAccessKey.length === 0 || accessKeyChange.confirmation !== accessKeyChange.newAccessKey}>Change Access Key</button></div></form></Dialog> : null}
     {kernelTokenDialog ? <Dialog title="Change Kernel token" description="The replacement is write-only and activates only after authenticated validation." onClose={() => { setKernelTokenDialog(false); setKernelToken(""); }}><form className="dialog-form" onSubmit={(event) => void rotateKernelToken(event)}><label>Replacement Kernel token<input type="password" autoComplete="new-password" value={kernelToken} minLength={32} onChange={(event) => setKernelToken(event.target.value)} required /></label><div className="dialog__actions"><button className="button" type="button" onClick={() => { setKernelTokenDialog(false); setKernelToken(""); }}>Cancel</button><button className="button button--primary" type="submit" disabled={pending || kernelToken.length < 32}>Validate and rotate</button></div></form></Dialog> : null}
     {gryphonConnectionDialog ? <Dialog title="Gryphon Connection" className="gryphon-choice-dialog" onClose={() => setGryphonConnectionDialog(false)} dismissible={!pending}>
       <p className="gryphon-choice-intro">Select a connection already applied through Gryphon</p>
@@ -2827,14 +2972,14 @@ function SettingsView({ preferences, setPreferences, addNotice, onAnonymous }: {
       </div>
       {gryphon?.connected && <button type="button" className="button gryphon-unlink-action" disabled={pending} onClick={() => void disconnectGryphon()}>Unlink all adapters</button>}
     </Dialog> : null}
-    {storageDialog ? <Dialog title="Configure storage" description="Connect an independent SFTP file set. No files are copied from or deleted in the current storage." dismissible={false} onClose={() => undefined}>
-      <form className="dialog-form storage-dialog" onSubmit={(event) => { event.preventDefault(); void testStorage(); }} autoComplete="off">
+    {storageDialog ? <Dialog title="Configure storage" description="Connect an independent SFTP file set. No files are copied from or deleted in the current storage." className="storage-dialog" dismissible={false} onClose={() => undefined}>
+      <form className="dialog-form storage-dialog__form" onSubmit={(event) => { event.preventDefault(); void testStorage(); }} autoComplete="off">
         <div className="storage-dialog__grid">
           <label>Host<input value={storageDraft.host} maxLength={255} onChange={(event) => updateStorageDraft({ host: event.target.value })} required /></label>
           <label>Port<input type="number" min={1} max={65_535} value={storageDraft.port} onChange={(event) => updateStorageDraft({ port: Number(event.target.value) })} required /></label>
           <label>User<input value={storageDraft.username} maxLength={255} onChange={(event) => updateStorageDraft({ username: event.target.value })} required /></label>
           <label>Root<input value={storageDraft.root} maxLength={1_024} onChange={(event) => updateStorageDraft({ root: event.target.value })} required /></label>
-          <label className="storage-dialog__wide">Pinned host fingerprint<input value={storageDraft.hostFingerprint} placeholder="SHA256:…" pattern="SHA256:[A-Za-z0-9+/]{43}=?" onChange={(event) => updateStorageDraft({ hostFingerprint: event.target.value })} required /></label>
+          <label className="storage-dialog__wide">Pinned host fingerprint<input value={storageDraft.hostFingerprint} placeholder="SHA256:…" pattern={"SHA256:[A-Za-z0-9+\\/]{43}=?"} onChange={(event) => updateStorageDraft({ hostFingerprint: event.target.value })} required /></label>
           <label>Authentication<select value={storageDraft.authMode} onChange={(event) => updateStorageDraft({ authMode: event.target.value as StorageConnectionInput["authMode"], credential: "" })}><option value="password_file">Password</option><option value="private_key_file">Private key</option></select></label>
           <label className="storage-dialog__wide">{storageDraft.authMode === "password_file" ? "New storage password" : "Private key PEM"}{storageDraft.authMode === "password_file" ? <input type="password" autoComplete="new-password" value={storageDraft.credential} onChange={(event) => updateStorageDraft({ credential: event.target.value })} required /> : <textarea autoComplete="off" rows={6} value={storageDraft.credential} onChange={(event) => updateStorageDraft({ credential: event.target.value })} required />}</label>
         </div>
@@ -2859,12 +3004,11 @@ function SettingsView({ preferences, setPreferences, addNotice, onAnonymous }: {
         {restoreStage === "complete" && restoreResult !== undefined ? <><p className="restore-success" role="status">Restore complete. Database invariants passed in {restoreResult.measuredRtoMs} ms.</p><dl className="restore-metadata">{Object.entries(restoreResult.verification).map(([name, count]) => <div key={name}><dt>{name}</dt><dd>{count}</dd></div>)}</dl><p className="muted">Owner browser sessions are deliberately absent from snapshots. Sign in again to continue against the restored state.</p><div className="dialog__actions"><button className="button button--primary" type="button" onClick={onAnonymous}>Return to login</button></div></> : null}
       </div>
     </Dialog> : null}
-    {revokeDialog ? <ConfirmDialog title="Revoke all owner sessions" description="Every browser session is invalidated server-side. Files and storage credentials are unchanged." confirmLabel="Revoke sessions" danger pending={pending} onConfirm={() => void revoke()} onClose={() => setRevokeDialog(false)} /> : null}
   </section>;
 }
 
 function SidebarBrand() {
-  return <div className="sidebar__brand"><img className="sidebar__planet" src={saturnPlanet} alt="" aria-hidden="true" /><strong>saturn</strong></div>;
+  return <div className="sidebar__brand"><img className="sidebar__planet" src={saturnPlanetAlpha} alt="" aria-hidden="true" /><strong>saturn</strong></div>;
 }
 
 function AuthenticatedApp({ health, onAnonymous }: { readonly health: GatewayHealth; readonly onAnonymous: () => void }) {

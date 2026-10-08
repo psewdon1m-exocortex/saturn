@@ -142,6 +142,32 @@ describe.skipIf(!process.env.POLICY_TEST_DATABASE_URL)("service-owned policy on 
     expect((await policies.read(otherId)).revision).toBe(12);
   });
 
+  it("enforces a mirror-only enrollment in persisted policy and rejects archive scheduling, restore and runs", async () => {
+    const id = randomUUID();
+    await db.withSql(async sql => {
+      await sql`INSERT INTO backup_services(id,slug,name,token_hash,state,require_encryption,max_backup_bytes,daily_quota_bytes,
+        stored_quota_bytes,max_concurrent_runs,freshness_sla_ms,retention_daily,retention_weekly,retention_monthly,retention_yearly,
+        created_at,updated_at,namespace_slug,deployment_id,pipeline_kind,mirror_root,archive_pipeline)
+        SELECT ${id},${"volt-" + id},name,${id.replaceAll("-", "").repeat(2)},state,require_encryption,max_backup_bytes,daily_quota_bytes,
+          stored_quota_bytes,max_concurrent_runs,freshness_sla_ms,retention_daily,retention_weekly,retention_monthly,retention_yearly,
+          now(),now(),'mastermind',${id},'mastermind','mastermind',false FROM backup_services WHERE id=${serviceId}`;
+      await sql`INSERT INTO neptune_agents(service_id) VALUES(${id})`;
+    });
+    try {
+      const before = await policies.read(id);
+      expect(before.archive).toMatchObject({ available: false, enabled: false });
+      const schedule = { kind: "schedule" as const, pipeline: "archive" as const, enabled: true, intervalHours: 24, expectedRevision: before.revision, requestId: randomUUID() };
+      await expect(policies.mutate(id, schedule)).rejects.toThrow("no archive pipeline");
+      await expect(policies.mutate(id, { kind: "schedule-all", enabled: true, intervalHours: 24, expectedRevision: before.revision, requestId: randomUUID() })).rejects.toThrow("no combined backup pipeline");
+      await expect(policies.mutate(id, { kind: "restore", archive: { enabled: true, intervalHours: 24 }, mirror: { enabled: true, intervalMinutes: 1440 }, expectedRevision: before.revision, requestId: randomUUID() })).rejects.toThrow("no archive pipeline");
+      await expect(policies.run(id, { pipeline: "archive", requestId: randomUUID() })).rejects.toThrow("no archive pipeline");
+      const result = await policies.mutate(id, { ...schedule, pipeline: "mirror", requestId: randomUUID() });
+      expect(result.archive).toMatchObject({ available: false, enabled: false });
+      expect(result.mirror).toEqual({ enabled: true, intervalMinutes: 1440 });
+      expect((await policies.read(id)).mirror).toEqual(result.mirror);
+    } finally { await db.withSql(sql => sql`DELETE FROM backup_services WHERE id=${id}`); }
+  });
+
   it("atomically applies one switch and hourly interval to both advanced pipelines", async () => {
     const before = await policies.read(serviceId);
     const request = { kind: "schedule-all" as const, enabled: false, intervalHours: 24,
@@ -152,7 +178,7 @@ describe.skipIf(!process.env.POLICY_TEST_DATABASE_URL)("service-owned policy on 
     expect(result.mirror).toEqual({ enabled: false, intervalMinutes: 1440 });
     expect(await policies.mutate(serviceId, request)).toEqual(result);
     await expect(policies.mutate(otherId, { ...request, requestId: randomUUID(),
-      expectedRevision: (await policies.read(otherId)).revision })).rejects.toThrow("no advanced backup pipeline");
+      expectedRevision: (await policies.read(otherId)).revision })).rejects.toThrow("no combined backup pipeline");
   });
 
   it("keeps restored intent paused and deduplicates manual commands without changing schedule", async () => {

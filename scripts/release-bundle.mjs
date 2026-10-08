@@ -95,6 +95,7 @@ if (command === "build") {
     "infra/production/nginx.saturn.conf.example",
     "infra/production/.env.production.example",
     "infra/production/install.sh",
+    "infra/production/dotenv-config.py",
     "infra/production/bot-policy.yaml",
     "docs/implementation/STAGE_13_PRODUCTION_HARDENING_DEPLOYMENT.md",
     "docs/implementation/OPERATIONS.md",

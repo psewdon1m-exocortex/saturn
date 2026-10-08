@@ -4,6 +4,7 @@ import { z } from "zod";
 import { randomUUID } from "node:crypto";
 import { isIP } from "node:net";
 import { recoveryEnvironmentKeys } from "./recovery-keys.js";
+export { encodeOwnerAccessKey, decodeOwnerAccessKey, readOwnerAccessKey } from "./owner-access-key.js";
 
 const booleanText = z.enum(["true", "false"]).transform((value) => value === "true");
 const commandArguments = z.string().default("[]").transform((value, context): readonly string[] => {
@@ -66,6 +67,7 @@ const environmentSchema = z.object({
   STORAGE_OPERATION_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(120_000).default(60_000),
   STORAGE_HEALTH_TIMEOUT_MS: z.coerce.number().int().min(500).max(5_000).default(3_000),
   STORAGE_MAX_CONNECTIONS: z.coerce.number().int().min(1).max(8).default(8),
+  STORAGE_REQUIRE_FSYNC: booleanText.optional(),
   UPLOAD_MAX_BYTES: z.coerce.number().int().min(1).max(Number.MAX_SAFE_INTEGER).default(20 * 1024 * 1024 * 1024),
   UPLOAD_CHUNK_MAX_BYTES: z.coerce.number().int().min(64 * 1024).max(64 * 1024 * 1024).default(8 * 1024 * 1024),
   UPLOAD_INCOMPLETE_TTL_MS: z.coerce.number().int().min(60_000).max(7 * 24 * 60 * 60 * 1_000).default(24 * 60 * 60 * 1_000),
@@ -99,6 +101,8 @@ const environmentSchema = z.object({
   PG_DUMP_PREFIX_ARGS: commandArguments,
   PG_RESTORE_PREFIX_ARGS: commandArguments,
   PG_COMMAND_CONNECTION_ARGS: commandArguments,
+  PG_COMMAND_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(2 * 60 * 60_000).default(15 * 60_000),
+  PG_DUMP_IDLE_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(2 * 60 * 60_000).default(2 * 60_000),
   AUTH_PEPPER_FILE: z.string().min(1),
   AUTH_SESSION_IDLE_TTL_MS: z.coerce.number().int().min(60_000).max(24 * 60 * 60 * 1_000).default(15 * 60 * 1_000),
   AUTH_SESSION_ABSOLUTE_TTL_MS: z.coerce.number().int().min(5 * 60 * 1_000).max(7 * 24 * 60 * 60 * 1_000).default(12 * 60 * 60 * 1_000),
@@ -407,6 +411,7 @@ export interface SaturnConfig {
     readonly operationTimeoutMs: number;
     readonly healthTimeoutMs: number;
     readonly maxConnections: number;
+    readonly requireFsync?: boolean;
   };
   readonly storageRuntimeConfigDirectory: string;
   readonly readinessRequireStorage: boolean;
@@ -426,6 +431,8 @@ export interface SaturnConfig {
     readonly pgDumpPrefixArgs: readonly string[];
     readonly pgRestorePrefixArgs: readonly string[];
     readonly pgCommandConnectionArgs: readonly string[];
+    readonly commandTimeoutMs?: number;
+    readonly dumpIdleTimeoutMs?: number;
     readonly backupIntervalMs: number;
     readonly limits: {
       readonly maxArchiveBytes: number;
@@ -589,6 +596,7 @@ export function loadEnvironment(
       operationTimeoutMs: value.STORAGE_OPERATION_TIMEOUT_MS,
       healthTimeoutMs: value.STORAGE_HEALTH_TIMEOUT_MS,
       maxConnections: value.STORAGE_MAX_CONNECTIONS,
+      requireFsync: value.STORAGE_REQUIRE_FSYNC ?? value.NODE_ENV === "production",
     },
     storageRuntimeConfigDirectory: path.resolve(baseDirectory, value.STORAGE_RUNTIME_CONFIG_DIR),
     limits: {
@@ -606,6 +614,8 @@ export function loadEnvironment(
       pgDumpPrefixArgs: value.PG_DUMP_PREFIX_ARGS,
       pgRestorePrefixArgs: value.PG_RESTORE_PREFIX_ARGS,
       pgCommandConnectionArgs: value.PG_COMMAND_CONNECTION_ARGS,
+      commandTimeoutMs: value.PG_COMMAND_TIMEOUT_MS,
+      dumpIdleTimeoutMs: value.PG_DUMP_IDLE_TIMEOUT_MS,
       backupIntervalMs: value.RECOVERY_BACKUP_INTERVAL_MS,
       limits: {
         maxArchiveBytes: value.RECOVERY_MAX_ARCHIVE_BYTES,
@@ -782,11 +792,14 @@ export function publicConfig(config: SaturnConfig): Record<string, unknown> {
       operationTimeoutMs: config.storage.operationTimeoutMs,
       healthTimeoutMs: config.storage.healthTimeoutMs,
       maxConnections: config.storage.maxConnections,
+      requireFsync: config.storage.requireFsync,
     },
     limits: config.limits,
     protection: config.protection,
     recovery: {
       backupIntervalMs: config.recovery.backupIntervalMs,
+      commandTimeoutMs: config.recovery.commandTimeoutMs,
+      dumpIdleTimeoutMs: config.recovery.dumpIdleTimeoutMs,
       limits: config.recovery.limits,
     },
     archive: { limits: config.archive.limits },

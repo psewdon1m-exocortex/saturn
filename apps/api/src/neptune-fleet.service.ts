@@ -184,11 +184,12 @@ export class NeptuneFleetService {
     readonly mirrorIntervalMinutes?: number;
   }) {
     const row = await this.database.transaction(async (sql) => {
-      const services = await sql<{ mirror_root: string | null }[]>`
-        SELECT mirror_root FROM backup_services WHERE id = ${serviceId} AND state = 'active' FOR UPDATE
+      const services = await sql<{ mirror_root: string | null; archive_pipeline: boolean }[]>`
+        SELECT mirror_root,archive_pipeline FROM backup_services WHERE id = ${serviceId} AND state = 'active' FOR UPDATE
       `;
       const selected = services[0];
       if (selected === undefined) throw new Error("Neptune identity not found or not active");
+      if (input.archiveEnabled && !selected.archive_pipeline) throw new Error("Neptune identity has no archive pipeline");
       if (input.mirrorEnabled === true && selected.mirror_root === null)
         throw new Error("Neptune identity has no mirror pipeline");
       await sql`
@@ -228,8 +229,8 @@ export class NeptuneFleetService {
   async enqueue(serviceId: string, kind: NeptuneCommandKind, payload: Record<string, unknown> = {}, id: string = randomUUID()) {
     if (kind === "agent.update") throw new Error("Update Neptune with sudo updater tui on the agent host");
     await this.database.transaction(async (sql) => {
-      const services = await sql<{ mirror_root: string | null }[]>`
-        SELECT mirror_root FROM backup_services WHERE id = ${serviceId} AND state = 'active' FOR UPDATE
+      const services = await sql<{ mirror_root: string | null; archive_pipeline: boolean }[]>`
+        SELECT mirror_root,archive_pipeline FROM backup_services WHERE id = ${serviceId} AND state = 'active' FOR UPDATE
       `;
       const selected = services[0];
       if (selected === undefined) throw new Error("Neptune identity not found or not active");
@@ -238,6 +239,7 @@ export class NeptuneFleetService {
         if (previous[0].service_id !== serviceId || previous[0].kind !== kind || previous[0].payload.version !== payload.version) throw new Error("Command request ID belongs to another operation");
         return;
       }
+      if (kind === "archive.run" && !selected.archive_pipeline) throw new Error("Neptune identity has no archive pipeline");
       if (kind === "mirror.run" && selected.mirror_root === null)
         throw new Error("Neptune identity has no mirror pipeline");
       await sql`

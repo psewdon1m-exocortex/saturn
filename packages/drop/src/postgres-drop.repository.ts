@@ -98,6 +98,9 @@ function upload(row: UploadRow): DropUpload {
 }
 
 export class PostgresDropRepository implements DropRepository {
+  withUploadLock<T>(id: string, action: () => Promise<T>): Promise<T> {
+    return this.#database.withAdvisoryLock(`saturn-drop-upload:${id}`, action);
+  }
   readonly #database: Database;
 
   constructor(database: Database) {
@@ -255,7 +258,7 @@ export class PostgresDropRepository implements DropRepository {
     return this.#database.transaction(async (sql) => {
       if (input.globalMaxBytes !== undefined) {
         await sql`SELECT pg_advisory_xact_lock(hashtextextended('saturn-drop-buffer-reservation', 0))`;
-        const totals = await sql<{ bytes: string }[]>`SELECT COALESCE(sum(expected_size), 0)::text AS bytes FROM drop_uploads WHERE state IN ('reserved', 'uploading', 'buffered', 'transferring', 'verifying')`;
+        const totals = await sql<{ bytes: string }[]>`SELECT COALESCE(sum(expected_size), 0)::text AS bytes FROM drop_uploads WHERE local_path IS NOT NULL OR state='reserved'`;
         if (Number(totals[0]?.bytes ?? 0) + input.expectedSize > input.globalMaxBytes) throw new Error("Drop global buffer quota is exhausted");
       }
       const sessions = await sql<SessionRow[]>`SELECT * FROM drop_sessions WHERE id = ${input.sessionId} FOR UPDATE`;
@@ -408,7 +411,7 @@ export class PostgresDropRepository implements DropRepository {
     return this.#database.transaction(async (sql) => {
       const rows = await sql<UploadRow[]>`
         UPDATE drop_uploads SET state = 'cancelled', updated_at = ${now}
-        WHERE id = ${id} AND channel_id = ${channelId} AND state IN ('reserved', 'uploading', 'buffered')
+        WHERE id = ${id} AND channel_id = ${channelId} AND state IN ('reserved', 'uploading', 'buffered', 'failed')
         RETURNING *
       `;
       const row = rows[0];
@@ -428,7 +431,7 @@ export class PostgresDropRepository implements DropRepository {
 
   bufferReservedBytes(): Promise<number> {
     return this.#database.withSql(async (sql) => {
-      const rows = await sql<{ bytes: string }[]>`SELECT COALESCE(sum(expected_size), 0)::text AS bytes FROM drop_uploads WHERE state IN ('reserved', 'uploading', 'buffered', 'transferring', 'verifying')`;
+      const rows = await sql<{ bytes: string }[]>`SELECT COALESCE(sum(expected_size), 0)::text AS bytes FROM drop_uploads WHERE local_path IS NOT NULL OR state='reserved'`;
       return Number(rows[0]?.bytes ?? 0);
     });
   }
@@ -438,10 +441,10 @@ export class PostgresDropRepository implements DropRepository {
       const rows = await sql<UploadRow[]>`
         WITH candidate AS (
           SELECT id FROM drop_uploads
-          WHERE state = 'buffered' OR (state IN ('transferring', 'verifying') AND updated_at < ${new Date(now.getTime() - 30 * 60 * 1_000)})
+          WHERE (state = 'buffered' AND (next_attempt_at IS NULL OR next_attempt_at <= ${now})) OR (state IN ('transferring', 'verifying') AND updated_at < ${new Date(now.getTime() - 30 * 60 * 1_000)})
           ORDER BY created_at, id FOR UPDATE SKIP LOCKED LIMIT 1
         )
-        UPDATE drop_uploads SET state = 'transferring', transfer_started_at = ${now}, updated_at = ${now}
+        UPDATE drop_uploads SET state = 'transferring', transfer_started_at = ${now}, updated_at = ${now}, transfer_attempts=transfer_attempts+1
         WHERE id = (SELECT id FROM candidate)
         RETURNING *
       `;
@@ -468,6 +471,22 @@ export class PostgresDropRepository implements DropRepository {
       const rows = await sql<UploadRow[]>`UPDATE drop_uploads SET state = 'failed', failure_code = ${failureCode.slice(0, 100)}, updated_at = ${now} WHERE id = ${id} AND state NOT IN ('stored', 'cancelled') RETURNING *`;
       const row = rows[0]; if (row === undefined) throw new Error("Drop upload could not be failed"); return upload(row);
     });
+  }
+
+  async retryUpload(id: string, failureCode: string, now: Date): Promise<void> {
+    await this.#database.withSql(async sql => { await sql`
+      UPDATE drop_uploads SET state=CASE WHEN transfer_attempts >= 10 THEN 'failed' ELSE 'buffered' END,
+        failure_code=${failureCode}, next_attempt_at=${now} + LEAST(3600, 5 * power(2, LEAST(transfer_attempts, 10))) * interval '1 second', updated_at=${now}
+      WHERE id=${id} AND state IN ('transferring', 'verifying')
+    `; });
+  }
+
+  async releaseBuffer(id: string): Promise<void> {
+    await this.#database.withSql(async sql => { await sql`UPDATE drop_uploads SET local_path=NULL WHERE id=${id} AND state IN ('stored', 'cancelled')`; });
+  }
+
+  listBufferCleanup(limit: number): Promise<readonly DropUpload[]> {
+    return this.#database.withSql(async sql => (await sql<UploadRow[]>`SELECT * FROM drop_uploads WHERE local_path IS NOT NULL AND state IN ('stored', 'cancelled') ORDER BY updated_at LIMIT ${limit}`).map(upload));
   }
 
 }

@@ -9,6 +9,74 @@ async function collect(stream: Readable): Promise<Buffer> {
 }
 
 describe("TransferMonitorService", () => {
+  it("rejects an already closed source without registering a hanging task", () => {
+    const monitor = new TransferMonitorService(), source = new PassThrough(); source.destroy();
+    expect(() => monitor.trackDownload(source, { filename: "valuable.bin", totalBytes: 6 })).toThrow("closed before streaming started");
+    expect(monitor.snapshot([]).tasks).toHaveLength(0);
+  });
+  it("rejects retries of a cancelled download after its visible task is removed", () => {
+    const monitor = new TransferMonitorService(), source = new PassThrough();
+    const output = monitor.trackDownload(source, { id: "download-operation", filename: "valuable.bin", totalBytes: 100 });
+    output.on("error", () => undefined);
+    monitor.control("download-operation", "cancel");
+    expect(monitor.snapshot([]).tasks).toHaveLength(0);
+    expect(() => monitor.assertDownloadAvailable("download-operation")).toThrow("cancelled");
+    const retry = new PassThrough();
+    expect(() => monitor.trackDownload(retry, { id: "download-operation", filename: "valuable.bin", totalBytes: 50 })).toThrow("cancelled");
+    expect(retry.destroyed).toBe(true);
+    expect(() => monitor.assertDownloadAvailable("new-operation")).not.toThrow();
+  });
+  it("releases a duplicate download source instead of replacing an active operation", async () => {
+    const monitor = new TransferMonitorService(), source = new PassThrough();
+    const output = monitor.trackDownload(source, { id: "one-operation", filename: "valuable.bin", totalBytes: 6 });
+    const duplicate = new PassThrough();
+    expect(() => monitor.trackDownload(duplicate, { id: "one-operation", filename: "valuable.bin", totalBytes: 6 })).toThrow("already in progress");
+    expect(duplicate.destroyed).toBe(true);
+    source.end("saturn");
+    expect((await collect(output)).toString()).toBe("saturn");
+  });
+  it("holds a download paused when pipe backpressure attempts to resume its source", async () => {
+    const monitor = new TransferMonitorService(), source = new PassThrough();
+    const chunk = Buffer.alloc(128 * 1024, 7), output = monitor.trackDownload(source, { filename: "slow.bin", totalBytes: chunk.length * 3 });
+    source.write(chunk); source.write(chunk);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const before = monitor.snapshot([]).tasks[0];
+    if (before === undefined) throw new Error("Task missing");
+    monitor.control(before.id, "pause");
+    const received: Buffer[] = [];
+    const ended = new Promise<void>((resolve, reject) => { output.on("data", (value: Buffer) => received.push(value)); output.once("end", resolve); output.once("error", reject); });
+    source.end(chunk);
+    await new Promise<void>((resolve) => setTimeout(resolve, 20));
+    expect(monitor.snapshot([]).tasks[0]).toMatchObject({ state: "paused", transferredBytes: before.transferredBytes, bytesPerSecond: 0 });
+    monitor.control(before.id, "resume");
+    await ended;
+    expect(Buffer.concat(received)).toEqual(Buffer.concat([chunk, chunk, chunk]));
+  });
+
+  it("marks streaming archive size as unknown instead of inventing a percentage", async () => {
+    const monitor = new TransferMonitorService(), source = new PassThrough(), output = monitor.trackDownload(source, { filename: "folder.zip" });
+    expect(monitor.snapshot([]).tasks[0]).toMatchObject({ sizeKnown: false, percent: 0 });
+    source.end("archive bytes");
+    expect((await collect(output)).toString()).toBe("archive bytes");
+  });
+  it("counts every queued transfer while returning only 32 visible rows", () => {
+    const monitor = new TransferMonitorService(), now = new Date();
+    const rows = Array.from({ length: 40 }, (_, index) => ({ id: `queued-${String(index)}`, filename: "queued.bin", expectedBytes: 100, receivedBytes: 0, status: "created" as const, createdAt: now, updatedAt: now }));
+    expect(monitor.snapshot(rows)).toMatchObject({ queuedCount: 40, activeCount: 0 });
+    expect(monitor.snapshot(rows).tasks).toHaveLength(32);
+  });
+  it("interrupts the active request body and keeps cancellation across dashboard polls", async () => {
+    const monitor = new TransferMonitorService(), source = new PassThrough();
+    const release = monitor.trackUploadBody("active", source);
+    const closed = new Promise<void>((resolve) => source.once("close", resolve));
+    expect(monitor.control("active", "cancel")).toBe("cancelled");
+    await closed;
+    expect(source.destroyed).toBe(true);
+    const now = new Date();
+    monitor.snapshot([{ id: "active", filename: "cancel.bin", expectedBytes: 100, receivedBytes: 0, status: "uploading", createdAt: now, updatedAt: now }]);
+    await expect(monitor.awaitRunnable("active")).rejects.toMatchObject({ code: "cancelled" });
+    release();
+  });
   it("measures the real download stream and removes its terminal task immediately", async () => {
     vi.useFakeTimers();
     try {
@@ -94,6 +162,7 @@ describe("TransferMonitorService", () => {
     const monitor = new TransferMonitorService();
     const source = new PassThrough();
     const output = monitor.trackDownload(source, { filename: "archive.bin", totalBytes: 100 });
+    output.on("error", () => undefined);
     output.resume();
     const id = monitor.snapshot([]).tasks[0]?.id;
     if (id === undefined) throw new Error("Download task was not registered");

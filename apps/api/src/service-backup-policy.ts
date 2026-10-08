@@ -20,7 +20,7 @@ type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string
 
 interface PolicyRow {
   service_id: string; desired_revision: string; applied_revision: string;
-  archive_enabled: boolean; archive_interval_hours: number;
+  archive_enabled: boolean; archive_interval_hours: number; archive_pipeline: boolean;
   mirror_enabled: boolean; mirror_interval_minutes: number; policy_paused: boolean;
   namespace_slug: string; deployment_id: string; mirror_root: string | null;
   archive_status: Record<string, JsonValue>; mirror_status: Record<string, JsonValue>;
@@ -33,7 +33,7 @@ function view(row: PolicyRow) {
     scope: { serviceId: row.service_id, service: row.namespace_slug, deploymentId: row.deployment_id, mirrorRoot: row.mirror_root },
     revision: Number(row.desired_revision), appliedRevision: Number(row.applied_revision),
     paused: row.policy_paused,
-    archive: { enabled: row.archive_enabled, intervalHours: row.archive_interval_hours },
+    archive: { ...(!row.archive_pipeline ? { available: false } : {}), enabled: row.archive_pipeline && row.archive_enabled, intervalHours: row.archive_interval_hours },
     mirror: row.mirror_root === null ? null : { enabled: row.mirror_enabled, intervalMinutes: row.mirror_interval_minutes },
     observed: { online: row.last_seen_at !== null && Date.now() - row.last_seen_at.getTime() < 45000,
       lastSeenAt: row.last_seen_at?.toISOString() ?? null, version: row.agent_version,
@@ -49,7 +49,7 @@ export class ServiceBackupPolicy {
   async read(serviceId: string) {
     const rows = await this.database.withSql(sql => sql<PolicyRow[]>`
       SELECT a.*, a.desired_revision::text, a.applied_revision::text,
-        s.namespace_slug, s.deployment_id, s.mirror_root
+        s.namespace_slug, s.deployment_id, s.mirror_root, s.archive_pipeline
       FROM neptune_agents a JOIN backup_services s ON s.id=a.service_id
       WHERE a.service_id=${serviceId} AND s.state='active'
     `);
@@ -62,7 +62,7 @@ export class ServiceBackupPolicy {
     return this.database.transaction(async sql => {
       const rows = await sql<PolicyRow[]>`
         SELECT a.*, a.desired_revision::text, a.applied_revision::text,
-          s.namespace_slug, s.deployment_id, s.mirror_root
+          s.namespace_slug, s.deployment_id, s.mirror_root, s.archive_pipeline
         FROM neptune_agents a JOIN backup_services s ON s.id=a.service_id
         WHERE a.service_id=${serviceId} AND s.state='active' FOR UPDATE OF a,s
       `;
@@ -79,6 +79,7 @@ export class ServiceBackupPolicy {
       const capacity = await sql<{ count: string }[]>`SELECT count(*)::text AS count FROM neptune_policy_operations WHERE service_id=${serviceId}`;
       if (Number(capacity[0]?.count) >= 10000) throw new ServiceUnavailableException("Policy history capacity reached; preserve history and contact the operator");
       if (input.kind === "schedule") {
+        if (input.pipeline === "archive" && !row.archive_pipeline) throw new NotFoundException("This service has no archive pipeline");
         if (input.pipeline === "mirror" && row.mirror_root === null) throw new NotFoundException("This service has no mirror pipeline");
         const minutes = input.intervalHours * 60;
         const unchangedLegacyMirror = input.pipeline === "mirror" && Math.abs(minutes - row.mirror_interval_minutes) < 1e-8;
@@ -91,13 +92,14 @@ export class ServiceBackupPolicy {
           row.mirror_enabled = input.enabled; row.mirror_interval_minutes = Math.round(minutes);
         }
       } else if (input.kind === "schedule-all") {
-        if (row.mirror_root === null) throw new NotFoundException("This service has no advanced backup pipeline");
+        if (row.mirror_root === null || !row.archive_pipeline) throw new NotFoundException("This service has no combined backup pipeline");
         row.archive_enabled = row.mirror_enabled = input.enabled;
         row.archive_interval_hours = input.intervalHours;
         row.mirror_interval_minutes = input.intervalHours * 60;
       } else if (input.kind === "restore") {
         if ((input.mirror !== null) !== (row.mirror_root !== null)) throw new ConflictException("Backup pipeline profile differs from this deployment");
-        row.archive_enabled = input.archive.enabled; row.archive_interval_hours = input.archive.intervalHours;
+        if (!row.archive_pipeline && input.archive.enabled) throw new ConflictException("This service has no archive pipeline");
+        row.archive_enabled = row.archive_pipeline && input.archive.enabled; row.archive_interval_hours = input.archive.intervalHours;
         if (input.mirror) { row.mirror_enabled = input.mirror.enabled; row.mirror_interval_minutes = input.mirror.intervalMinutes; }
         row.policy_paused = true;
         // Old queued commands are resolved explicitly, never re-created on restore.
@@ -121,8 +123,8 @@ export class ServiceBackupPolicy {
 
   async run(serviceId: string, input: z.infer<typeof policyRunSchema>) {
     return this.database.transaction(async sql => {
-      const agents = await sql<{ policy_paused: boolean; mirror_root: string | null }[]>`
-        SELECT a.policy_paused,s.mirror_root FROM neptune_agents a JOIN backup_services s ON a.service_id=s.id
+      const agents = await sql<{ policy_paused: boolean; mirror_root: string | null; archive_pipeline: boolean }[]>`
+        SELECT a.policy_paused,s.mirror_root,s.archive_pipeline FROM neptune_agents a JOIN backup_services s ON a.service_id=s.id
         WHERE a.service_id=${serviceId} AND s.state='active' FOR UPDATE OF a,s`;
       const agent = agents[0];
       if (!agent) throw new NotFoundException("The service has no enrolled backup policy");
@@ -133,6 +135,7 @@ export class ServiceBackupPolicy {
         if (previous[0].service_id !== serviceId || previous[0].kind !== kind) throw new ConflictException("Request ID belongs to another run");
         return { id: input.requestId, state: previous[0].state, error: previous[0].error, pipeline: input.pipeline };
       }
+      if (input.pipeline === "archive" && !agent.archive_pipeline) throw new NotFoundException("This service has no archive pipeline");
       if (agent.policy_paused) throw new ConflictException("Restored policy awaits verification");
       if (input.pipeline === "mirror" && agent.mirror_root === null) throw new NotFoundException("This service has no mirror pipeline");
       const active = await sql<{ id: string }[]>`SELECT id FROM neptune_agent_commands

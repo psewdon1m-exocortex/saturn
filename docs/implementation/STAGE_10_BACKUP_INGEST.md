@@ -28,7 +28,7 @@ owner.
 
 ### Intermediate state
 
-- `SERVICE_PROVISIONED`: owner recent proof creates an enabled service; a
+- `SERVICE_PROVISIONED`: an authorized owner creates an enabled service; a
   256-bit token is disclosed once and only a domain-separated HMAC verifier is
   stored.
 - `RUN_PENDING`: an authenticated producer submits filename, source timestamp,
@@ -70,16 +70,28 @@ owner.
 
 ## API contract
 
-Owner routes (cookie session + CSRF; mutations require recent proof):
+Owner routes use a cookie session and CSRF protection for mutations.
+Synchronization setup-code creation, reissue and individual identity revocation
+use the existing owner session without another Access Key prompt. Explicit
+`pipeline_kind` distinguishes independent host recovery identities and links
+each Volt or Mastermind archive producer with its mirror. Updater, Neptune,
+Gryphon and Wyvern are enrolled separately, so any subset may exist on a host.
+Mastermind's source export may be a transient ZIP, but Neptune extracts it and
+mirrors the complete tree into `/mastermind`; Saturn never stores that mirror as
+a single `vault.zip`.
+Direct service creation, quota/retention changes and restore-test actions
+retain recent-proof requirements.
 
 ```text
-POST   /api/v1/backup-services
+POST   /api/v1/backup-services                         recent proof
+POST   /api/v1/backup-services/enrollments
 GET    /api/v1/backup-services
-PATCH  /api/v1/backup-services/{id}
+PATCH  /api/v1/backup-services/{id}                    recent proof
+POST   /api/v1/backup-services/{id}/enrollment
 POST   /api/v1/backup-services/{id}/rotate-token
 DELETE /api/v1/backup-services/{id}
 GET    /api/v1/backup-services/{id}/runs
-POST   /api/v1/backup-runs/{run_id}/restore-tests
+POST   /api/v1/backup-runs/{run_id}/restore-tests       recent proof
 ```
 
 Producer routes (`Authorization: Bearer <service-token>`; no browser cookies):
@@ -149,9 +161,18 @@ list, content-download, delete or retention endpoint.
 - Producer API exposes only create, offset/resume, append, complete and own-run
   status. Owner UI provisions, rotates and revokes one-time tokens and displays
   freshness, usage, failures and restore status.
+- Updater, Neptune, Gryphon and Wyvern recovery use optional independent
+  producer identities. A server enrolls only installed services; each identity
+  has its own setup/revoke lifecycle and derived `backups/<service>/<server>`
+  boundary. Updater never chooses a neighboring storage path, and Saturn
+  exposes no browser helper-recovery form.
 - `pnpm verify:stage:10` passed 14 aggregate checks on 2026-08-26: 67 tests and
   builds, migration rollback, restart/resume, upload-only isolation, bounds,
   isolated gzip restore, checksum cleanup, quota races, optional mTLS, GFS
   preview, rotation/revoke, browser/Axe and secret/recovery scans.
 - Machine report: `artifacts/verification/stage-10-backup-ingest.json`
   (SHA-256 `b19ea864e95436c07935c80c4ef8ec3ef278e7383fd140015bc00932ed2e6cf0`).
+
+## Enrollment update — 2026-10-05
+
+Volt/Mastermind enrollment accepts archive-only, mirror-only or paired capabilities. `archivePipeline` defaults true for existing identities. Unselected archive capability is enforced on all producer archive endpoints and policy mutations. Mirror and Mastermind reader devices are created only when a mirror is selected. Existing paired registrations retain their capabilities. See the accepted [central decision](../../../.docs/decisions/2026-10-05-synchronization-enrollment.md).

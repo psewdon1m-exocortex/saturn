@@ -100,12 +100,12 @@ class MemoryRepository implements OwnerAuthRepository {
   }
 }
 
-function fixture(repository = new MemoryRepository()) {
+function fixture(repository = new MemoryRepository(), ownerAccessKey = "owner-access-key-that-is-at-least-32-characters-long") {
   return {
     repository,
     service: new OwnerAuthService({
       repository,
-      ownerAccessKey: "owner-access-key-that-is-at-least-32-characters-long",
+      ownerAccessKey,
       pepper: "authentication-pepper-at-least-32-characters-long",
       options: {
         publicOrigin: "https://vault.example.test",
@@ -226,6 +226,25 @@ describe("OwnerAuthService", () => {
       maximumUploadFileGiB: 10,
     })).toThrow(/Upload limits/);
     expect(await service.revokeAll()).toBe(1);
+  });
+
+  it.each(["a", "  ", " x\n\r\tключ!? ", "x".repeat(2048)])("authenticates and rotates an opaque Access Key without normalization (%#)", async (key) => {
+    const { service, repository } = fixture(undefined, key);
+    await service.initialize();
+    const current = await service.authenticate(key, "127.0.0.1", "browser");
+    const previous = await service.validateSession({ token: current.token, userAgent: "browser", isMutation: false });
+    const replacement = " y\n ";
+    const changed = await service.changeAccessKey({ previous, previousToken: current.token,
+      currentAccessKey: key, newAccessKey: replacement, confirmation: replacement,
+      sourceIp: "127.0.0.1", userAgent: "browser" });
+    await expect(service.authenticate(replacement, "127.0.0.2", "browser")).resolves.toHaveProperty("token");
+    await expect(service.authenticate(replacement.trim(), "127.0.0.3", "browser")).rejects.toMatchObject({ code: "invalid_credentials" });
+    await expect(service.authenticate(key, "127.0.0.4", "browser")).rejects.toMatchObject({ code: "invalid_credentials" });
+    const restarted = fixture(repository, key).service;
+    await restarted.initialize();
+    expect(await restarted.verifyBootstrap(replacement)).toBe(true);
+    await expect(restarted.validateSession({ token: changed.token, userAgent: "browser", isMutation: false })).resolves.toHaveProperty("id");
+    expect(JSON.stringify(repository.attempts)).not.toContain(replacement);
   });
 
   it("atomically rotates the Access Key and revokes every other session", async () => {

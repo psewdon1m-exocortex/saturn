@@ -54,6 +54,7 @@ export interface ShareSession {
 }
 
 export interface SharePackage {
+  readonly sourceFingerprint?: string;
   readonly id: string;
   readonly shareId: string;
   readonly state: "preparing" | "ready" | "failed" | "expired";
@@ -84,6 +85,7 @@ export interface ShareOptions {
 }
 
 export interface ShareRepository {
+  claimPendingPackage?(now: Date): Promise<SharePackage | undefined>;
   createShare(input: Omit<ShareRecord, "downloadCount" | "state" | "updatedAt">): Promise<ShareRecord>;
   getShareById(id: string): Promise<ShareRecord | undefined>;
   getShareByTokenHash(tokenHash: string): Promise<ShareRecord | undefined>;
@@ -99,10 +101,10 @@ export interface ShareRepository {
   validateActive(shareId: string, now: Date): Promise<boolean>;
   beginPasswordAttempt(input: { readonly sourceIpHash: string; readonly since: Date; readonly limit: number; readonly occurredAt: Date }): Promise<string | undefined>;
   finishPasswordAttempt(sequence: string, outcome: "success" | "failure", occurredAt: Date): Promise<void>;
-  writeAccessEvent(input: { readonly id: string; readonly shareId?: string; readonly sourceIpHash: string; readonly action: "metadata" | "unlock" | "browse" | "content" | "package_create" | "package_content"; readonly outcome: "success" | "denied" | "failure"; readonly statusCode: number; readonly rangeStart?: number; readonly rangeLength?: number; readonly occurredAt: Date; readonly details?: Readonly<Record<string, unknown>> }): Promise<void>;
+  writeAccessEvent(input: { readonly id: string; readonly shareId?: string; readonly sourceIpHash: string; readonly action: "metadata" | "unlock" | "browse" | "thumbnail" | "content" | "package_create" | "package_content"; readonly outcome: "success" | "denied" | "failure"; readonly statusCode: number; readonly rangeStart?: number; readonly rangeLength?: number; readonly occurredAt: Date; readonly details?: Readonly<Record<string, unknown>> }): Promise<void>;
   createPackage(input: Omit<SharePackage, "state" | "fileCount" | "sizeBytes">): Promise<{ readonly value: SharePackage; readonly created: boolean }>;
   getCurrentPackage(shareId: string): Promise<SharePackage | undefined>;
-  setPackageReady(id: string, input: { readonly fileCount: number; readonly sizeBytes: number; readonly sha256: string; readonly readyAt: Date }): Promise<SharePackage>;
+  setPackageReady(id: string, input: { readonly fileCount: number; readonly sizeBytes: number; readonly sha256: string; readonly readyAt: Date; readonly sourceFingerprint?: string }): Promise<SharePackage>;
   setPackageFailed(id: string, errorCode: string): Promise<void>;
   claimExpiredPackages(now: Date, limit: number): Promise<readonly SharePackage[]>;
   markPackageExpired(id: string): Promise<void>;

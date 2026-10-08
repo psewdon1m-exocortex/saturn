@@ -1,4 +1,5 @@
-import { BadRequestException, Body, Controller, Get, Inject, Post, UseGuards } from "@nestjs/common";
+import { BadRequestException, Body, ConflictException, Controller, Get, Inject, Param, Post, Query, UseGuards } from "@nestjs/common";
+import { StorageCatalogError, StorageCatalogService } from "@saturn/protection";
 import { z } from "zod";
 import { OwnerTokenGuard } from "./owner-token.guard.js";
 import { StorageConnectionService } from "./storage-connection.service.js";
@@ -20,7 +21,30 @@ const switchSchema = connectionSchema.extend({
 @Controller("operator/storage")
 @UseGuards(OwnerTokenGuard)
 export class StorageConnectionController {
-  constructor(@Inject(StorageConnectionService) private readonly storage: StorageConnectionService) {}
+  constructor(@Inject(StorageConnectionService) private readonly storage: StorageConnectionService,
+    @Inject(StorageCatalogService) private readonly catalog: StorageCatalogService) {}
+
+  @Get("analysis")
+  analysis(@Query("offset") offset = "0") {
+    const parsed = z.coerce.number().int().min(0).max(100_000).safeParse(offset);
+    if (!parsed.success) throw new BadRequestException({ code: "invalid_storage_analysis_offset" });
+    return this.catalog.latest(parsed.data);
+  }
+
+  @Post("analysis")
+  async analyze() {
+    try { return await this.catalog.start(); }
+    catch (error) { if (error instanceof StorageCatalogError) throw new ConflictException({ code: error.code }); throw error; }
+  }
+
+  @Post("analysis/:id/synchronize")
+  async synchronize(@Param("id") id: string, @Body() body: unknown) {
+    if (!z.uuid().safeParse(id).success || !z.object({ confirmation: z.literal("SYNCHRONIZE CATALOG") }).strict().safeParse(body).success) {
+      throw new BadRequestException({ code: "invalid_storage_synchronization" });
+    }
+    try { return await this.catalog.synchronize(id); }
+    catch (error) { if (error instanceof StorageCatalogError) throw new ConflictException({ code: error.code }); throw error; }
+  }
 
   @Get()
   status() {

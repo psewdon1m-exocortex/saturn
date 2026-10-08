@@ -23,6 +23,9 @@ recoverable and verified against the unified acceptance checklist. A feature
 is not complete when it exists only in UI or configuration; its runtime limit,
 negative-path behavior and recovery path must be tested.
 
+The 2026-10-06 audit fixes and upgrade/rollback procedure are covered by
+[Transfer safety and recovery](TRANSFER_SAFETY_AND_RECOVERY.md).
+
 ## 2. Stage state model
 
 Every stage uses the following state machine:

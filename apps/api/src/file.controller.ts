@@ -250,13 +250,16 @@ export class FileController {
   ): Promise<void> {
     if (!(request.body instanceof Readable)) throw new Error("Upload body is invalid");
     await awaitTransferRunnable(this.transfers, id, request, reply);
-    const upload = await this.files.appendUpload(
+    const releaseBody = this.transfers.trackUploadBody(id, request.body);
+    try {
+      const upload = await this.files.appendUpload(
       id,
       integerHeader(rawOffset, "Upload-Offset"),
       integerHeader(rawLength, "Content-Length"),
       request.body,
     );
     reply.header("Upload-Offset", upload.receivedSize).status(204).send();
+    } finally { releaseBody(); }
   }
 
   @Post("uploads/:id/complete")
@@ -276,7 +279,10 @@ export class FileController {
     @Headers("range") rawRange: string | undefined,
     @Req() request: AuthenticatedOwnerRequest,
     @Res() reply: FastifyReply,
+    @Query("transferId") rawTransferId?: string,
   ): Promise<void> {
+    const transferId = z.uuid().optional().parse(rawTransferId);
+    if (transferId !== undefined) this.transfers.assertDownloadAvailable(transferId);
     const resource = await this.files.getResource(id);
     this.#requireRecentProof(resource, request);
     const range = parseRange(rawRange, resource.sizeBytes);
@@ -285,6 +291,7 @@ export class FileController {
     reply
       .header("Accept-Ranges", "bytes")
       .header("Content-Length", contentLength)
+      .header("Cache-Control", "no-store, private")
       .header("Content-Type", resource.mimeType ?? "application/octet-stream")
       .header("Content-Disposition", contentDisposition("attachment", resource.name))
       .header("ETag", `"sha256-${resource.sha256 ?? "unknown"}"`);
@@ -294,7 +301,7 @@ export class FileController {
         `bytes ${String(range.offset)}-${String(range.offset + contentLength - 1)}/${String(resource.sizeBytes)}`,
       );
     }
-    reply.send(this.transfers.trackDownload(download.stream, { filename: resource.name, totalBytes: contentLength }));
+    reply.send(this.transfers.trackDownload(download.stream, { ...(transferId === undefined ? {} : { id: transferId }), filename: resource.name, totalBytes: contentLength }));
   }
 
   @Get("folders/:id/archive")
@@ -302,18 +309,29 @@ export class FileController {
     @Param("id") id: string,
     @Req() request: AuthenticatedOwnerRequest,
     @Res() reply: FastifyReply,
+    @Query("transferId") rawTransferId?: string,
   ): Promise<void> {
+    const transferId = z.uuid().optional().parse(rawTransferId);
+    if (transferId !== undefined) this.transfers.assertDownloadAvailable(transferId);
     const folder = await this.files.getResource(id);
     if (folder.type !== "folder" || folder.status !== "active") throw new Error("Resource is not an active folder");
     this.#requireRecentProof(folder, request);
     const prepared = await this.#folderArchiveEntries(folder);
     const archive = archiver("zip", { zlib: { level: 6 } });
+    const members = new Set<Readable>();
+    const disposeMembers = () => { for (const member of members) member.destroy(); };
+    archive.once("close", disposeMembers);
+    archive.once("error", (error) => { disposeMembers(); reply.raw.destroy(error); });
+    reply.raw.once("close", () => {
+      if (!reply.raw.writableFinished) { archive.abort(); archive.destroy(); }
+      disposeMembers();
+    });
     reply
       .header("Content-Type", "application/zip")
       .header("Cache-Control", "no-store, private")
       .header("Pragma", "no-cache")
       .header("Content-Disposition", contentDisposition("attachment", `${folder.name}.zip`))
-      .send(this.transfers.trackDownload(archive, { filename: `${folder.name}.zip`, totalBytes: prepared.totalBytes }));
+      .send(this.transfers.trackDownload(archive, { ...(transferId === undefined ? {} : { id: transferId }), filename: `${folder.name}.zip` }));
     if (prepared.entries.length === 0) archive.append("", { name: `${folder.name}/` });
     for (const entry of prepared.entries) {
       if (entry.resource.type === "folder") {
@@ -321,12 +339,17 @@ export class FileController {
         continue;
       }
       const files = this.files;
-      archive.append(Readable.from((async function* () {
+      const member = Readable.from((async function* () {
         const opened = await files.openDownload(entry.resource.id);
-        for await (const chunk of opened.stream) yield chunk;
-      })()), { name: entry.path });
+        try { if (archive.destroyed) return; for await (const chunk of opened.stream) yield chunk; }
+        finally { if (!opened.stream.destroyed) opened.stream.destroy(); }
+      })());
+      members.add(member);
+      member.once("close", () => members.delete(member));
+      archive.append(member, { name: entry.path });
     }
-    await archive.finalize();
+    // Return the reply while ZIP generation is running so HTTP backpressure can drain it.
+    void archive.finalize().catch((error: unknown) => archive.destroy(error instanceof Error ? error : new Error("Folder archive failed")));
   }
 
   @Get("files/:id/preview")

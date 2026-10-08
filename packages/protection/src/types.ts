@@ -9,6 +9,7 @@ export interface TrackedFile {
   readonly sizeBytes: number;
   readonly sha256?: string;
   readonly status: ResourceStatus;
+  readonly currentVersionId?: string;
 }
 
 export interface InterruptedOperation {
@@ -47,7 +48,8 @@ export interface ReconciliationRepository {
   listActiveFiles(afterId: string | undefined, limit: number): Promise<readonly TrackedFile[]>;
   listManagedRootPaths(): Promise<readonly string[]>;
   hasResourceAtPath(storagePath: string): Promise<boolean>;
-  setResourceStatus(id: string, status: ResourceStatus): Promise<void>;
+  setResourceStatus(id: string, status: ResourceStatus, expected?: TrackedFile): Promise<boolean>;
+  withTrackedFile?(tracked: TrackedFile, action: () => Promise<void>): Promise<boolean>;
   listInterruptedOperations(): Promise<readonly InterruptedOperation[]>;
   addIssue(issue: ReconciliationIssue): Promise<void>;
   listRuns(limit: number): Promise<readonly ReconciliationRun[]>;

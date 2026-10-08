@@ -41,6 +41,7 @@ describe("DropDrainService", () => {
     let received = Buffer.alloc(0);
     let appendCalls = 0;
     const repository = {
+      getDropUpload: async () => item,
       claimBufferedUpload: async () => {
         if (claimed) return undefined;
         claimed = true;
@@ -102,6 +103,7 @@ describe("DropDrainService", () => {
     let appendCalls = 0;
     let stored = false;
     const repository = {
+      getDropUpload: async () => item,
       claimBufferedUpload: async () => { if (claimed) return undefined; claimed = true; return item; },
       markUploadVerifying: async () => item,
       markUploadStored: async () => { stored = true; return { ...item, state: "stored" as const }; },

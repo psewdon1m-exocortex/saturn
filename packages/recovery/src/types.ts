@@ -52,6 +52,17 @@ export interface LogicalDatabaseToolchain {
   createDump(outputPath: string): Promise<void>;
   restoreDump(dumpPath: string, mode: "clean" | "replace"): Promise<void>;
   verifyRestoredDatabase(): Promise<Record<string, number>>;
+  verifyStorage?(storage: StorageAdapter): Promise<void>;
+  beginReplacement?(): Promise<void>;
+  commitReplacement?(): Promise<void>;
+  rollbackReplacement?(): Promise<void>;
+}
+
+export class RecoveryCommitUncertainError extends Error {
+  constructor(cause: unknown) {
+    super("Recovery commit acknowledgement is unavailable; preserve the active configuration and inspect the restore guard before resuming", { cause });
+    this.name = "RecoveryCommitUncertainError";
+  }
 }
 
 export interface MetadataExporter {
@@ -75,6 +86,7 @@ export interface RestoreInput {
   readonly configuration?: {
     prepare(value: unknown): Promise<void>;
     apply(): Promise<void>;
+    verifyFiles?(): Promise<void>;
     rollback(): Promise<void>;
   };
 }
@@ -89,3 +101,4 @@ export interface RestoreResult {
   readonly verification: Readonly<Record<string, number>>;
   readonly snapshotPath?: string;
 }
+import type { StorageAdapter } from "@saturn/storage";

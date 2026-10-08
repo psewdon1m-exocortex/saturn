@@ -29,6 +29,7 @@ COPY --chown=node:node packages/database/migrations /app/recovery/migrations
 COPY --chown=node:node scripts/validate-production.mjs scripts/migrate-runtime.mjs scripts/migrate-production-runtime.mjs scripts/storage-bootstrap.mjs scripts/storage-smoke.mjs scripts/storage-exit.mjs /app/scripts/
 ENV VAULT_RUNTIME_ROOT=/app
 COPY --chown=node:node scripts/recovery-cli.mjs /app/scripts/
+COPY --chown=node:node scripts/provision-owner-access-key.mjs /app/scripts/
 USER node
 ENTRYPOINT ["/sbin/tini","--"]
 CMD ["node","/app/api/dist/main.js"]

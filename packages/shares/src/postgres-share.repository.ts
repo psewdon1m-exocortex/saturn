@@ -34,6 +34,7 @@ interface SessionRow {
 }
 
 interface PackageRow {
+  source_fingerprint: string | null;
   id: string;
   share_id: string;
   state: SharePackage["state"];
@@ -85,6 +86,7 @@ function session(row: SessionRow): ShareSession {
 
 function packageValue(row: PackageRow): SharePackage {
   return {
+    ...(row.source_fingerprint == null ? {} : { sourceFingerprint: row.source_fingerprint }),
     id: row.id,
     shareId: row.share_id,
     state: row.state,
@@ -339,8 +341,11 @@ export class PostgresShareRepository implements ShareRepository {
 
   createPackage(input: Omit<SharePackage, "state" | "fileCount" | "sizeBytes">): Promise<{ readonly value: SharePackage; readonly created: boolean }> {
     return this.#database.transaction(async (sql) => {
+      await sql`SELECT pg_advisory_xact_lock(1399677207)`;
       const existing = await sql<PackageRow[]>`SELECT * FROM share_packages WHERE share_id = ${input.shareId} AND state IN ('preparing', 'ready') LIMIT 1`;
       if (existing[0] !== undefined) return { value: packageValue(existing[0]), created: false };
+      const queued = await sql<{ count: number }[]>`SELECT count(*)::int AS count FROM share_packages WHERE state='preparing'`;
+      if ((queued[0]?.count ?? 32) >= 32) throw new Error("Share package queue is full");
       const rows = await sql<PackageRow[]>`
         INSERT INTO share_packages (id, share_id, state, storage_path, created_at, expires_at)
         VALUES (${input.id}, ${input.shareId}, 'preparing', ${input.storagePath}, ${input.createdAt}, ${input.expiresAt})
@@ -352,6 +357,17 @@ export class PostgresShareRepository implements ShareRepository {
     });
   }
 
+  claimPendingPackage(now: Date): Promise<SharePackage | undefined> {
+    return this.#database.transaction(async sql => {
+      const rows = await sql<PackageRow[]>`
+        WITH candidate AS (SELECT id FROM share_packages WHERE state='preparing' AND expires_at>${now}
+          AND (claimed_at IS NULL OR claimed_at<${new Date(now.getTime()-30*60_000)}) ORDER BY created_at,id FOR UPDATE SKIP LOCKED LIMIT 1)
+        UPDATE share_packages SET claimed_at=${now} WHERE id=(SELECT id FROM candidate) RETURNING *
+      `;
+      return rows[0] === undefined ? undefined : packageValue(rows[0]);
+    });
+  }
+
   getCurrentPackage(shareId: string): Promise<SharePackage | undefined> {
     return this.#database.withSql(async (sql) => {
       const rows = await sql<PackageRow[]>`SELECT * FROM share_packages WHERE share_id = ${shareId} AND state IN ('preparing', 'ready') ORDER BY created_at DESC LIMIT 1`;
@@ -359,11 +375,11 @@ export class PostgresShareRepository implements ShareRepository {
     });
   }
 
-  setPackageReady(id: string, input: { readonly fileCount: number; readonly sizeBytes: number; readonly sha256: string; readonly readyAt: Date }): Promise<SharePackage> {
+  setPackageReady(id: string, input: { readonly fileCount: number; readonly sizeBytes: number; readonly sha256: string; readonly readyAt: Date; readonly sourceFingerprint?: string }): Promise<SharePackage> {
     return this.#database.withSql(async (sql) => {
       const rows = await sql<PackageRow[]>`
         UPDATE share_packages SET state = 'ready', file_count = ${input.fileCount}, size_bytes = ${input.sizeBytes},
-          sha256 = ${input.sha256}, ready_at = ${input.readyAt}
+          sha256 = ${input.sha256}, ready_at = ${input.readyAt}, source_fingerprint=${input.sourceFingerprint ?? null}
         WHERE id = ${id} AND state = 'preparing' RETURNING *
       `;
       const row = rows[0];

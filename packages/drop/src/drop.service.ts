@@ -82,6 +82,7 @@ function validateIdempotencyKey(value: string): string {
 }
 
 export class DropService {
+  readonly #uploadLocks = new Map<string, Promise<unknown>>();
   readonly #repository: DropRepository;
   readonly #files: DropFileGateway;
   readonly #pepper: Buffer;
@@ -335,13 +336,24 @@ export class DropService {
   }
 
   async appendUpload(session: DropSession, id: string, offset: number, contentLength: number, source: Readable): Promise<DropUploadStatus> {
+    return this.#withUploadLock(id, () => this.#appendUpload(session, id, offset, contentLength, source));
+  }
+
+  async #appendUpload(session: DropSession, id: string, offset: number, contentLength: number, source: Readable): Promise<DropUploadStatus> {
     const mapping = await this.#mapped(session.channelId, id);
     if (this.#buffer !== undefined && mapping.localPath !== undefined && this.#repository.advanceBufferedUpload !== undefined) {
       if (mapping.state !== "uploading") throw new Error("Drop upload is not writable");
       if (offset !== (mapping.receivedSize ?? 0) || offset + contentLength > mapping.expectedSize) throw new Error("Drop upload offset is invalid");
-      const written = await this.#buffer.append(mapping.localPath, offset, contentLength, source);
-      const updated = await this.#repository.advanceBufferedUpload(session.channelId, id, offset, written, new Date());
-      return this.#bufferStatus(updated, session.expiresAt);
+      try {
+        const written = await this.#buffer.append(mapping.localPath, offset, contentLength, source);
+        const updated = await this.#repository.advanceBufferedUpload(session.channelId, id, offset, written, new Date());
+        return this.#bufferStatus(updated, session.expiresAt);
+      } catch (error) {
+        // Re-read the acknowledged offset in case the database committed but its response was lost.
+        const current = await this.#mapped(session.channelId, id);
+        await this.#buffer.truncate(mapping.localPath, current.receivedSize ?? 0);
+        throw error;
+      }
     }
     if (mapping.uploadId === undefined || mapping.state === "completed") throw new Error("Drop upload is not writable");
     await this.#files.appendUpload(mapping.uploadId, offset, contentLength, source);
@@ -349,8 +361,16 @@ export class DropService {
   }
 
   async completeUpload(session: DropSession, id: string, now = new Date()): Promise<DropCompletion> {
+    return this.#withUploadLock(id, () => this.#completeUpload(session, id, now));
+  }
+
+  async #completeUpload(session: DropSession, id: string, now: Date): Promise<DropCompletion> {
     const mapping = await this.#mapped(session.channelId, id);
     if (this.#buffer !== undefined && mapping.localPath !== undefined && this.#repository.markUploadBuffered !== undefined) {
+      if (["buffered", "transferring", "verifying", "stored"].includes(mapping.state) && mapping.actualSha256 !== undefined) {
+        return { upload: this.#bufferStatus(mapping, session.expiresAt), filename: mapping.filename, sizeBytes: mapping.expectedSize, sha256: mapping.actualSha256 };
+      }
+      if (mapping.state !== "uploading") throw new Error("Drop upload cannot be completed in its current state");
       if ((mapping.receivedSize ?? 0) !== mapping.expectedSize) throw new Error("Drop upload is incomplete");
       const digest = await this.#buffer.digest(mapping.localPath);
       if (digest.bytes !== mapping.expectedSize || (mapping.expectedSha256 !== undefined && mapping.expectedSha256 !== digest.sha256)) {
@@ -360,6 +380,9 @@ export class DropService {
       const buffered = await this.#repository.markUploadBuffered(session.channelId, mapping.id, digest.sha256, now);
       await this.#auditEvent("drop.upload.buffered", "success", `drop-upload:${mapping.id}`, { sessionId: session.id, channelId: session.channelId, uploadId: mapping.id, sizeBytes: digest.bytes });
       return { upload: this.#bufferStatus(buffered, session.expiresAt), filename: mapping.filename, sizeBytes: digest.bytes, sha256: digest.sha256 };
+    }
+    if (mapping.state === "stored" && mapping.actualSha256 !== undefined) {
+      return { upload: this.#bufferStatus(mapping, session.expiresAt), filename: mapping.filename, sizeBytes: mapping.expectedSize, sha256: mapping.actualSha256 };
     }
     if (mapping.uploadId === undefined) throw new Error("Drop upload is incomplete");
     const completed = await this.#files.completeUpload(mapping.uploadId);
@@ -384,10 +407,17 @@ export class DropService {
   }
 
   async cancelUpload(session: DropSession, id: string, now = new Date()): Promise<DropUploadStatus> {
+    return this.#withUploadLock(id, () => this.#cancelUpload(session, id, now));
+  }
+
+  async #cancelUpload(session: DropSession, id: string, now: Date): Promise<DropUploadStatus> {
     if (this.#repository.cancelDropUpload === undefined) throw new Error("Buffered Drop cancellation is unavailable");
     const current = await this.#mapped(session.channelId, id);
     const cancelled = await this.#repository.cancelDropUpload(session.channelId, id, now);
-    if (current.localPath !== undefined) await this.#buffer?.delete(current.localPath).catch(() => undefined);
+    if (current.localPath !== undefined && this.#buffer !== undefined) {
+      try { await this.#buffer.delete(current.localPath); await this.#repository.releaseBuffer?.(id); }
+      catch { /* Cleanup worker retries; quota remains reserved. */ }
+    }
     await this.#auditEvent("drop.upload.cancelled", "success", `drop-cancel:${id}`, { sessionId: session.id, channelId: session.channelId, uploadId: id });
     return this.#bufferStatus(cancelled, session.expiresAt);
   }
@@ -397,6 +427,15 @@ export class DropService {
     const mapping = await this.#repository.getDropUpload(channelId, id);
     if (mapping === undefined) throw new DropServiceError("not_found");
     return mapping;
+  }
+
+  async #withUploadLock<T>(id: string, action: () => Promise<T>): Promise<T> {
+    if (this.#repository.withUploadLock !== undefined) return this.#repository.withUploadLock(id, action);
+    const previous = this.#uploadLocks.get(id) ?? Promise.resolve();
+    const execution = previous.catch(() => undefined).then(action);
+    this.#uploadLocks.set(id, execution);
+    try { return await execution; }
+    finally { if (this.#uploadLocks.get(id) === execution) this.#uploadLocks.delete(id); }
   }
 
   async #status(mapping: Awaited<ReturnType<DropRepository["getDropUpload"]>> & {}) : Promise<DropUploadStatus> {
