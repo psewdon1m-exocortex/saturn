@@ -175,4 +175,4 @@ list, content-download, delete or retention endpoint.
 
 ## Enrollment update — 2026-10-05
 
-Volt/Mastermind enrollment accepts archive-only, mirror-only or paired capabilities. `archivePipeline` defaults true for existing identities. Unselected archive capability is enforced on all producer archive endpoints and policy mutations. Mirror and Mastermind reader devices are created only when a mirror is selected. Existing paired registrations retain their capabilities. See the accepted [central decision](../../../.docs/decisions/2026-10-05-synchronization-enrollment.md).
+Volt/Mastermind enrollment accepts archive-only, mirror-only or paired capabilities. `archivePipeline` defaults true for existing identities. Unselected archive capability is enforced on all producer archive endpoints and policy mutations. Mirror and Mastermind reader devices are created only when a mirror is selected. Existing paired registrations retain their capabilities. See the accepted [central decision](https://github.com/psewdon1m-exocortex/general/blob/main/decisions/2026-10-05-synchronization-enrollment.md).

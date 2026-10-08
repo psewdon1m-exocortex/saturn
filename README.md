@@ -233,4 +233,4 @@ verified against the production-signed Updater manifest and existing trust key.
 
 ## Enrollment update — 2026-10-05
 
-Host recovery names derive from component + Server ID. Volt/Mastermind registration selects archive, mirror or both. Windows Connection name creates its dedicated server folder and is returned to Neptune; server-side DAV authorization protects its root and excludes other connections. Migration 0042 adds these capabilities; legacy unbound Windows clients require isolated setup. See the accepted [central decision](../.docs/decisions/2026-10-05-synchronization-enrollment.md).
+Host recovery names derive from component + Server ID. Volt/Mastermind registration selects archive, mirror or both. Windows Connection name creates its dedicated server folder and is returned to Neptune; server-side DAV authorization protects its root and excludes other connections. Migration 0042 adds these capabilities; legacy unbound Windows clients require isolated setup. See the accepted [central decision](https://github.com/psewdon1m-exocortex/general/blob/main/decisions/2026-10-05-synchronization-enrollment.md).
