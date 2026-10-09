@@ -6,7 +6,7 @@ and the shared-agent contracts in
 [Part 09](https://github.com/psewdon1m-exocortex/general/blob/main/PART_09_SERVICE_AGENTS_DEPLOYMENT_AND_LIFECYCLE.md) and
 [Part 10](https://github.com/psewdon1m-exocortex/general/blob/main/PART_10_SERVICE_AGENTS_UI_AND_OPERATOR_WORKFLOWS.md).
 
-Saturn 0.2.7 pins the published Updater 0.6.13 and Neptune 0.1.13 host
+Saturn 0.2.8 pins the published Updater 0.6.13 and Neptune 0.1.13 host
 artifacts. Its release qualification records the exact published Kernel 0.3.10
 machine-principal migration, resolution and revocation contract for INT-16.
 

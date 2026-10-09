@@ -56,6 +56,7 @@ jobs:
         run: pnpm install --frozen-lockfile
       - name: Record the pinned Kernel machine-principal contract
         run: |
+          trap 'rm -rf -- .kernel-contract' EXIT
           npm ci --prefix .kernel-contract
           python3 scripts/known-problems-gate.py --record kernel-register-contract \
             --command bash -lc 'cd .kernel-contract && node --test tests/wyvern-machine-enrollment.test.js'
