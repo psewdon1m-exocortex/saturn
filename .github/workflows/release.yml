@@ -31,6 +31,12 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
+      - name: Check out the published Kernel contract
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: psewdon1m-exocortex/kernel
+          ref: f0edf9b3d8363c9d00432f7c01614e62e62b9f3e
+          path: .kernel-contract
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "24"
@@ -48,6 +54,11 @@ jobs:
         run: corepack enable && corepack prepare pnpm@11.24.0 --activate
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+      - name: Record the pinned Kernel machine-principal contract
+        run: |
+          npm ci --prefix .kernel-contract
+          python3 scripts/known-problems-gate.py --record kernel-register-contract \
+            --command bash -lc 'cd .kernel-contract && node --test tests/wyvern-machine-enrollment.test.js'
       - name: Download and verify pinned Updater
         env:
           GH_TOKEN: ${{ secrets.RELEASE_READ_TOKEN || secrets.GITHUB_TOKEN }}

@@ -12,7 +12,7 @@ Record the deployed Saturn image digests, applied migrations, PostgreSQL and
 client-tool versions, Updater/Neptune versions, active storage profile and
 release trust identities. The released `saturn-v0.2.6` migration baseline has
 39 migrations. Do not infer the deployed baseline from workspace package.json.
-The current workspace pins Updater `0.6.10`; this pin alone is not evidence
+The current workspace pins Updater `0.6.13`; this pin alone is not evidence
 that its signed release is available or installed.
 
 Validate the pre-update recovery ZIP and an independent second copy. A Saturn

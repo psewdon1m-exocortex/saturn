@@ -6,6 +6,10 @@ and the shared-agent contracts in
 [Part 09](https://github.com/psewdon1m-exocortex/general/blob/main/PART_09_SERVICE_AGENTS_DEPLOYMENT_AND_LIFECYCLE.md) and
 [Part 10](https://github.com/psewdon1m-exocortex/general/blob/main/PART_10_SERVICE_AGENTS_UI_AND_OPERATOR_WORKFLOWS.md).
 
+Saturn 0.2.7 pins the published Updater 0.6.13 and Neptune 0.1.13 host
+artifacts. Its release qualification records the exact published Kernel 0.3.10
+machine-principal migration, resolution and revocation contract for INT-16.
+
 Owner login and administration routes use the public/non-indexable authenticated profile and are reachable from every client IP. Access Key verification, sessions, CSRF and reauthentication protect owner data. Public capability, backup enrollment/ingest, WebDAV and Neptune check-in routes retain their own authentication. Configure explicit trusted proxies; do not trust arbitrary forwarded IP headers. The server-managed Nginx denies probes before proxy routing and serves `/synchronization` for authorized operators while health stays host-local. Saturn owns no public listener or TLS state: its API and static web process bind only to host loopback. Recovery validates archived public settings and SFTP access before database replacement, restores the active storage profile, and rolls back both configuration and PostgreSQL on failure. Updater installs matched app/web images, runs migrations and holds the operator-downloaded database snapshot in RAM for rollback; after restart, the original ZIP must be uploaded. See [protocol 2 migration](docs/UPDATE-PROTOCOL.md).
 
 ## Trust and operator prerequisites
