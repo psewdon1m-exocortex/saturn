@@ -203,6 +203,23 @@ export class Database {
         WHERE upload_id IN (SELECT id FROM upload_sessions WHERE status='verifying')`;
       await sql`UPDATE upload_sessions SET status = 'failed_retryable', updated_at = now()
         WHERE status = 'verifying'`;
+      // One-shot DAV clients never receive a resumable upload ID. With no live
+      // request left, incomplete attempts can only leave phantom active tasks.
+      // Preserve verification/commit journals and every owner/Drop upload.
+      const abandoned = await sql<{ id: string }[]>`
+        UPDATE upload_sessions u SET status='abandoned', updated_at=now()
+        WHERE u.audit_actor_type='device_token' AND u.idempotency_key LIKE 'dav-upload-%'
+          AND u.status IN ('created','uploading','failed_retryable','failed_final')
+          AND NOT EXISTS(SELECT 1 FROM operation_journal j WHERE j.upload_id=u.id
+            AND j.error_code IN ('verification_interrupted','reconciliation_required'))
+        RETURNING u.id
+      `;
+      if (abandoned.length > 0) await sql`
+        UPDATE operation_journal SET state='abandoned', error_code='cleanup_pending', updated_at=now()
+        WHERE upload_id IN ${sql(abandoned.map(item => item.id))}
+      `;
+      await sql`UPDATE reconciliation_runs SET state='failed', finished_at=now(), error_code='reconciliation_interrupted'
+        WHERE state='running'`;
     });
   }
 }

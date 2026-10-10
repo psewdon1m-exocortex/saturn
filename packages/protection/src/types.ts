@@ -43,6 +43,7 @@ export interface ReconciliationIssue {
 }
 
 export interface ReconciliationRepository {
+  withRunLock?<T>(action: () => Promise<T>): Promise<T>;
   startRun(id: string, mode: ReconciliationMode): Promise<ReconciliationRun>;
   finishRun(id: string, result: { readonly state: "complete" | "failed"; readonly scannedResources: number; readonly scannedStorageEntries: number; readonly issueCount: number; readonly errorCode?: string }): Promise<ReconciliationRun>;
   listActiveFiles(afterId: string | undefined, limit: number): Promise<readonly TrackedFile[]>;

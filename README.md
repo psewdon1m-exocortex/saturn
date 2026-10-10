@@ -86,19 +86,19 @@ release can publish artifacts.
 ## Release identity
 
 Production releases are created only by tags matching
-`saturn-vMAJOR.MINOR.PATCH`. The current fix identity is `saturn-v0.2.2`; its
+`saturn-vMAJOR.MINOR.PATCH`. The current fix identity is `saturn-v0.2.9`; its
 versioned OCI repositories are `saturn-app` and `saturn-web`, and its
-installation bundle is `saturn-0.2.2.zip`. Legacy unscoped tags such as
+installation bundle is `saturn-0.2.9.zip`. Legacy unscoped tags such as
 `v0.0.1` run verification only and cannot publish a Saturn release. Publish
-the pinned `updater-v0.5.0` dependency before the Saturn tag. The existing
-`saturn-v0.1.0` through `saturn-v0.2.1` releases remain immutable.
+the pinned `updater-v0.6.13` dependency before the Saturn tag. Existing
+releases through `saturn-v0.2.8` remain immutable.
 
 ## Production installation
 
 Each service keeps its own bootstrap and environment. For Saturn:
 
 ```sh
-curl -fsSL https://github.com/psewdon1m-exocortex/saturn/releases/download/saturn-v0.2.2/bootstrap.sh | sudo sh
+curl -fsSL https://github.com/psewdon1m-exocortex/saturn/releases/download/saturn-v0.2.9/bootstrap.sh | sudo sh
 sudoedit /etc/vault/.env.production
 sudo chmod 600 /etc/vault/.env.production
 sudo vaultctl validate
@@ -114,7 +114,7 @@ the existing configuration. This also repairs the earlier Linux file-secret
 validation failures:
 
 ```sh
-curl -fsSL https://github.com/psewdon1m-exocortex/saturn/releases/download/saturn-v0.2.2/bootstrap.sh | sudo sh -s -- --refresh
+curl -fsSL https://github.com/psewdon1m-exocortex/saturn/releases/download/saturn-v0.2.9/bootstrap.sh | sudo sh -s -- --refresh
 ```
 
 Edit only these values in `/etc/vault/.env.production`:
@@ -222,12 +222,12 @@ The current six-service deployment, trust, recovery and acceptance contract is d
 ## Unified updates (protocol 2)
 
 See [Update protocol, saved ZIP and first migration](docs/UPDATE-PROTOCOL.md).
-The UI uses Updater **0.5.0**, an exact selected version, the standard ZIP saved
+The UI uses Updater **0.6.13**, an exact selected version, the standard ZIP saved
 on the operator PC, and durable status/progress for Saturn releases. Shared
 Updater, Neptune and Gryphon release operations use `sudo updater tui` on the
 host. No update ZIP is retained on the application host.
 
-Release builds pin the published Updater 0.5.0 installer by the SHA-256 in
+Release builds pin the published Updater 0.6.13 installer by the SHA-256 in
 `.release/updater.sha256` and verify it before extraction. This digest was
 verified against the production-signed Updater manifest and existing trust key.
 

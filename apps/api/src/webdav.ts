@@ -40,10 +40,10 @@ function range(value: string | undefined, size: number): { readonly offset: numb
 }
 
 function status(error: unknown): number {
-  if (!(error instanceof DeviceServiceError)) return 400;
+  if (!(error instanceof DeviceServiceError)) return 500;
   return error.code === "unauthorized" ? 401 : error.code === "forbidden" ? 403 : error.code === "not_found" ? 404
     : error.code === "precondition_required" ? 428 : error.code === "precondition_failed" ? 412
-      : error.code === "rate_limited" ? 429 : error.code === "limit" ? 507 : 409;
+      : error.code === "rate_limited" ? 429 : error.code === "limit" ? 507 : error.code === "invalid_body" ? 400 : 409;
 }
 
 function destinationPath(request: FastifyRequest, raw: string | undefined, config: SaturnConfig): string {
@@ -117,6 +117,7 @@ async function handler(request: FastifyRequest, reply: FastifyReply, devices: De
     reply.status(405).send();
   } catch (error) {
     const code = status(error);
+    if (code === 500) request.log.error({ err: error }, "WebDAV request failed");
     if (code === 401) reply.header("WWW-Authenticate", 'Basic realm="Saturn WebDAV", charset="UTF-8"');
     reply.status(code).send();
   }

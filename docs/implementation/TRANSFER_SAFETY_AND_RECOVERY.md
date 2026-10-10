@@ -1,7 +1,7 @@
 # Transfer safety, migration and recovery
 
-Updated: 2026-10-06. Scope: migration `0046_transfer_safety` and the coordinated
-Saturn, Neptune and Pluto audit fixes. Local E2E and file-transfer checks passed;
+Updated: 2026-10-10. Scope: migration `0046_transfer_safety`, the coordinated
+Saturn, Neptune and Pluto audit fixes, and Saturn 0.2.9 restart hardening. Local E2E and file-transfer checks passed;
 mixed-load qualification retains the open findings recorded below. Promotion
 still requires the exact signed production release tuple. Central Parts 03,
 04, 11 and 12 remain authoritative.
@@ -10,8 +10,8 @@ still requires the exact signed production release tuple. Central Parts 03,
 
 Record the deployed Saturn image digests, applied migrations, PostgreSQL and
 client-tool versions, Updater/Neptune versions, active storage profile and
-release trust identities. The released `saturn-v0.2.6` migration baseline has
-39 migrations. Do not infer the deployed baseline from workspace package.json.
+release trust identities. The released `saturn-v0.2.8` migration baseline has
+46 migrations. Do not infer the deployed baseline from workspace package.json.
 The current workspace pins Updater `0.6.13`; this pin alone is not evidence
 that its signed release is available or installed.
 
@@ -89,11 +89,22 @@ temporary-file deletion. The worker drain retries that cleanup after an outage
 or restart and clears the flag after deletion. This never deletes a committed
 target or attempts to abandon a commit that needs reconciliation. No migration
 is added; the existing operation journal retains the pending cleanup record.
-The drain also retires failed empty one-shot device PUT sessions after two
-minutes without an active upload lease. These are identified by their device
-actor and `dav-upload-` key. User resumable sessions, partially acknowledged
-bytes and active/verifying/committing uploads are excluded. This covers an
-empty attempt whose immediate cancellation lost a race with its writer lease.
+At coordinated startup, the exclusive maintenance barrier proves no admitted
+filesystem request is still live before incomplete one-shot DAV sessions are
+retired. Their journals remain `cleanup_pending` until physical temporary bytes
+are deleted. Owner, Drop and explicitly resumable device sessions are excluded,
+as are verification or reconciliation journals that preserve accepted payloads.
+The regular drain also retires terminal one-shot DAV attempts after two minutes
+without an active lease. A conditional retry that lost to a newer commit or to
+resource trash is abandoned only after revalidating the resource identity; it
+cannot replace the newer acknowledged bytes or restore a trashed resource.
+
+Full reconciliation holds a named PostgreSQL session lock for the complete
+scan. A concurrent manual or scheduled scan fails closed; a durable `running`
+record is marked interrupted only after acquiring that lock, which proves the
+former owner session ended. Scheduled reconciliation, scrub, purge and storage
+maintenance are isolated steps, as are Drop, archive and share-package work:
+one failure is logged and does not suppress the remaining independent tasks.
 
 The mixed-load test still leaves Windows `sync-resume-*` sessions in
 `failed_retryable` after the source changes and a newer upload succeeds. Their

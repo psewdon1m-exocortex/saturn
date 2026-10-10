@@ -1,12 +1,29 @@
 import { Readable } from "node:stream";
 import type { SaturnConfig } from "@saturn/config";
-import type { DeviceService } from "@saturn/sync";
+import { DeviceServiceError, type DeviceService } from "@saturn/sync";
 import Fastify from "fastify";
 import { describe, expect, it, vi } from "vitest";
 import { registerWebDav } from "./webdav.js";
 import type { TransferMonitorService } from "./transfer-monitor.service.js";
 
 describe("WebDAV download snapshot", () => {
+  it.each([
+    [new Error("SFTP disconnected"), 500],
+    [new DeviceServiceError("invalid_body"), 400],
+    [new DeviceServiceError("precondition_failed"), 412],
+    [new DeviceServiceError("unauthorized"), 401],
+  ])("classifies server failures separately from client errors (%s)", async (error, expected) => {
+    const app = Fastify();
+    for (const method of ["PROPFIND", "MKCOL", "MOVE", "COPY"]) app.addHttpMethod(method);
+    const devices = { authenticate: async () => ({}), put: async () => { throw error; } };
+    registerWebDav(app, devices as unknown as DeviceService, {} as SaturnConfig, {} as TransferMonitorService);
+    try {
+      const response = await app.inject({ method: "PUT", url: "/dav/sync/test.txt", payload: "x", headers: { "content-type": "text/plain" } });
+      expect(response.statusCode).toBe(expected);
+      expect(response.body).not.toContain("SFTP");
+    } finally { await app.close(); }
+  });
+
   it("uses the opened version for length, ETag and ranges without a preceding stat", async () => {
     const app = Fastify();
     for (const method of ["PROPFIND", "MKCOL", "MOVE", "COPY"]) app.addHttpMethod(method);

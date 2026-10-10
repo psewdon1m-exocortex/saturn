@@ -310,8 +310,9 @@ export class PostgresFileRepository implements FileRepository {
     return this.#database.withSql(async sql => (await sql<UploadRow[]>`
       SELECT u.* FROM upload_sessions u WHERE ((u.status='abandoned'
         AND EXISTS(SELECT 1 FROM operation_journal j WHERE j.upload_id=u.id AND j.error_code='cleanup_pending'))
-        OR (u.status='failed_retryable' AND u.received_size=0 AND u.audit_actor_type='device_token'
-          AND u.idempotency_key LIKE 'dav-upload-%' AND u.updated_at < now()-interval '2 minutes')
+        OR ((u.status='failed_final' OR (u.status='failed_retryable' AND u.received_size=0)) AND u.audit_actor_type='device_token'
+          AND u.idempotency_key LIKE 'dav-upload-%' AND u.updated_at < now()-interval '2 minutes'
+          AND NOT EXISTS(SELECT 1 FROM operation_journal j WHERE j.upload_id=u.id AND j.error_code IN ('verification_interrupted','reconciliation_required')))
         OR (u.status IN ('created','uploading','failed_retryable','failed_final') AND u.expires_at <= now()
           AND NOT EXISTS(SELECT 1 FROM drop_uploads d WHERE u.audit_actor_type='drop_worker' AND u.parent_id='00000000-0000-7000-8000-000000000002' AND d.local_path IS NOT NULL AND d.received_size=d.expected_size
             AND d.state IN ('buffered','transferring','verifying') AND (d.upload_id=u.id OR u.idempotency_key='drop-drain:'||d.id::text))

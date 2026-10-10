@@ -34,6 +34,10 @@ export class ReconciliationService {
   }
 
   async run(mode: ReconciliationMode): Promise<ReconciliationRun> {
+    return this.#repository.withRunLock?.(() => this.#run(mode)) ?? this.#run(mode);
+  }
+
+  async #run(mode: ReconciliationMode): Promise<ReconciliationRun> {
     const runId = uuidv7();
     await this.#repository.startRun(runId, mode);
     let scannedResources = 0;

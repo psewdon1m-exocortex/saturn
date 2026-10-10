@@ -95,3 +95,96 @@ it.skipIf(!baseUrl)('persists deferred cancellation cleanup across a worker rest
     expect(await restarted.cleanupAbandonedUploads()).toEqual({attempted:0});
   } finally { await db?.close(); await storage.close(); if (created) await admin.unsafe(`DROP DATABASE "${name}" WITH (FORCE)`); await admin.end(); await fs.rm(root, { recursive: true, force: true }); }
 }, 20_000);
+
+it.skipIf(!baseUrl)('retires only dead one-shot DAV attempts and preserves recoverable payloads and newer acknowledged bytes', async () => {
+  if (!baseUrl) throw new Error('PIPELINE_TEST_DATABASE_URL is required');
+  const name = `audit_${randomUUID().replaceAll('-', '')}`;
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'saturn-dav-restart-'));
+  const admin = postgres(baseUrl, { max: 1, onnotice: () => undefined });
+  const storage = new LocalStorageAdapter(root);
+  let db: Database | undefined, created = false;
+  let release: () => void = () => undefined;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  const work: Promise<unknown>[] = [];
+  try {
+    await admin.unsafe(`CREATE DATABASE "${name}"`); created = true;
+    const url = new URL(baseUrl); url.pathname = '/'+name;
+    await migrate(url.toString()); await storage.initialize();
+    db = new Database(url.toString(), { max: 1, maintenanceBarrier: true });
+    const database = db, repository = new PostgresFileRepository(db);
+    const service = new FileService(repository, storage); await service.initializeStorage();
+    const dav = (filename: string, size: number, fields: Partial<Parameters<FileService['createUpload']>[0]> = {}) => service.createUpload({
+      parentId: SYNC_RESOURCE_ID, filename, expectedSize: size, idempotencyKey: 'dav-upload-'+randomUUID(), auditActor: { type: 'device_token', id: 'fixture-device' }, ...fields,
+    });
+    const interrupted = await dav('setting-0.conf', 8);
+    await repository.setUploadState(interrupted.id, 'uploading');
+    await storage.write(interrupted.tempPath, Readable.from('partial'), { offset: 0, create: true });
+    const owner = await dav('owner.txt', 8, { auditActor: { type: 'owner_bootstrap', id: 'owner' } });
+    const resumable = await dav('resumable-device.txt', 8, { idempotencyKey: 'device-resumable-'+randomUUID() });
+    for (const upload of [owner, resumable]) await service.appendUpload(upload.id, 0, 4, Readable.from('part'));
+    const accepted = await dav('recoverable.txt', 8);
+    await service.appendUpload(accepted.id, 0, 8, Readable.from('valuable'));
+    await repository.setUploadState(accepted.id, 'verifying');
+    const original = await dav('setting-1.conf', 3);
+    await service.appendUpload(original.id, 0, 3, Readable.from('old'));
+    const resource = (await service.completeUpload(original.id)).resource;
+    const expectedVersionId = resource.currentVersionId;
+    if (expectedVersionId === undefined) throw new Error('Initial version was not committed');
+    const obsolete = await dav('setting-1.conf', 5, { expectedVersionId });
+    await service.appendUpload(obsolete.id, 0, 5, Readable.from('stale'));
+    await repository.setUploadState(obsolete.id, 'verifying');
+    const newer = await dav('setting-1.conf', 3, { expectedVersionId });
+    await service.appendUpload(newer.id, 0, 3, Readable.from('new'));
+    const acknowledged = (await service.completeUpload(newer.id)).resource;
+    const removed = await dav('removed.conf', 4);
+    await service.appendUpload(removed.id, 0, 4, Readable.from('gone'));
+    const removedResource = (await service.completeUpload(removed.id)).resource;
+    if (removedResource.currentVersionId === undefined) throw new Error('Version missing');
+    const deletedRetry = await dav('removed.conf', 5, { expectedVersionId: removedResource.currentVersionId });
+    await service.appendUpload(deletedRetry.id, 0, 5, Readable.from('stale'));
+    await repository.setUploadState(deletedRetry.id, 'verifying');
+    const trashed = await service.trashResource(removedResource.id, { idempotencyKey: 'fixture-trash-before-recovery' });
+    // Startup recovery must wait for a live filesystem request, even with no
+    // short chunk lease held at this instant.
+    let entered: () => void = () => undefined;
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    work.push(database.withSharedMaintenance(async () => { entered(); await held; }));
+    await started;
+    const recovery = database.reconcileInactiveFileLocks(); work.push(recovery);
+    await new Promise(resolve => setTimeout(resolve, 30));
+    // Use the fixture admin connection: ordinary status queries correctly wait
+    // behind exclusive startup maintenance while the admitted writer drains.
+    const inspect = postgres(url.toString(), { max: 1 });
+    try { expect((await inspect`SELECT status FROM upload_sessions WHERE id=${interrupted.id}`)[0]?.status).toBe('uploading'); }
+    finally { await inspect.end(); }
+    release(); await recovery;
+    expect((await service.getUpload(interrupted.id)).status).toBe('abandoned');
+    expect((await service.getUpload(owner.id)).status).toBe('uploading');
+    expect((await service.getUpload(resumable.id)).status).toBe('uploading');
+    expect((await service.getUpload(accepted.id)).status).toBe('failed_retryable');
+    expect(await service.cleanupAbandonedUploads()).toEqual({ attempted: 1 });
+    expect(await storage.exists(interrupted.tempPath)).toBe(false);
+    expect(await storage.exists(owner.tempPath)).toBe(true);
+    expect(await storage.exists(resumable.tempPath)).toBe(true);
+    await db.withSql(sql => sql`UPDATE upload_sessions SET updated_at=now()-interval '3 minutes' WHERE id IN (${accepted.id},${obsolete.id},${deletedRetry.id})`);
+    expect(await service.recoverInterruptedUploads()).toEqual({ recovered: 1, pending: 0 });
+    expect((await service.getUpload(obsolete.id)).status).toBe('abandoned');
+    expect((await service.getUpload(deletedRetry.id)).status).toBe('abandoned');
+    expect(await storage.exists(deletedRetry.tempPath)).toBe(false);
+    expect((await service.getResource(removedResource.id)).status).toBe('trashed');
+    expect((await storage.stat(trashed.storagePath)).size).toBe(4);
+    expect(await storage.exists(obsolete.tempPath)).toBe(false);
+    const download = await service.openDownload(acknowledged.id), chunks: Buffer[] = [];
+    for await (const chunk of download.stream) chunks.push(Buffer.from(chunk as Uint8Array));
+    expect(Buffer.concat(chunks).toString()).toBe('new');
+    expect(download.resource.sha256).toBe(acknowledged.sha256);
+    const versions = await service.listVersions(acknowledged.id);
+    expect(versions).toHaveLength(2);
+    await service.appendUpload(owner.id, 4, 4, Readable.from('more'));
+    expect((await service.completeUpload(owner.id)).resource.sizeBytes).toBe(8);
+  } finally {
+    release(); await Promise.allSettled(work); await db?.close(); await storage.close();
+    if (created) await admin.unsafe(`DROP DATABASE "${name}" WITH (FORCE)`);
+    await admin.end(); await fs.rm(root, { recursive: true, force: true });
+  }
+}, 20_000);

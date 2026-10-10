@@ -85,6 +85,12 @@ export function buildWorker(
   };
 
   const runMutation = <T>(action: () => Promise<T>): Promise<T> => database.withSharedMaintenance?.(action) ?? action();
+  const runSteps = async (steps: readonly (readonly [string, () => Promise<unknown>])[]): Promise<void> => {
+    for (const [job, action] of steps) {
+      try { await action(); }
+      catch (error) { app.log.error({ err: error, job }, "Background worker step failed"); }
+    }
+  };
 
   const heartbeat = async (): Promise<void> => {
     await database.upsertWorkerHeartbeat({ role: "primary", instanceId, startedAt });
@@ -152,7 +158,10 @@ export function buildWorker(
       reconciliationTimer = setInterval(() => {
         if (closing || reconciliationRunning) return;
         reconciliationRunning = true;
-        void runJob("reconciliation", async () => { await jobs.reconcile(); await jobs.scrub?.(); await jobs.purge?.(); await jobs.maintain?.(); }).catch((error: unknown) => {
+        void runJob("reconciliation", () => runSteps([
+          ["reconciliation", () => jobs.reconcile()], ["scrub", async () => jobs.scrub?.()],
+          ["purge", async () => jobs.purge?.()], ["maintenance", async () => jobs.maintain?.()],
+        ])).catch((error: unknown) => {
           app.log.error({ error }, "scheduled reconciliation failed");
         }).finally(() => { reconciliationRunning = false; });
       }, config.worker.reconciliationIntervalMs);
@@ -171,7 +180,10 @@ export function buildWorker(
         const drain = () => {
           if (closing || dropDrainRunning) return;
           dropDrainRunning = true;
-          void runJob("transfers", async () => { await jobs.drain?.(); await jobs.archive?.(); await jobs.sharePackage?.(); }).catch((error: unknown) => {
+          void runJob("transfers", () => runSteps([
+            ["drop-drain", async () => jobs.drain?.()], ["archive", async () => jobs.archive?.()],
+            ["share-package", async () => jobs.sharePackage?.()],
+          ])).catch((error: unknown) => {
             app.log.error({ error }, "Background transfer worker failed");
           }).finally(() => { dropDrainRunning = false; });
         };

@@ -28,7 +28,7 @@ const scopeAliases: ReadonlyMap<string, string> = new Map<string, string>([
 const idAliases: ReadonlyMap<string, string> = new Map<string, string>([...scopeAliases].map(([alias, id]) => [id, alias]));
 
 export class DeviceServiceError extends Error {
-  constructor(readonly code: "unauthorized" | "forbidden" | "not_found" | "precondition_required" | "precondition_failed" | "conflict" | "rate_limited" | "invalid_path" | "limit") {
+  constructor(readonly code: "unauthorized" | "forbidden" | "not_found" | "precondition_required" | "precondition_failed" | "conflict" | "rate_limited" | "invalid_path" | "invalid_body" | "limit") {
     super(code);
   }
 }
@@ -504,7 +504,7 @@ export class DeviceService {
     try {
       for await (const raw of source) {
         const value = Buffer.isBuffer(raw) ? raw : Buffer.from(raw as Uint8Array);
-        if (offset + buffered + value.length > size) throw new Error("WebDAV body exceeds Content-Length");
+        if (offset + buffered + value.length > size) throw new DeviceServiceError("invalid_body");
         for (let cursor = 0; cursor < value.length;) {
           const count = Math.min(buffer.length - buffered, value.length - cursor);
           value.copy(buffer, buffered, cursor, cursor + count);
@@ -514,7 +514,7 @@ export class DeviceService {
         }
       }
       await flush();
-      if (offset !== size) throw new Error("WebDAV body length differs from Content-Length");
+      if (offset !== size) throw new DeviceServiceError("invalid_body");
       if (context.device.deviceKind === "pluto") {
         const currentDevice = await this.input.repository.getById(context.device.id);
         if (currentDevice?.state !== "active" || currentDevice.tokenHash !== context.device.tokenHash || (currentDevice.expiresAt !== undefined && currentDevice.expiresAt <= new Date())) throw new DeviceServiceError("unauthorized");

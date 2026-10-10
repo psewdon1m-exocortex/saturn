@@ -24,6 +24,32 @@ function database(overrides: Partial<WorkerDatabasePort> = {}): WorkerDatabasePo
 }
 
 describe("worker health", () => {
+  it("continues independent maintenance steps after a reconciliation or scrub failure", async () => {
+    const purge = vi.fn(async () => undefined), maintain = vi.fn(async () => undefined);
+    const scrub = vi.fn(async () => { throw new Error("storage unavailable"); });
+    const runtime = buildWorker({ ...config, worker: { ...config.worker, reconciliationIntervalMs: 10 } },
+      database(), { check: async () => ({ state: "pass" }) }, {
+        reconcile: async () => { throw new Error("interrupted run"); }, scrub, purge, maintain,
+      });
+    openApps.push(runtime.app);
+    runtime.startBackgroundJobs();
+    await vi.waitFor(() => expect(maintain).toHaveBeenCalled());
+    expect(scrub).toHaveBeenCalled();
+    expect(purge).toHaveBeenCalled();
+  });
+
+  it("continues archive and shared package processing when Drop delivery fails", async () => {
+    const archive = vi.fn(async () => undefined), sharePackage = vi.fn(async () => undefined);
+    const runtime = buildWorker({ ...config, drop: { drainIntervalMs: 60_000 } as SaturnConfig["drop"] },
+      database(), { check: async () => ({ state: "pass" }) }, {
+        reconcile: async () => undefined, drain: async () => { throw new Error("Drop unavailable"); }, archive, sharePackage,
+      });
+    openApps.push(runtime.app);
+    runtime.startBackgroundJobs();
+    await vi.waitFor(() => expect(sharePackage).toHaveBeenCalled());
+    expect(archive).toHaveBeenCalled();
+  });
+
   it("runs catalog tasks outside the outer shared barrier so their atomic commit can acquire exclusive maintenance", async () => {
     const shared = vi.fn(async (action: () => Promise<unknown>) => action());
     const task = vi.fn(async () => undefined);

@@ -68,6 +68,18 @@ export class PostgresReconciliationRepository implements ReconciliationRepositor
     this.#database = database;
   }
 
+  withRunLock<T>(action: () => Promise<T>): Promise<T> {
+    return this.#database.withSharedMaintenance(() => this.#database.withAdvisoryLock("saturn-reconciliation", async () => {
+      // The session lock spans the whole scan, including manual API scans. Its
+      // release proves an older running record no longer has a live owner.
+      await this.#database.withSql(sql => sql`
+        UPDATE reconciliation_runs SET state='failed', finished_at=now(), error_code='reconciliation_interrupted'
+        WHERE state='running'
+      `);
+      return action();
+    }, 1000));
+  }
+
   startRun(id: string, mode: ReconciliationMode): Promise<ReconciliationRun> {
     return this.#database.withSql(async (sql) => {
       const rows = await sql<RunRow[]>`

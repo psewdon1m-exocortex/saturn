@@ -262,7 +262,7 @@ describe("DeviceService", () => {
     const context = await service.authenticate(`Bearer ${created.token}`, now);
     const abandon = vi.spyOn(files, "abandonUpload");
     await expect(service.put(context, "mastermind/overflow.bin", Readable.from([Buffer.alloc(5), Buffer.alloc(6)]), 10,
-      { ifNoneMatch: "*" })).rejects.toThrow("exceeds Content-Length");
+      { ifNoneMatch: "*" })).rejects.toMatchObject({ code: "invalid_body" });
     expect(abandon).toHaveBeenCalledOnce();
     expect([...files.resources.values()].some((value) => value.name === "overflow.bin")).toBe(false);
   });

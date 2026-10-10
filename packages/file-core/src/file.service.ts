@@ -418,7 +418,13 @@ export class FileService {
     let recovered = 0, pending = 0;
     for (const item of await this.#repository.listRecoverableUploads?.(limit) ?? []) {
       try { await this.completeUpload(item.id); recovered++; }
-      catch {
+      catch (error) {
+        // A newer client retry may already have committed this path. Retain its
+        // bytes and retire only the obsolete, unacknowledged one-shot DAV PUT.
+        if (error instanceof UploadPreconditionError && item.auditActorType === "device_token" && item.idempotencyKey.startsWith("dav-upload-")) {
+          try { await this.abandonUpload(item.id); continue; }
+          catch { /* Terminal DAV attempts remain eligible for deferred cleanup. */ }
+        }
         pending++;
         const current = await this.#repository.getUpload(item.id);
         if (current?.status === "committing") await this.#repository.setUploadState(item.id, "committing", { errorCode: "reconciliation_required" });
@@ -581,7 +587,9 @@ export class FileService {
       if (target !== undefined) {
         if (!(await this.#acquireLocksWithin(lockId, [`resource:${target.id}`], UPLOAD_LOCK_MS, 30_000))) throw new Error("Overwrite target is locked");
         target = await this.getResource(target.id);
-        if (upload.requireAbsent || (upload.expectedVersionId !== undefined && target.currentVersionId !== upload.expectedVersionId)) {
+        if (upload.requireAbsent || (upload.expectedVersionId !== undefined && (target.currentVersionId !== upload.expectedVersionId
+          || target.type !== "file" || target.status !== "active" || target.parentId !== upload.parentId
+          || target.name.toLocaleLowerCase() !== upload.filename.toLocaleLowerCase()))) {
           await this.#repository.setUploadState(id, "failed_final", { errorCode: "precondition_failed" });
           throw new UploadPreconditionError();
         }
@@ -641,7 +649,10 @@ export class FileService {
           throw error;
         }
       }
-      if (upload.expectedVersionId !== undefined) throw new UploadPreconditionError();
+      if (upload.expectedVersionId !== undefined) {
+        await this.#repository.setUploadState(id, "failed_final", { errorCode: "precondition_failed" });
+        throw new UploadPreconditionError();
+      }
       if (await this.#storage.exists(upload.targetPath)) {
         await this.#repository.setUploadState(id, "failed_final", { errorCode: "target_exists" });
         throw new Error("Upload target already exists");
