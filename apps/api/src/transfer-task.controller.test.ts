@@ -15,6 +15,7 @@ function controller(input: { readonly uploadStatus?: string; readonly backupStat
   const backups = {
     getRunForOwner: vi.fn().mockResolvedValue({ id: backupRunId, state: input.backupState ?? "uploading" }),
     cancelRunForOwner: vi.fn().mockResolvedValue(undefined),
+    touchRunForOwner: vi.fn().mockResolvedValue(undefined),
   };
   const transfers = new TransferMonitorService();
   return {
@@ -44,5 +45,14 @@ describe("TransferTaskController", () => {
     const fixture = controller();
     await expect(fixture.value.control(`backup:${backupRunId}`, { action: "cancel" })).resolves.toEqual({ id: `backup:${backupRunId}`, state: "cancelled" });
     expect(fixture.backups.cancelRunForOwner).toHaveBeenCalledWith(backupRunId);
+  });
+  it("refreshes a paused backup reservation before making it runnable", async () => {
+    const fixture = controller(); const id = `backup:${backupRunId}`;
+    await fixture.value.control(id, { action: "pause" });
+    fixture.backups.touchRunForOwner.mockImplementation(() => {
+      expect(fixture.transfers.controlState(id)).toBe("paused"); return Promise.resolve();
+    });
+    await expect(fixture.value.control(id, { action: "resume" })).resolves.toEqual({ id, state: "running" });
+    expect(fixture.backups.touchRunForOwner).toHaveBeenCalledWith(backupRunId);
   });
 });

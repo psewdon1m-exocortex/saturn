@@ -97,6 +97,31 @@ agent from a merely registered device. Creation, setup-code reissue and
 revocation remain session- and CSRF-protected; device scope/rights changes and
 owner KeePass access retain their separate recent-proof requirements.
 
+### Neptune fleet presence — 2026-10-11
+
+The large fleet counters show **online** agents. The registered count and the
+connection's `state: active` describe its identity and permitted access; neither
+guarantees a running client or enabled copying. The card labels these meanings
+explicitly.
+
+`PublicDevice.online` is computed in Saturn using the same server clock as its
+`lastSeenAt`: Pluto has a 60-second presence window and Windows has a six-minute
+window. Revoked, expired and never-seen connections are offline. Disabling
+Pluto's copy schedule does not make a running, heartbeating agent offline.
+The web UI consumes this status, as it already does for Linux fleet agents,
+rather than subtracting server timestamps from the operator's browser clock.
+A browser clock three minutes ahead previously hid fresh Pluto heartbeats and
+made Windows disappear between its five-minute reconciliation runs.
+
+This API addition and the web counter change must be released together.
+
+Presence verification passed: all 31 sync tests, targeted Synchronization UI
+regressions, changed-file lint, sync/API type checking and builds. Isolated
+Chromium used the actual DeviceService projection and a compiled web bundle at
+1440 and 390 px with browser clocks shifted by ±192 seconds. Fresh Windows and
+Pluto agents remained online; stale and never-seen agents did not inflate the
+counters. No uncaught browser errors occurred.
+
 ## Scope and safety defaults
 
 - token: 32 random bytes, base64url, HMAC verifier at rest;

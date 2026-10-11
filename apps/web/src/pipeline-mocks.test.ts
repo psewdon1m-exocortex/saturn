@@ -49,6 +49,8 @@ describe("development pipeline preview", () => {
     expect(state.agents().filter(agent => agent.observed.online)).toHaveLength(6);
     expect(state.agents().some(agent => agent.observed.appliedRevision < agent.desired.revision)).toBe(true);
     for (const device of state.windows()) expect(device.scopeIds).toEqual([device.syncRootId]);
+    expect(state.windows().filter(device => device.online)).toHaveLength(1);
+    expect(state.connectedDevices().filter(device => device.deviceKind === "pluto" && device.online)).toHaveLength(1);
     expect(state.connectedDevices().find(device => device.deviceKind === "pluto")).toMatchObject({ rights: { move: false, delete: false }, plutoStatus: { enabled: true } });
     const mastermind = state.services.find(service => service.pipelineKind === "mastermind");
     if (!mastermind) throw new Error("Mastermind mock missing");

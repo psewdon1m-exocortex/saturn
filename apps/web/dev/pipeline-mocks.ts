@@ -33,12 +33,12 @@ export function createPipelineMockState() {
     fresh: spec.scenario !== "offline", createdAt: timestamp(-7 * 24 * hour), updatedAt: timestamp(),
   }));
   const devices: DeviceInfo[] = ["Office PC", "Home laptop"].map((name, index) => ({
-    id: uuid(200 + index), name: `MOCK · ${name}`, deviceKind: "windows_sync", state: "active",
+    id: uuid(200 + index), name: `MOCK · ${name}`, deviceKind: "windows_sync", state: "active", online: false,
     syncRootId: uuid(400 + index), syncFolderName: `MOCK ${name}`, scopeIds: [uuid(400 + index)],
     rights: { read: true, write: true, move: true, delete: true }, clientPlatform: "windows",
     clientVersion: "mock-preview", createdAt: timestamp(-7 * 24 * hour), updatedAt: timestamp(),
   }));
-  devices.push({ id: uuid(210), name: "MOCK · External configs", deviceKind: "pluto", state: "active", syncRootId: uuid(410), syncFolderName: "MOCK External configs", scopeIds: [uuid(410)], rights: { read: true, write: true, move: false, delete: false }, clientPlatform: "linux", clientVersion: "mock-preview", createdAt: timestamp(-7 * 24 * hour), updatedAt: timestamp(), plutoStatus: { enabled: true, intervalSeconds: 3600, uploadedFiles: 4, lastSuccessAt: timestamp(-600_000), nextRunAt: timestamp(3_000_000) } });
+  devices.push({ id: uuid(210), name: "MOCK · External configs", deviceKind: "pluto", state: "active", online: false, syncRootId: uuid(410), syncFolderName: "MOCK External configs", scopeIds: [uuid(410)], rights: { read: true, write: true, move: false, delete: false }, clientPlatform: "linux", clientVersion: "mock-preview", createdAt: timestamp(-7 * 24 * hour), updatedAt: timestamp(), plutoStatus: { enabled: true, intervalSeconds: 3600, uploadedFiles: 4, lastSuccessAt: timestamp(-600_000), nextRunAt: timestamp(3_000_000) } });
   return {
     services, devices,
     agents(): NeptuneAgentInfo[] {
@@ -58,9 +58,9 @@ export function createPipelineMockState() {
       });
     },
     windows(): DeviceInfo[] {
-      return devices.filter(device => device.deviceKind === "windows_sync").map((device, index) => ({ ...device, lastSeenAt: timestamp(index === 0 ? -2_000 : -2 * hour) }));
+      return devices.filter(device => device.deviceKind === "windows_sync").map((device, index) => ({ ...device, online: index === 0, lastSeenAt: timestamp(index === 0 ? -2_000 : -2 * hour) }));
     },
-    connectedDevices(): DeviceInfo[] { return devices.map((device, index) => ({ ...device, lastSeenAt: timestamp(index === 1 ? -2 * hour : -2_000) })); },
+    connectedDevices(): DeviceInfo[] { return devices.map((device, index) => ({ ...device, online: index !== 1, lastSeenAt: timestamp(index === 1 ? -2 * hour : -2_000) })); },
     runs(service: BackupServiceInfo): BackupRunInfo[] {
       if (service.archivePipeline === false) return [];
       return [{ id: uuid(500 + services.indexOf(service)), serviceId: service.id,

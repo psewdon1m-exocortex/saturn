@@ -178,6 +178,8 @@ export interface BackupRepository {
   getRun(serviceId: string, runId: string): Promise<BackupRunRecord | undefined>;
   getRunForOwner(runId: string): Promise<BackupRunRecord | undefined>;
   listRuns(serviceId: string, offset: number, limit: number): Promise<readonly BackupRunRecord[]>;
+  listIncompleteRuns(before: Date, afterId: string | undefined, limit: number): Promise<readonly BackupRunRecord[]>;
+  touchRun(serviceId: string, runId: string, now: Date): Promise<void>;
   claimAppend(serviceId: string, runId: string, offset: number, length: number, now: Date): Promise<BackupRunRecord>;
   finishAppend(serviceId: string, runId: string, receivedSize: number, now: Date): Promise<BackupRunRecord>;
   releaseAppend(serviceId: string, runId: string, failureCode: string, terminal: boolean, now: Date): Promise<void>;

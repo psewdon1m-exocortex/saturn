@@ -1,7 +1,7 @@
 # Transfer safety, migration and recovery
 
 Updated: 2026-10-10. Scope: migration `0046_transfer_safety`, the coordinated
-Saturn, Neptune and Pluto audit fixes, and Saturn 0.2.10 restart hardening. Local E2E and file-transfer checks passed;
+Saturn, Neptune and Pluto audit fixes, and Saturn 0.2.11 transfer lifecycle hardening. Local E2E and file-transfer checks passed;
 mixed-load qualification retains the open findings recorded below. Promotion
 still requires the exact signed production release tuple. Central Parts 03,
 04, 11 and 12 remain authoritative.

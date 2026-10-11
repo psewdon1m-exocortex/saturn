@@ -1,5 +1,9 @@
 # Saturn
 
+The optional **Storage new** tab at `/storage-new` uses the current shared-link
+visual style for authenticated file browsing. **Storage** at `/files` retains
+its original table and operations. See [the design and verification contract](docs/implementation/STORAGE_NEW.md).
+
 ## Pluto outdoor files
 
 Synchronization includes the **Pluto · Linux files and folders** type and an **Outdoor backups · Pluto** card. Creation requires only a connection name. A 15-minute setup code enrolls the standalone Pluto TUI into `backups/pluto/<connection name>`. Sources, interval and the separate copying switch are owned by Pluto. Neptune fleet displays Pluto separately without a Neptune runtime dependency.
@@ -86,9 +90,9 @@ release can publish artifacts.
 ## Release identity
 
 Production releases are created only by tags matching
-`saturn-vMAJOR.MINOR.PATCH`. The current fix identity is `saturn-v0.2.10`; its
+`saturn-vMAJOR.MINOR.PATCH`. The current fix identity is `saturn-v0.2.11`; its
 versioned OCI repositories are `saturn-app` and `saturn-web`, and its
-installation bundle is `saturn-0.2.10.zip`. Legacy unscoped tags such as
+installation bundle is `saturn-0.2.11.zip`. Legacy unscoped tags such as
 `v0.0.1` run verification only and cannot publish a Saturn release. Publish
 the pinned `updater-v0.6.16` dependency before the Saturn tag. Existing
 releases through `saturn-v0.2.8` remain immutable.
@@ -98,7 +102,7 @@ releases through `saturn-v0.2.8` remain immutable.
 Each service keeps its own bootstrap and environment. For Saturn:
 
 ```sh
-curl -fsSL https://github.com/psewdon1m-exocortex/saturn/releases/download/saturn-v0.2.10/bootstrap.sh | sudo sh
+curl -fsSL https://github.com/psewdon1m-exocortex/saturn/releases/download/saturn-v0.2.11/bootstrap.sh | sudo sh
 sudoedit /etc/vault/.env.production
 sudo chmod 600 /etc/vault/.env.production
 sudo vaultctl validate
@@ -114,7 +118,7 @@ the existing configuration. This also repairs the earlier Linux file-secret
 validation failures:
 
 ```sh
-curl -fsSL https://github.com/psewdon1m-exocortex/saturn/releases/download/saturn-v0.2.10/bootstrap.sh | sudo sh -s -- --refresh
+curl -fsSL https://github.com/psewdon1m-exocortex/saturn/releases/download/saturn-v0.2.11/bootstrap.sh | sudo sh -s -- --refresh
 ```
 
 Edit only these values in `/etc/vault/.env.production`:

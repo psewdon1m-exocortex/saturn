@@ -165,6 +165,16 @@ export class PostgresBackupRepository implements BackupRepository {
   getRun(serviceId: string, runId: string): Promise<BackupRunRecord | undefined> { return this.database.withSql(async (sql) => { const rows = await sql<RunRow[]>`SELECT * FROM service_backup_runs WHERE id = ${runId} AND service_id = ${serviceId} LIMIT 1`; return rows[0] === undefined ? undefined : run(rows[0]); }); }
   getRunForOwner(runId: string): Promise<BackupRunRecord | undefined> { return this.database.withSql(async (sql) => { const rows = await sql<RunRow[]>`SELECT * FROM service_backup_runs WHERE id = ${runId} LIMIT 1`; return rows[0] === undefined ? undefined : run(rows[0]); }); }
   listRuns(serviceId: string, offset: number, limit: number): Promise<readonly BackupRunRecord[]> { return this.database.withSql(async (sql) => (await sql<RunRow[]>`SELECT * FROM service_backup_runs WHERE service_id = ${serviceId} ORDER BY created_at DESC, id DESC OFFSET ${offset} LIMIT ${limit}`).map(run)); }
+  listIncompleteRuns(before: Date, afterId: string | undefined, limit: number): Promise<readonly BackupRunRecord[]> {
+    return this.database.withSql(async sql => (await sql<RunRow[]>`SELECT * FROM service_backup_runs
+      WHERE state IN ('pending','uploading','appending','verifying') AND updated_at <= ${before}
+        AND (${afterId ?? null}::uuid IS NULL OR id > ${afterId ?? null}::uuid)
+      ORDER BY id LIMIT ${limit}`).map(run));
+  }
+  touchRun(serviceId: string, runId: string, now: Date): Promise<void> {
+    return this.database.withSql(async sql => { await sql`UPDATE service_backup_runs SET updated_at = ${now}
+      WHERE id = ${runId} AND service_id = ${serviceId} AND state IN ('pending','uploading')`; });
+  }
   listCompletedRuns(serviceId: string, offset: number, limit: number): Promise<readonly BackupRunRecord[]> {
     return this.database.withSql(async sql => (await sql<RunRow[]>`SELECT * FROM service_backup_runs WHERE service_id = ${serviceId}
       AND state = 'complete' AND committed_at IS NOT NULL ORDER BY committed_at DESC, id DESC OFFSET ${offset} LIMIT ${limit}`).map(run));

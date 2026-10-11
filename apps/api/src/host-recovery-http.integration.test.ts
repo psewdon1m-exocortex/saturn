@@ -127,6 +127,44 @@ it("stores host archives over actual HTTP, rejects missing media type without ac
   }
 }, 30_000);
 
+it("authenticates producer abort, releases quotas, expires abandoned uploads and protects committed archives over HTTP", async () => {
+  const identity = required(identities.updater), headers = { authorization: `Bearer ${identity.token}` };
+  const peerHeaders = { authorization: `Bearer ${required(identities.neptune).token}` };
+  const body = Buffer.from("encrypted-incomplete-fixture");
+  const metadata = { filename: "updater-orphan.exorecovery", createdAt: new Date().toISOString(), backupType: "helper_recovery",
+    expectedSize: body.length, sha256: createHash("sha256").update(body).digest("hex"), sourceVersion: "qa", encrypted: true };
+  const create = async (key: string) => {
+    const response = await fetch(`${origin}/api/v1/backups/updater-qa/runs`, { method: "POST", headers: {
+      ...headers, "content-type": "application/json", "idempotency-key": key }, body: JSON.stringify(metadata) });
+    expect(response.status, await response.clone().text()).toBe(201); return await response.json() as { id: string };
+  };
+  const aborted = await create("orphan-http-aborted"), target = `${origin}/api/v1/backups/updater-qa/runs/${aborted.id}`;
+  expect((await fetch(target, { method: "DELETE" })).status).toBe(401);
+  expect((await fetch(target, { method: "DELETE", headers: peerHeaders })).status).toBe(404);
+  expect((await fetch(target + "/upload", { method: "PATCH", headers: { ...headers, "upload-offset": "0", "content-length": "5" }, body: body.subarray(0, 5) })).status).toBe(415);
+  const cancelled = await fetch(target, { method: "DELETE", headers }); expect(cancelled.status).toBe(200);
+  expect(await cancelled.json()).toMatchObject({ state: "failed", failureCode: "cancelled_by_producer" });
+  expect((await fetch(target, { method: "DELETE", headers })).status).toBe(200);
+  expect((await fetch(target + "/upload", { method: "HEAD", headers })).status).toBe(409);
+  const context = await backups.authenticate(headers.authorization);
+  expect((await backups.publicService(context.service, new Date())).usage).toMatchObject({ activeRuns: 0, activeReservedBytes: 0 });
+  const expired = await create("orphan-http-expired");
+  expect((await backups.publicService(context.service, new Date())).usage).toMatchObject({ activeRuns: 1, activeReservedBytes: body.length });
+  expect((await fetch(`${origin}/api/v1/backups/updater-qa/runs/${expired.id}/upload`, { method: "PATCH", headers: {
+    ...headers, "content-type": "application/offset+octet-stream", "upload-offset": "0", "content-length": "5" }, body: body.subarray(0, 5) })).status).toBe(204);
+  const stored = await backups.getRunForOwner(expired.id);
+  expect(await storage.exists(stored.tempPath)).toBe(true);
+  expect(await backups.expireIncompleteRuns(new Date(Date.now() + 61_000))).toMatchObject({ expired: 1, failed: 0 });
+  expect(await storage.exists(stored.tempPath)).toBe(false);
+  expect((await backups.publicService(context.service, new Date())).usage).toMatchObject({ activeRuns: 0, activeReservedBytes: 0 });
+  const next = await create("orphan-http-next");
+  expect((await fetch(`${origin}/api/v1/backups/updater-qa/runs/${next.id}`, { method: "DELETE", headers })).status).toBe(200);
+  const committedRun = required([...committed.values()].find(run => run.serviceId === identity.serviceId));
+  const before = await fs.readFile(path.join(root, committedRun.finalPath));
+  expect((await fetch(`${origin}/api/v1/backups/updater-qa/runs/${committedRun.id}`, { method: "DELETE", headers })).status).toBe(409);
+  expect(await fs.readFile(path.join(root, committedRun.finalPath))).toEqual(before);
+});
+
 it.skipIf(!process.env.UPDATER_HTTP_TEST_SOURCE)("enrolls, publishes, downloads, decrypts and restores with the actual Go Updater client", async () => {
   const source = required(process.env.UPDATER_HTTP_TEST_SOURCE);
   const endpoint = origin.replace("127.0.0.1", "host.docker.internal");

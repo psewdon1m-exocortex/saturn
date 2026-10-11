@@ -408,7 +408,7 @@ describe("owner Saturn UI", () => {
     expect(screen.getByRole("menuitem", { name: "New folder" })).toHaveProperty("disabled", false);
     expect(screen.getByRole("button", { name: "Upload here" })).toHaveProperty("disabled", true);
     expect(screen.queryByRole("button", { name: "Quick upload" })).toBeNull();
-    expect(screen.getByRole("navigation", { name: "Primary" }).querySelectorAll("button")).toHaveLength(7);
+    expect(screen.getByRole("navigation", { name: "Primary" }).querySelectorAll("button")).toHaveLength(8);
     expect(screen.queryByRole("button", { name: "Activity" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Laboratory" })).toBeNull();
   });
@@ -599,7 +599,7 @@ describe("owner Saturn UI", () => {
     await waitFor(() => {
       const request = fetchMock.mock.calls.find((call) => requestUrl(call[0]).endsWith("/auth/preferences") && call[1]?.method === "PUT");
       expect(request).toBeDefined();
-      expect(jsonRequestBody(request?.[1]).navigationOrder).toEqual(["dashboard", "inbox", "files", "shared", "synchronization", "trash", "settings"]);
+      expect(jsonRequestBody(request?.[1]).navigationOrder).toEqual(["dashboard", "inbox", "files", "storage-new", "shared", "synchronization", "trash", "settings"]);
     });
     expect(navigation.querySelector("button")?.getAttribute("aria-label")).toBe("Dashboard");
     expect(screen.getByRole("button", { name: "Drop Point" }).textContent).toContain("02");
@@ -1057,6 +1057,35 @@ describe("owner Saturn UI", () => {
     await waitFor(() => expect(screen.queryByRole("article", { name: service.name })).toBeNull());
     expect(attempts).toBe(2);
     expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it.each([192_000, -192_000])("uses Saturn's online status for Pluto and Windows when the browser clock differs by %s ms", async (clockOffset) => {
+    window.history.replaceState({}, "", "/synchronization");
+    const serverNow = new Date("2026-10-11T12:00:00Z");
+    vi.spyOn(Date, "now").mockReturnValue(serverNow.getTime() + clockOffset);
+    const device = (kind: "windows_sync" | "pluto", status: "online" | "offline" | "waiting") => ({
+      id: crypto.randomUUID(), name: `${kind} ${status}`, deviceKind: kind, state: "active", online: status === "online",
+      ...(status === "waiting" ? {} : { lastSeenAt: new Date(serverNow.getTime() - (status === "online" ? kind === "pluto" ? 10_000 : 180_000 : kind === "pluto" ? 65_000 : 361_000)).toISOString() }),
+      scopeIds: [SYNC_RESOURCE_ID], rights: { read: true, write: true, move: false, delete: false }, createdAt: serverNow.toISOString(), updatedAt: serverNow.toISOString(),
+    });
+    const devices = (["windows_sync", "pluto"] as const).flatMap(kind => (["online", "offline", "waiting"] as const).map(status => device(kind, status)));
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = requestUrl(input).replace(/\?.*$/, "");
+      if (url.endsWith("/auth/public-appearance")) return json({ accentColor: "#00a8ff" });
+      if (url.endsWith("/auth/session")) return json({ state: "authenticated" });
+      if (url.endsWith("/auth/preferences")) return json(preferences());
+      if (url.endsWith("/public/reachability")) return json({ status: "ready" });
+      if (url.endsWith("/devices")) return json(devices);
+      return json([]);
+    }));
+    render(<App />);
+    await screen.findByRole("article", { name: "pluto online" });
+    for (const name of ["Windows agents", "Pluto agents"]) {
+      const counter = screen.getByText(name).parentElement;
+      if (counter === null) throw new Error("Fleet counter is missing");
+      expect(counter.querySelector("strong")?.textContent).toBe("1");
+      expect(counter.querySelector("small")?.textContent).toBe("online · 3 registered");
+    }
   });
 
   it("creates a Pluto pipeline using only its name and shows it separately in Neptune fleet", async () => {

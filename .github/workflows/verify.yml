@@ -72,6 +72,10 @@ jobs:
           python3 scripts/known-problems-gate.py --phase structure
       - name: Run production-like verification
         run: pnpm verify:stage:13
+      - name: Verify the Storage new interface
+        env:
+          SATURN_UI_OUTPUT: artifacts/verification/storage-new
+        run: pnpm verify:storage-new
       - name: Preserve verification evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

@@ -56,8 +56,8 @@ owner.
 
 - Producers communicate only with Gateway and cannot name or infer SFTP paths.
 - Service identity, never a URL-supplied slug alone, selects the namespace.
-- A producer can create/resume/complete/status only its own runs and cannot
-  list, download, delete or change retention.
+- A producer can create/resume/complete/status/cancel only its own runs and cannot
+  list, download, delete completed archives or change retention.
 - Size, concurrent-run, daily-ingest and stored-byte quotas are transactionally
   enforced independently per service.
 - Completed backup bytes match the declared SHA-256 and live under
@@ -102,11 +102,12 @@ HEAD  /api/v1/backups/{service_id}/runs/{run_id}/upload
 PATCH /api/v1/backups/{service_id}/runs/{run_id}/upload
 POST  /api/v1/backups/{service_id}/runs/{run_id}/complete
 GET   /api/v1/backups/{service_id}/runs/{run_id}
+DELETE /api/v1/backups/{service_id}/runs/{run_id}       unfinished reservation only
 ```
 
 `service_id` in the path must exactly match the authenticated service and is
 never used as the authorization source. There is deliberately no producer
-list, content-download, delete or retention endpoint.
+list, content-download, completed-archive delete or retention endpoint.
 
 ## Safety defaults
 
@@ -176,3 +177,56 @@ list, content-download, delete or retention endpoint.
 ## Enrollment update — 2026-10-05
 
 Volt/Mastermind enrollment accepts archive-only, mirror-only or paired capabilities. `archivePipeline` defaults true for existing identities. Unselected archive capability is enforced on all producer archive endpoints and policy mutations. Mirror and Mastermind reader devices are created only when a mirror is selected. Existing paired registrations retain their capabilities. See the accepted [central decision](https://github.com/psewdon1m-exocortex/general/blob/main/decisions/2026-10-05-synchronization-enrollment.md).
+
+## Interrupted producer uploads — 2026-10-11
+
+The Updater 0.6.15 job `component-b280ae8990035a6399eff652eab65f0b`
+failed with HTTP 415 before sending bytes; the missing binary Content-Type was
+fixed in 0.6.16. Production Window evidence confirms the later archive job
+`component-a288ef1e38208a2bf8cd4cb8a8f8cab0` completed at 13:28:38 UTC.
+The abandoned reservation exposed a separate lifecycle defect: incomplete TTL
+was configured but not enforced for producer backups.
+
+Producer DELETE now authenticates the existing token/mTLS identity, checks the
+slug and run owner and holds the same per-run lock as append/complete. It
+removes only the incomplete temporary object and persists `failed` with
+`cancelled_by_producer`; repeating it for an already failed run is idempotent.
+Completed and verifying runs reject producer cancellation with 409. Quotas
+exclude failed reservations, allowing the next backup without revoking or
+re-enrolling the producer. No backup-content read permission is added.
+
+Maintenance runs at API startup and every 15 minutes. It scans all unfinished
+states with keyset pages, then acquires each run lock and rechecks `updated_at`.
+`UPLOAD_INCOMPLETE_TTL_MS` measures inactivity (24 hours by default). Resume HEAD
+and owner Resume refresh the deadline. A currently paused task is excluded;
+pause controls are process-local, so a restart applies the persisted inactivity
+deadline. An active chunk/verification holds the lock and cannot be cleaned up
+mid-write. Partial stale runs become `failed/incomplete_expired` and their
+temporary bytes are removed. Storage cleanup failures retain the reservation
+for a later maintenance retry and are counted in the warning log.
+
+Fully received stale runs in uploading/verifying are verified and completed,
+including a final object already renamed before a lost database acknowledgement.
+Size/SHA-256 must match before a receipt or catalog entry is issued. Cleanup
+never deletes a renamed final object when recovery verification fails; that run
+records `checksum_mismatch` for operator investigation. Automatic completion
+and expiry use the system audit actor. Completed archives remain outside the
+expiry scan and under the existing retention policy.
+
+Updater additionally retries transient HTTP/network failures up to three
+attempts with bounded backoff and the existing overall operation deadline.
+Before retrying a chunk it reads HEAD: an already accepted chunk is not sent
+twice, and an unexpected offset fails explicitly. Reservation creation reuses
+the same idempotency key and completion safely replays its receipt. A terminal
+failed publication attempts scoped DELETE with an independent five-second
+context; if the host or network is unavailable, server expiry is the fallback.
+Deploy Saturn API before the updated Updater; an older API's 404 is reported
+alongside the original publication error and does not delete a committed file.
+
+Verification covers scoped/idempotent abort, actual quota release and subsequent
+creation, stale pending/uploading/appending runs, paused/resumed/active races,
+keyset pagination, cleanup retry, crash-before-receipt recovery and corrupt
+final preservation. The real Go client also loses create/chunk/complete replies
+against Nest/Fastify, PostgreSQL and local disk, then verifies exact bytes,
+completed replay, authenticated decryption and isolated restoration for all five
+host scopes. Production SFTP fault injection is not part of this local fixture.

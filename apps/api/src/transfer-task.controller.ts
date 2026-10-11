@@ -63,6 +63,7 @@ export class TransferTaskController {
     const run = await this.backups.getRunForOwner(runId);
     if (!MUTABLE_BACKUP_STATES.has(run.state)) throw new ConflictException({ code: "task_not_controllable" });
     if (action === "resume" && this.transfers.controlState(taskId) !== "paused") throw new ConflictException({ code: "task_not_paused" });
+    if (action === "resume") await this.backups.touchRunForOwner(runId);
     if (action !== "cancel") return { id: taskId, state: this.transfers.control(taskId, action) };
     this.transfers.control(taskId, "cancel");
     try {

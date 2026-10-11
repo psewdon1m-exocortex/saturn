@@ -21,7 +21,7 @@ export interface NewOwnerSession {
 export interface OwnerPreferences {
   readonly accentColor: string;
   readonly sidebarMode: "fixed" | "auto-hide";
-  readonly navigationOrder: readonly ("dashboard" | "files" | "inbox" | "shared" | "synchronization" | "trash" | "settings")[];
+  readonly navigationOrder: readonly ("dashboard" | "files" | "storage-new" | "inbox" | "shared" | "synchronization" | "trash" | "settings")[];
   readonly dashboardOrder: readonly ("cpu" | "ram" | "disk" | "uptime" | "storage" | "drop" | "reachability" | "tasks")[];
   readonly settingsOrder: readonly ("appearance" | "security" | "storage" | "backup" | "gryphon" | "updates" | "logs")[];
   readonly trashRetentionDays: number;

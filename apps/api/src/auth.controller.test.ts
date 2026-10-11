@@ -21,11 +21,28 @@ function fixture() {
 }
 
 describe("Settings card preferences", () => {
+  it("accepts both navigation generations and preserves a custom Storage new position", async () => {
+    const { controller } = fixture();
+    await expect(controller.updatePreferences(preferences)).resolves.toMatchObject({ navigationOrder: ["dashboard", "files", "storage-new", "inbox", "shared", "synchronization", "trash", "settings"] });
+    const navigationOrder = ["storage-new", "settings", "files", "inbox", "shared", "synchronization", "trash", "dashboard"];
+    await expect(controller.updatePreferences({ ...preferences, navigationOrder })).resolves.toMatchObject({ navigationOrder });
+  });
+
+  it.each([
+    ["dashboard", "files", "storage-new", "inbox", "shared", "synchronization", "settings"],
+    ["dashboard", "files", "storage-new", "inbox", "shared", "synchronization", "trash", "trash"],
+    ["dashboard", "files", "unknown", "inbox", "shared", "synchronization", "trash", "settings"],
+  ])("rejects incomplete, duplicate or unknown navigation: %j", async (...navigationOrder) => {
+    const { controller, updatePreferences } = fixture();
+    await expect(controller.updatePreferences({ ...preferences, navigationOrder })).rejects.toBeInstanceOf(BadRequestException);
+    expect(updatePreferences).not.toHaveBeenCalled();
+  });
+
   it("saves an independently reordered Storage connection card", async () => {
     const { controller, updatePreferences } = fixture();
     const settingsOrder = ["storage", "logs", "backup", "security", "updates", "appearance", "gryphon"];
     await expect(controller.updatePreferences({ ...preferences, settingsOrder })).resolves.toMatchObject({ settingsOrder });
-    expect(updatePreferences).toHaveBeenCalledWith({ ...preferences, settingsOrder });
+    expect(updatePreferences).toHaveBeenCalledWith({ ...preferences, settingsOrder, navigationOrder: ["dashboard", "files", "storage-new", "inbox", "shared", "synchronization", "trash", "settings"] });
   });
 
   it("inserts Storage after Security for an older client without resetting its order or limits", async () => {

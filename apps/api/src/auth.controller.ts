@@ -23,9 +23,15 @@ const accessKeyChangeSchema = z.object({
 const appearanceSchema = z.object({
   accentColor: z.string().regex(/^#[0-9a-fA-F]{6}$/),
   sidebarMode: z.enum(["fixed", "auto-hide"]),
-  navigationOrder: z.array(z.enum(["dashboard", "files", "inbox", "shared", "synchronization", "trash", "settings"]))
-    .length(7)
-    .refine((value) => new Set(value).size === value.length, "Navigation destinations must be unique"),
+  navigationOrder: z.array(z.enum(["dashboard", "files", "storage-new", "inbox", "shared", "synchronization", "trash", "settings"]))
+    .min(7).max(8)
+    .refine((value) => new Set(value).size === value.length, "Navigation destinations must be unique")
+    .refine((value) => value.length === 8 || !value.includes("storage-new"), "Navigation must include every destination")
+    .transform((value) => {
+      const order = [...value];
+      if (!order.includes("storage-new")) order.splice(order.indexOf("files") + 1, 0, "storage-new");
+      return order;
+    }),
   dashboardOrder: z.array(z.enum(["cpu", "ram", "disk", "uptime", "storage", "drop", "reachability", "tasks"]))
     .length(8)
     .refine((value) => new Set(value).size === value.length, "Dashboard cards must be unique"),

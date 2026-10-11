@@ -163,7 +163,15 @@ export class BackupIngestService {
     catch (error) { if (error instanceof Error && /quota/i.test(error.message)) throw new BackupServiceError("quota"); throw error; }
   }
   async inspectRun(context: BackupContext, slug: string, runId: string) { this.assertSlug(context, slug); return publicRun(await this.requiredRun(context.service.id, runId)); }
-  async uploadOffset(context: BackupContext, slug: string, runId: string): Promise<number> { this.assertSlug(context, slug); return (await this.requiredRun(context.service.id, runId)).receivedSize; }
+  async uploadOffset(context: BackupContext, slug: string, runId: string, now = new Date()): Promise<number> {
+    this.assertSlug(context, slug);
+    return this.withRunLock(runId, async () => {
+      const run = await this.requiredRun(context.service.id, runId);
+      if (run.state === "failed") throw new BackupServiceError("conflict");
+      await this.input.repository.touchRun(context.service.id, runId, now);
+      return run.receivedSize;
+    });
+  }
   async append(context: BackupContext, slug: string, runId: string, offset: number, length: number, source: Readable, now = new Date()): Promise<number> {
     return this.withRunLock(runId, () => this.appendLocked(context, slug, runId, offset, length, source, now));
   }
@@ -188,7 +196,7 @@ export class BackupIngestService {
   async complete(context: BackupContext, slug: string, runId: string, now = new Date()) {
     return this.withRunLock(runId, () => this.completeLocked(context, slug, runId, now));
   }
-  private async completeLocked(context: BackupContext, slug: string, runId: string, now: Date) {
+  private async completeLocked(context: BackupContext, slug: string, runId: string, now: Date, actorId = context.service.id) {
     this.assertSlug(context, slug); let selected: BackupRunRecord;
     try { selected = await this.input.repository.claimComplete(context.service.id, runId, now); } catch (error) { if (error instanceof Error && /incomplete/i.test(error.message)) throw new BackupServiceError("conflict"); throw error; }
     if (selected.state === "complete") {
@@ -198,12 +206,12 @@ export class BackupIngestService {
     try {
       const sourcePath = await this.input.storage.exists(selected.tempPath) ? selected.tempPath : selected.finalPath;
       if (!(await this.input.storage.exists(sourcePath))) throw new Error("Backup upload is missing"); const digest = await this.digest(sourcePath);
-      if (digest.bytes !== selected.expectedSize || digest.sha256 !== selected.expectedSha256) { await this.input.storage.delete(sourcePath).catch(() => undefined); await this.input.repository.failRun(context.service.id, runId, "checksum_mismatch", new Date()); throw new Error("Backup checksum or size differs"); }
+      if (digest.bytes !== selected.expectedSize || digest.sha256 !== selected.expectedSha256) { if (sourcePath === selected.tempPath) await this.input.storage.delete(sourcePath).catch(() => undefined); await this.input.repository.failRun(context.service.id, runId, "checksum_mismatch", new Date()); throw new Error("Backup checksum or size differs"); }
       if (sourcePath === selected.tempPath) { await this.ensureParents(selected.finalPath); if (await this.input.storage.exists(selected.finalPath)) throw new Error("Backup final object already exists"); await this.input.storage.rename(selected.tempPath, selected.finalPath); }
       const committedAt = new Date(); const receipt: BackupReceipt = { schema: "vault.service-backup-receipt.v1", runId, serviceId: context.service.id, serviceSlug: context.service.slug, logicalPath: `/${selected.finalPath}`, sizeBytes: digest.bytes, sha256: digest.sha256, committedAt: committedAt.toISOString() };
       const completed = await this.input.repository.completeRun(context.service.id, runId, receipt, committedAt);
       await this.publishCatalog(completed).catch(() => undefined);
-      await this.audit("backup.run.completed", runId, { serviceId: context.service.id, sizeBytes: digest.bytes, sha256: digest.sha256 }, context.service.id); return publicRun(completed);
+      await this.audit("backup.run.completed", runId, { serviceId: context.service.id, sizeBytes: digest.bytes, sha256: digest.sha256 }, actorId); return publicRun(completed);
     } catch (error) {
       if (error instanceof BackupServiceError) throw error;
       if (error instanceof Error && /checksum|size differs/i.test(error.message)) throw new BackupServiceError("invalid");
@@ -224,12 +232,65 @@ export class BackupIngestService {
   async cancelRunForOwner(runId: string, now = new Date()): Promise<void> {
     return this.withRunLock(runId, () => this.cancelRunLocked(runId, now));
   }
+  async touchRunForOwner(runId: string, now = new Date()): Promise<void> {
+    return this.withRunLock(runId, async () => {
+      const run = await this.getRunForOwner(runId);
+      if (!["pending", "uploading", "appending"].includes(run.state)) throw new BackupServiceError("conflict");
+      await this.input.repository.touchRun(run.serviceId, runId, now);
+    });
+  }
   private async cancelRunLocked(runId: string, now: Date): Promise<void> {
     const run = await this.getRunForOwner(runId);
     if (!["pending", "uploading", "appending"].includes(run.state)) throw new BackupServiceError("conflict");
     await this.input.repository.failRun(run.serviceId, run.id, "cancelled_by_owner", now);
     await this.input.storage.delete(run.tempPath).catch(() => undefined);
     await this.audit("backup.run.cancelled", run.id, { serviceId: run.serviceId, receivedSize: run.receivedSize });
+  }
+  async cancelRun(context: BackupContext, slug: string, runId: string, now = new Date()) {
+    this.assertSlug(context, slug);
+    return this.withRunLock(runId, async () => {
+      const run = await this.requiredRun(context.service.id, runId);
+      if (run.state === "failed") return publicRun(run);
+      if (!["pending", "uploading", "appending"].includes(run.state)) throw new BackupServiceError("conflict");
+      await this.removeIncompleteRun(run, "cancelled_by_producer", now);
+      await this.audit("backup.run.cancelled", run.id, { serviceId: run.serviceId, receivedSize: run.receivedSize }, context.service.id);
+      return publicRun(await this.requiredRun(context.service.id, runId));
+    });
+  }
+  async expireIncompleteRuns(now = new Date(), isPaused: (runId: string) => boolean = () => false) {
+    const before = new Date(now.getTime() - this.input.options.incompleteTtlMs);
+    const result = { scanned: 0, expired: 0, recovered: 0, failed: 0 };
+    let afterId: string | undefined;
+    for (;;) {
+      const page = await this.input.repository.listIncompleteRuns(before, afterId, 500);
+      for (const candidate of page) {
+        result.scanned++;
+        try {
+          await this.withRunLock(candidate.id, async () => {
+            // A chunk or resume HEAD may have refreshed the reservation since selection.
+            const run = await this.input.repository.getRun(candidate.serviceId, candidate.id);
+            if (run === undefined || run.state === "complete" || run.state === "failed" || run.updatedAt > before || isPaused(run.id)) return;
+            if (run.receivedSize === run.expectedSize && ["uploading", "verifying"].includes(run.state)) {
+              // A crash can leave a verified object at finalPath without its DB receipt.
+              const service = await this.requiredService(run.serviceId);
+              await this.completeLocked({ service, usedPreviousToken: false }, service.slug, run.id, now, "system");
+              result.recovered++;
+              return;
+            }
+            await this.removeIncompleteRun(run, "incomplete_expired", now);
+            await this.audit("backup.run.expired", run.id, { serviceId: run.serviceId, receivedSize: run.receivedSize, incompleteTtlMs: this.input.options.incompleteTtlMs }, "system");
+            result.expired++;
+          });
+        } catch { result.failed++; }
+      }
+      if (page.length < 500) return result;
+      afterId = page.at(-1)?.id;
+    }
+  }
+  private async removeIncompleteRun(run: BackupRunRecord, failureCode: string, now: Date): Promise<void> {
+    // Keep the reservation retryable if storage is temporarily unavailable.
+    if (await this.input.storage.exists(run.tempPath)) await this.input.storage.delete(run.tempPath);
+    await this.input.repository.failRun(run.serviceId, run.id, failureCode, now);
   }
   async retentionPreview(serviceId: string, limit = 500) { validatePage(0, limit); const selected = await this.requiredService(serviceId); return (await this.retentionFor(selected, limit)).map(item => item.id); }
   async reconcileCatalog(limitPerService = 1000): Promise<{ readonly scanned: number; readonly published: number; readonly failed: number }> {
@@ -314,5 +375,5 @@ export class BackupIngestService {
     if (run.state !== "complete" || run.receipt === undefined || !(await this.input.storage.exists(run.finalPath))) return;
     await this.input.catalog?.publish(run);
   }
-  async audit(action: string, subjectId: string, details: Readonly<Record<string, unknown>>, actorId = "owner"): Promise<void> { await this.input.audit?.write({ actorType: actorId === "owner" ? "owner_session" : "service_token", actorId, action, outcome: "success", correlationId: `${action}:${uuidv7()}`, details: { subjectId, ...details } }); }
+  async audit(action: string, subjectId: string, details: Readonly<Record<string, unknown>>, actorId = "owner"): Promise<void> { await this.input.audit?.write({ actorType: actorId === "system" ? "system" : actorId === "owner" ? "owner_session" : "service_token", actorId, action, outcome: "success", correlationId: `${action}:${uuidv7()}`, details: { subjectId, ...details } }); }
 }

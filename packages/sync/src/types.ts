@@ -41,7 +41,7 @@ export interface DeviceEnrollmentRecord {
   readonly consumedAt?: Date;
 }
 
-export type PublicDevice = Omit<DeviceRecord, "tokenHash"> & { readonly syncFolderName?: string };
+export type PublicDevice = Omit<DeviceRecord, "tokenHash"> & { readonly online: boolean; readonly syncFolderName?: string };
 
 export interface SyncConflict {
   readonly id: string;

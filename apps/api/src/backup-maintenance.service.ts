@@ -2,6 +2,7 @@ import { Inject, Injectable, Logger, type OnApplicationBootstrap, type OnApplica
 import type { BackupIngestService } from "@saturn/backup-ingest";
 import type { Database } from "@saturn/database";
 import { BACKUP_INGEST_SERVICE, DATABASE } from "./tokens.js";
+import { TransferMonitorService } from "./transfer-monitor.service.js";
 
 @Injectable()
 export class BackupMaintenanceService implements OnApplicationBootstrap, OnApplicationShutdown {
@@ -10,7 +11,8 @@ export class BackupMaintenanceService implements OnApplicationBootstrap, OnAppli
   #running = false;
 
   constructor(@Inject(BACKUP_INGEST_SERVICE) private readonly backups: BackupIngestService,
-    @Inject(DATABASE) private readonly database: Database) {}
+    @Inject(DATABASE) private readonly database: Database,
+    @Inject(TransferMonitorService) private readonly transfers: TransferMonitorService) {}
 
   async onApplicationBootstrap(): Promise<void> {
     await this.reconcile();
@@ -27,6 +29,9 @@ export class BackupMaintenanceService implements OnApplicationBootstrap, OnAppli
     this.#running = true;
     try {
       await this.database.withSharedMaintenance(async () => {
+        const incomplete = await this.backups.expireIncompleteRuns(new Date(), runId => this.transfers.controlState(`backup:${runId}`) === "paused");
+        if (incomplete.failed > 0) this.#logger.warn(`Backup incomplete cleanup expired ${String(incomplete.expired)}, recovered ${String(incomplete.recovered)}; ${String(incomplete.failed)} failed`);
+        else if (incomplete.expired > 0 || incomplete.recovered > 0) this.#logger.log(`Backup incomplete cleanup expired ${String(incomplete.expired)}, recovered ${String(incomplete.recovered)}`);
         const result = await this.backups.reconcileCatalog();
         if (result.failed > 0) this.#logger.warn(`Backup catalog reconciliation published ${String(result.published)}/${String(result.scanned)}; ${String(result.failed)} failed`);
         else if (result.published > 0) this.#logger.log(`Backup catalog reconciliation verified ${String(result.published)} completed archives`);

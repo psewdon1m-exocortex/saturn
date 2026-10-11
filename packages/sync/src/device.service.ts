@@ -33,8 +33,12 @@ export class DeviceServiceError extends Error {
   }
 }
 
-function publicDevice(value: DeviceRecord): PublicDevice {
-  return { id: value.id, name: value.name, deviceKind: value.deviceKind, ...(value.plutoStatus === undefined ? {} : { plutoStatus: value.plutoStatus }), ...(value.syncRootId === undefined ? {} : { syncRootId: value.syncRootId }), state: value.state, scopeIds: value.scopeIds, rights: value.rights, ...(value.expiresAt === undefined ? {} : { expiresAt: value.expiresAt }), ...(value.lastUsedAt === undefined ? {} : { lastUsedAt: value.lastUsedAt }), ...(value.lastSeenAt === undefined ? {} : { lastSeenAt: value.lastSeenAt }), ...(value.clientPlatform === undefined ? {} : { clientPlatform: value.clientPlatform }), ...(value.clientVersion === undefined ? {} : { clientVersion: value.clientVersion }), createdAt: value.createdAt, updatedAt: value.updatedAt, ...(value.revokedAt === undefined ? {} : { revokedAt: value.revokedAt }) };
+function publicDevice(value: DeviceRecord, now: Date): PublicDevice {
+  // Presence timestamps and the clock used to age them must come from Saturn.
+  const presenceWindowMs = value.deviceKind === "pluto" ? 60_000 : 6 * 60_000;
+  const online = value.state === "active" && (value.expiresAt === undefined || value.expiresAt > now)
+    && value.lastSeenAt !== undefined && now.getTime() - value.lastSeenAt.getTime() < presenceWindowMs;
+  return { id: value.id, name: value.name, deviceKind: value.deviceKind, ...(value.plutoStatus === undefined ? {} : { plutoStatus: value.plutoStatus }), ...(value.syncRootId === undefined ? {} : { syncRootId: value.syncRootId }), state: value.state, online, scopeIds: value.scopeIds, rights: value.rights, ...(value.expiresAt === undefined ? {} : { expiresAt: value.expiresAt }), ...(value.lastUsedAt === undefined ? {} : { lastUsedAt: value.lastUsedAt }), ...(value.lastSeenAt === undefined ? {} : { lastSeenAt: value.lastSeenAt }), ...(value.clientPlatform === undefined ? {} : { clientPlatform: value.clientPlatform }), ...(value.clientVersion === undefined ? {} : { clientVersion: value.clientVersion }), createdAt: value.createdAt, updatedAt: value.updatedAt, ...(value.revokedAt === undefined ? {} : { revokedAt: value.revokedAt }) };
 }
 
 export function resourceEtag(resource: Resource): string {
@@ -90,10 +94,10 @@ export class DeviceService {
     return root;
   }
 
-  async #publicDevice(device: DeviceRecord): Promise<PublicDevice> {
+  async #publicDevice(device: DeviceRecord, now: Date): Promise<PublicDevice> {
     const root = (device.deviceKind === "windows_sync" || device.deviceKind === "pluto") && device.syncRootId
       ? await this.input.files.getResource(device.syncRootId).catch(() => undefined) : undefined;
-    return { ...publicDevice(device), ...(root?.status === "active" && (device.deviceKind === "pluto" || root.parentId === SYNC_RESOURCE_ID) ? { syncFolderName: root.name } : {}) };
+    return { ...publicDevice(device, now), ...(root?.status === "active" && (device.deviceKind === "pluto" || root.parentId === SYNC_RESOURCE_ID) ? { syncFolderName: root.name } : {}) };
   }
 
   async #createWindowsRoot(value: string): Promise<Resource> {
@@ -145,7 +149,7 @@ export class DeviceService {
     const code = randomBytes(24).toString("base64url"), expiresAt = new Date(now.getTime() + 15 * 60_000);
     await this.input.repository.createEnrollment({ id: uuidv7(), deviceId: id, codeHash: this.#enrollmentHash(code), expiresAt, createdAt: now });
     await this.#audit("pluto.enrollment.created", id, {});
-    return { code, expiresAt: expiresAt.toISOString(), device: await this.#publicDevice(record) };
+    return { code, expiresAt: expiresAt.toISOString(), device: await this.#publicDevice(record, now) };
   }
 
   async redeemPlutoEnrollment(code: string, version: string, now = new Date()) {
@@ -156,13 +160,13 @@ export class DeviceService {
     await this.#plutoRoot(record);
     const device = await this.input.repository.recordPresence(record.id, "linux", version, now, { enabled: false, intervalSeconds: 86400, uploadedFiles: 0 });
     await this.#audit("pluto.enrollment.redeemed", record.id, {});
-    return { token, device: await this.#publicDevice(device) };
+    return { token, device: await this.#publicDevice(device, now) };
   }
 
   async plutoHeartbeat(authorization: string | undefined, version: string, status: PlutoStatus, now = new Date()) {
     const context = await this.authenticate(authorization, now);
     await this.#plutoRoot(context.device);
-    return this.#publicDevice(await this.input.repository.recordPresence(context.device.id, "linux", version, now, status));
+    return this.#publicDevice(await this.input.repository.recordPresence(context.device.id, "linux", version, now, status), now);
   }
 
   async createDevice(value: { readonly name: string; readonly scopeIds: readonly string[]; readonly rights: DeviceRights; readonly expiresAt?: Date; readonly deviceKind?: DeviceRecord["deviceKind"] }, now = new Date()) {
@@ -175,7 +179,7 @@ export class DeviceService {
     const token = randomBytes(32).toString("base64url");
     const record = await this.input.repository.create({ id: uuidv7(), name: cleanName(value.name), deviceKind: value.deviceKind ?? "generic", tokenHash: this.#hash(token), scopeIds, rights: value.rights, ...(value.expiresAt === undefined ? {} : { expiresAt: value.expiresAt }), createdAt: now });
     await this.#audit("device.created", record.id, { name: record.name, scopeIds: record.scopeIds, rights: record.rights });
-    return { token, device: publicDevice(record) };
+    return { token, device: publicDevice(record, now) };
   }
 
   async createWindowsEnrollment(name: string, now = new Date()) {
@@ -203,7 +207,7 @@ export class DeviceService {
     const expiresAt = new Date(now.getTime() + 15 * 60_000);
     await this.input.repository.createEnrollment({ id: uuidv7(), deviceId: record.id, codeHash: this.#enrollmentHash(code), expiresAt, createdAt: now });
     await this.#audit("device.enrollment.created", record.id, { expiresAt: expiresAt.toISOString() });
-    return { code, expiresAt: expiresAt.toISOString(), device: await this.#publicDevice(record) };
+    return { code, expiresAt: expiresAt.toISOString(), device: await this.#publicDevice(record, now) };
   }
 
   async redeemWindowsEnrollment(code: string, version: string, now = new Date()) {
@@ -215,18 +219,18 @@ export class DeviceService {
     await this.#windowsRoot(record);
     const present = await this.input.repository.recordPresence(record.id, "windows", version.trim(), now);
     await this.#audit("device.enrollment.redeemed", record.id, { platform: "windows", version: version.trim() }, { type: "device_token", id: record.id });
-    return { token, device: await this.#publicDevice(present) };
+    return { token, device: await this.#publicDevice(present, now) };
   }
 
   async heartbeat(authorization: string | undefined, platform: "windows" | "linux", version: string, now = new Date()) {
     if (version.trim().length < 1 || version.length > 100) throw new DeviceServiceError("unauthorized");
     const context = await this.authenticate(authorization, now);
-    return this.#publicDevice(await this.input.repository.recordPresence(context.device.id, platform, version.trim(), now));
+    return this.#publicDevice(await this.input.repository.recordPresence(context.device.id, platform, version.trim(), now), now);
   }
 
-  async listDevices(offset = 0, limit = 100): Promise<readonly PublicDevice[]> {
+  async listDevices(offset = 0, limit = 100, now = new Date()): Promise<readonly PublicDevice[]> {
     if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 500) throw new Error("Device page is invalid");
-    return Promise.all((await this.input.repository.list(offset, limit)).map(device => this.#publicDevice(device)));
+    return Promise.all((await this.input.repository.list(offset, limit)).map(device => this.#publicDevice(device, now)));
   }
 
   async updateDevice(id: string, value: { readonly name?: string; readonly scopeIds?: readonly string[]; readonly rights?: DeviceRights; readonly expiresAt?: Date | null }, now = new Date()): Promise<PublicDevice> {
@@ -240,13 +244,13 @@ export class DeviceService {
       throw new Error("Root resource capabilities are read-only");
     const updated = await this.input.repository.update(id, { ...(value.name === undefined ? {} : { name: cleanName(value.name) }), ...(value.scopeIds === undefined ? {} : { scopeIds: [...new Set(value.scopeIds)] }), ...(value.rights === undefined ? {} : { rights: value.rights }), ...(value.expiresAt === undefined ? {} : { expiresAt: value.expiresAt }) }, now);
     await this.#audit("device.updated", updated.id, { scopeIds: updated.scopeIds, rights: updated.rights });
-    return this.#publicDevice(updated);
+    return this.#publicDevice(updated, now);
   }
 
   async revokeDevice(id: string, now = new Date()): Promise<PublicDevice> {
     const value = await this.input.repository.revoke(id, now);
     await this.#audit("device.revoked", id, {});
-    return publicDevice(value);
+    return publicDevice(value, now);
   }
 
   async authenticate(authorization: string | undefined, now = new Date()): Promise<DeviceContext> {

@@ -2,6 +2,7 @@ import { PlutoPipelineCard } from "./pluto-pipeline-card.js";
 import { displayOpaqueKey, editOpaqueKey, pasteOpaqueKey, OpaqueKeyInput } from "./opaque-key-input.js";
 import { ServiceLogsPanel } from "./ServiceLogsPanel";
 import { StorageAnalysisPanel } from "./storage-analysis-panel.js";
+import { StorageNewGrid } from "./storage-new-grid.js";
 import { openAgentInitialization, confirmAgentAction, type InitializationJob } from "./agent-initialize.js";
 import { BackupPolicyPanel } from "./service-agents";
 import { updateCookieHeaders } from "./update-overlay.js";
@@ -50,7 +51,7 @@ import {
 
 type GatewayState = "checking" | "ready" | "degraded";
 type GatewayHealth = { readonly gateway: GatewayState };
-type PrimaryViewName = "dashboard" | "files" | "inbox" | "shared" | "synchronization" | "settings" | "trash";
+type PrimaryViewName = "dashboard" | "files" | "storage-new" | "inbox" | "shared" | "synchronization" | "settings" | "trash";
 type ViewName = PrimaryViewName | "documentation";
 type DashboardCardName = OwnerPreferences["dashboardOrder"][number];
 type SettingsCardName = OwnerPreferences["settingsOrder"][number];
@@ -66,13 +67,14 @@ type FileKind = "folder" | "image" | "video" | "audio" | "pdf" | "markdown" | "d
 const NAV_ITEMS: Readonly<Record<PrimaryViewName, { readonly label: string }>> = {
   dashboard: { label: "Dashboard" },
   files: { label: "Storage" },
+  "storage-new": { label: "Storage new" },
   inbox: { label: "Drop Point" },
   shared: { label: "Shared" },
   synchronization: { label: "Synchronization" },
   trash: { label: "Trash" },
   settings: { label: "Settings" },
 };
-const DEFAULT_NAVIGATION_ORDER: readonly PrimaryViewName[] = ["dashboard", "files", "inbox", "shared", "synchronization", "trash", "settings"];
+const DEFAULT_NAVIGATION_ORDER: readonly PrimaryViewName[] = ["dashboard", "files", "storage-new", "inbox", "shared", "synchronization", "trash", "settings"];
 const DEFAULT_DASHBOARD_ORDER: readonly DashboardCardName[] = ["cpu", "ram", "disk", "uptime", "storage", "drop", "reachability", "tasks"];
 const DEFAULT_SETTINGS_ORDER: readonly SettingsCardName[] = ["appearance", "security", "storage", "backup", "gryphon", "updates", "logs"];
 const SETTINGS_CARD_TITLES: Readonly<Record<SettingsCardName, string>> = {
@@ -87,6 +89,7 @@ const SETTINGS_CARD_TITLES: Readonly<Record<SettingsCardName, string>> = {
 const OWNER_ROUTE_PATHS: Readonly<Record<ViewName, string>> = {
   dashboard: "/dashboard",
   files: "/files",
+  "storage-new": "/storage-new",
   inbox: "/inbox",
   shared: "/shared",
   synchronization: "/synchronization",
@@ -101,7 +104,7 @@ function ownerRouteFromPathname(pathname: string): OwnerRoute {
   for (const view of Object.keys(OWNER_ROUTE_PATHS) as ViewName[]) {
     const base = OWNER_ROUTE_PATHS[view];
     if (normalized === base) return { view, folderSegments: [] };
-    if ((view === "files" || view === "inbox") && normalized.startsWith(`${base}/`)) {
+    if ((view === "files" || view === "storage-new" || view === "inbox") && normalized.startsWith(`${base}/`)) {
       try {
         const folderSegments = normalized.slice(base.length + 1).split("/").map((segment) => decodeURIComponent(segment));
         return { view, folderSegments };
@@ -115,7 +118,7 @@ function ownerRouteFromPathname(pathname: string): OwnerRoute {
 
 function ownerRouteUrl(route: OwnerRoute): string {
   const base = OWNER_ROUTE_PATHS[route.view];
-  if ((route.view !== "files" && route.view !== "inbox") || route.folderSegments.length === 0) return base;
+  if ((route.view !== "files" && route.view !== "storage-new" && route.view !== "inbox") || route.folderSegments.length === 0) return base;
   return `${base}/${route.folderSegments.map((segment) => encodeURIComponent(segment)).join("/")}`;
 }
 
@@ -142,9 +145,11 @@ const defaultPreferences: Omit<OwnerPreferences, "updatedAt"> = {
 function ownerPreferences(value: OwnerPreferences | Omit<OwnerPreferences, "updatedAt">): Omit<OwnerPreferences, "updatedAt"> {
   const order = "navigationOrder" in value ? value.navigationOrder : undefined;
   const validOrder = Array.isArray(order)
-    && order.length === DEFAULT_NAVIGATION_ORDER.length
+    && (order.length === DEFAULT_NAVIGATION_ORDER.length || order.length === DEFAULT_NAVIGATION_ORDER.length - 1 && !order.includes("storage-new"))
     && new Set(order).size === order.length
     && order.every((item) => item in NAV_ITEMS);
+  const navigationOrder = [...(validOrder ? order as readonly PrimaryViewName[] : DEFAULT_NAVIGATION_ORDER)];
+  if (!navigationOrder.includes("storage-new")) navigationOrder.splice(navigationOrder.indexOf("files") + 1, 0, "storage-new");
   const dashboardOrder = "dashboardOrder" in value ? value.dashboardOrder : undefined;
   const dashboardDestinations = new Set<string>(DEFAULT_DASHBOARD_ORDER);
   const validDashboardOrder = Array.isArray(dashboardOrder)
@@ -177,7 +182,7 @@ function ownerPreferences(value: OwnerPreferences | Omit<OwnerPreferences, "upda
   return {
     accentColor: value.accentColor,
     sidebarMode: "sidebarMode" in value && value.sidebarMode === "auto-hide" ? "auto-hide" : "fixed",
-    navigationOrder: validOrder ? order as readonly PrimaryViewName[] : DEFAULT_NAVIGATION_ORDER,
+    navigationOrder,
     dashboardOrder: validDashboardOrder ? dashboardOrder as readonly DashboardCardName[] : DEFAULT_DASHBOARD_ORDER,
     settingsOrder: validSettingsOrder ? typedSettingsOrder ?? DEFAULT_SETTINGS_ORDER : normalizedSettingsOrder,
     trashRetentionDays: Number.isSafeInteger(value.trashRetentionDays) && value.trashRetentionDays >= 1 && value.trashRetentionDays <= 365
@@ -927,7 +932,7 @@ function NoticeStack({ notices, dismiss }: { readonly notices: readonly Notice[]
   );
 }
 
-function FilesView({ initialFolderId, title, routeSegments, onPathChange, shareCapabilities, onShareCapabilityCreated, onShareCapabilityRevoked, addNotice, onUnauthorized, embeddedInHouse = false, refreshKey = 0 }: {
+function FilesView({ initialFolderId, title, routeSegments, onPathChange, shareCapabilities, onShareCapabilityCreated, onShareCapabilityRevoked, addNotice, onUnauthorized, embeddedInHouse = false, refreshKey = 0, presentation = "original" }: {
   readonly initialFolderId: string;
   readonly title: string;
   readonly routeSegments: readonly string[];
@@ -939,7 +944,10 @@ function FilesView({ initialFolderId, title, routeSegments, onPathChange, shareC
   readonly onUnauthorized: () => void;
   readonly embeddedInHouse?: boolean;
   readonly refreshKey?: number;
+  readonly presentation?: "original" | "new";
 }) {
+  const modern = presentation === "new";
+  const [pathAttempt, setPathAttempt] = useState(0);
   const [folderId, setFolderId] = useState(initialFolderId);
   const [folder, setFolder] = useState<Resource | undefined>();
   const [breadcrumbs, setBreadcrumbs] = useState<Array<{ readonly id: string; readonly name: string; readonly segments: readonly string[] }>>([]);
@@ -1042,7 +1050,7 @@ function FilesView({ initialFolderId, title, routeSegments, onPathChange, shareC
       }
     })();
     return () => controller.abort();
-  }, [initialFolderId, routeKey, refreshKey]);
+  }, [initialFolderId, routeKey, refreshKey, pathAttempt]);
 
   const visible = useMemo(() => {
     const query = search.trim().toLocaleLowerCase();
@@ -1386,6 +1394,10 @@ function FilesView({ initialFolderId, title, routeSegments, onPathChange, shareC
     event.preventDefault();
     dragDepth.current = 0;
     setDraggingFiles(false);
+    if (modern && loading) {
+      addNotice("info", "Wait for this folder to finish loading before uploading.");
+      return;
+    }
     if (folderUnavailable) return;
     if (atStorageRoot) {
       addNotice("error", "Create or open a folder first. Files cannot be stored directly in the Saturn root.");
@@ -1397,8 +1409,12 @@ function FilesView({ initialFolderId, title, routeSegments, onPathChange, shareC
   };
 
   return (
-    <section className={`workspace storage-workspace ${embeddedInHouse ? "storage-workspace--in-house" : ""} ${draggingFiles ? "storage-workspace--drop" : ""}`} aria-labelledby={embeddedInHouse ? undefined : "workspace-title"} aria-label={embeddedInHouse ? "Drop Point storage" : undefined} onDragEnter={(event) => { if (!event.dataTransfer.types.includes("Files")) return; event.preventDefault(); dragDepth.current += 1; setDraggingFiles(true); }} onDragLeave={() => { dragDepth.current = Math.max(0, dragDepth.current - 1); if (dragDepth.current === 0) setDraggingFiles(false); }} onDragOver={(event) => { if (event.dataTransfer.types.includes("Files")) { event.preventDefault(); event.dataTransfer.dropEffect = atStorageRoot || !dropContainsUploadableFiles(event.dataTransfer) ? "none" : "copy"; } }} onDrop={drop}>
-      {embeddedInHouse ? null : <header className="workspace__head">
+    <section className={`workspace ${modern ? "storage-new" : "storage-workspace"} ${embeddedInHouse ? "storage-workspace--in-house" : ""} ${draggingFiles ? "storage-workspace--drop" : ""}`} aria-labelledby={embeddedInHouse ? undefined : "workspace-title"} aria-label={embeddedInHouse ? "Drop Point storage" : undefined} onDragEnter={(event) => { if (!event.dataTransfer.types.includes("Files")) return; event.preventDefault(); dragDepth.current += 1; setDraggingFiles(true); }} onDragLeave={() => { dragDepth.current = Math.max(0, dragDepth.current - 1); if (dragDepth.current === 0) setDraggingFiles(false); }} onDragOver={(event) => { if (event.dataTransfer.types.includes("Files")) { event.preventDefault(); event.dataTransfer.dropEffect = atStorageRoot || modern && (loading || folderUnavailable) || !dropContainsUploadableFiles(event.dataTransfer) ? "none" : "copy"; } }} onDrop={drop}>
+      {modern ? <header className="storage-new-head">
+        <div><p className="storage-new-kicker">Storage new · {routeSegments.length === 0 ? "All folders" : "Folder"}</p><h1 id="workspace-title">{routeSegments.length === 0 ? "Your storage" : folder?.name ?? routeSegments.at(-1) ?? "Storage"}</h1><p>Files, backups and synchronized folders in one place.</p></div>
+        <div className="storage-new-actions"><button type="button" onClick={() => { setForm("folder"); setFormName(""); }} disabled={pending || folderUnavailable || loading}>New folder</button><button className="storage-new-primary" type="button" onClick={() => uploadInput.current?.click()} disabled={pending || atStorageRoot || folderUnavailable || loading}>{uploadProgress === undefined ? "Upload files" : `Uploading ${String(Math.round(uploadProgress * 100))}%`}</button></div>
+        {uploadProgress === undefined ? null : <p className="storage-new-progress" role="status">Uploading {String(Math.round(uploadProgress * 100))}% · committing to this folder</p>}
+      </header> : embeddedInHouse ? null : <header className="workspace__head">
         <div>
           <p className="eyebrow">Owner workspace</p>
           <h1 id="workspace-title" className="page-title">{title}</h1>
@@ -1416,12 +1432,12 @@ function FilesView({ initialFolderId, title, routeSegments, onPathChange, shareC
         </div>
         <label className="search-control storage-search">
           <span className="sr-only">Search storage</span>
-          <input type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search" />
+          <input type="search" aria-label={modern ? "Search storage" : undefined} value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search" />
         </label>
-        {embeddedInHouse ? null : <button className="button storage-upload" type="button" onClick={() => uploadInput.current?.click()} disabled={pending || atStorageRoot || folderUnavailable || loading}>Upload here</button>}
+        {embeddedInHouse || modern ? null : <button className="button storage-upload" type="button" onClick={() => uploadInput.current?.click()} disabled={pending || atStorageRoot || folderUnavailable || loading}>Upload here</button>}
         <input ref={uploadInput} aria-label="Choose files to upload" className="visually-hidden-input" type="file" multiple onChange={(event) => void performUpload([...event.target.files ?? []])} />
       </div>
-      <div className="selection-bar storage-selection-bar" role="toolbar" aria-label="Selection actions">
+      <div className={`selection-bar storage-selection-bar${modern ? " storage-new-selection" : ""}`} hidden={modern && selectedItems.length === 0 && clipboard === undefined} role="toolbar" aria-label="Selection actions">
         <span>{clipboard === undefined ? selectedItems.length === 0 ? "No selection" : `${String(selectedItems.length)} selected` : `${clipboard.operation === "copy" ? "Copy" : "Cut"}: ${clipboard.resource.name}`}</span>
         <button type="button" disabled={single === undefined} onClick={() => { if (single?.type === "folder") openFolder(single); }}>Open</button>
         <button type="button" disabled={single === undefined} onClick={() => { if (single !== undefined) window.location.assign(single.type === "file" ? downloadUrl(single.id) : folderDownloadUrl(single.id)); }}>Download</button>
@@ -1436,7 +1452,10 @@ function FilesView({ initialFolderId, title, routeSegments, onPathChange, shareC
         <button type="button" disabled={single === undefined} onClick={() => { if (single !== undefined) beginShare(single); }}>Share</button>
         <button className="danger-link" type="button" disabled={selectedItems.length === 0 || selectedProtectedRoot} onClick={() => setConfirmTrash(true)}>Trash</button>
       </div>
-      <div className="collection storage-collection" tabIndex={0} onContextMenu={(event) => openContextMenu(event)} onKeyDown={(event) => { if (event.key === "Delete" && selectedItems.length > 0 && !selectedProtectedRoot) setConfirmTrash(true); }}>
+      {modern ? <>
+        <div className="storage-new-sort" aria-label="Sort storage"><span>Files and folders</span><div><SortButton field="name" activeField={sort.field} direction={sort.direction} onChange={changeSort}>Name</SortButton><SortButton field="modified" activeField={sort.field} direction={sort.direction} onChange={changeSort}>Modified</SortButton><SortButton field="size" activeField={sort.field} direction={sort.direction} onChange={changeSort}>Size</SortButton></div></div>
+        <StorageNewGrid items={visible} selected={selected} loading={loading} error={pathError} emptyMessage={search.trim() ? "No matching items. Try another search." : atStorageRoot ? "No folders yet. Create a folder to start storing files." : "This folder is empty. Create a folder or upload files."} shares={activeShareByResource} pending={pending} kind={resourceKind} icon={(kind) => <FileKindIcon kind={kind} />} size={formatStorageBytes} date={formatStorageDate} onSelect={selectResource} canPreview={previewable} onOpen={(item) => { const id = item.id; if (item.type === "folder") openFolder(item); else if (previewable(item)) setPreview(item); else window.location.assign(downloadUrl(id)); }} onMenu={openContextMenu} onKeyboardMenu={(item, x, y) => { if (!selected.has(item.id)) selectOnly(item); setContextMenu({ x, y, resource: item }); }} onShare={setShareDetails} onRetry={() => setPathAttempt((attempt) => attempt + 1)} onDelete={() => { if (selectedItems.length > 0 && !selectedProtectedRoot) setConfirmTrash(true); }} />
+      </> : <div className="collection storage-collection" tabIndex={0} onContextMenu={(event) => openContextMenu(event)} onKeyDown={(event) => { if (event.key === "Delete" && selectedItems.length > 0 && !selectedProtectedRoot) setConfirmTrash(true); }}>
         <div className="file-row file-row--head storage-file-row">
           <SortButton field="name" activeField={sort.field} direction={sort.direction} onChange={changeSort}>Name</SortButton>
           <SortButton field="modified" activeField={sort.field} direction={sort.direction} onChange={changeSort}>Modified</SortButton>
@@ -1461,9 +1480,9 @@ function FilesView({ initialFolderId, title, routeSegments, onPathChange, shareC
             {activeShareByResource.get(item.id) === undefined ? <span className="share-status share-status--private">Private</span> : <button className="share-status share-status--active" type="button" onClick={() => setShareDetails(activeShareByResource.get(item.id))}>[ Shared ]</button>}
           </div>
         ))}
-      </div>
+      </div>}
       {activeArchiveJobs.length === 0 ? null : <div className="storage-archive-jobs" role="status">{activeArchiveJobs.map((job) => <span key={job.id}>{job.kind === "extract" ? "Extracting" : "Compressing"} {job.outputName} · {job.state}</span>)}</div>}
-      <p className="drop-hint">{atStorageRoot ? "Create arbitrary folders here, then open one to upload files. Preinstalled folders can be renamed but not moved or deleted." : "Drag and drop files anywhere in this workspace to upload into the current folder."}</p>
+      <p className="drop-hint">{modern && folderUnavailable ? "File actions will be available when this folder has loaded." : atStorageRoot ? "Create arbitrary folders here, then open one to upload files. Preinstalled folders can be renamed but not moved or deleted." : "Drag and drop files anywhere in this workspace to upload into the current folder."}</p>
       {draggingFiles ? <div className={`storage-drop-overlay ${atStorageRoot ? "storage-drop-overlay--blocked" : ""}`} aria-hidden="true"><strong>{atStorageRoot ? "OPEN A FOLDER" : "UPLOAD HERE"}</strong><span>{atStorageRoot ? "Files cannot be stored directly in root" : folder?.name ?? title}</span></div> : null}
 
       {form === undefined ? null : (
@@ -2429,6 +2448,7 @@ function DocumentationView() {
       <UniversalCard ordinal={2} title="Access model"><p>The owner workspace uses one Access Key. Drop sessions, shared links, devices and backup producers use separate scoped capabilities.</p></UniversalCard>
       <UniversalCard ordinal={3} title="Operations"><p>Implementation, verification and recovery runbooks are maintained in the project documentation directory on the Saturn host.</p></UniversalCard>
       <UniversalCard ordinal={4} title="Changing storage"><p>Settings → Storage connection can validate and select an independent SFTP target from an authenticated owner session. Saturn migrates zero file bytes, rebuilds the visible catalog and revokes capabilities that belonged to the previous file set.</p><p>The previous storage remains untouched. Selecting it again requires its credential and performs another validated index rebuild.</p><p>For unseen changes on the active storage, use Analyze storage in the same card. Review the saved report, then confirm Synchronize catalog to import new files, update changed metadata and mark absent files as missing. Existing resource IDs and file bytes are preserved; affected shared links are revoked. A stale report requires another analysis.</p></UniversalCard>
+      <UniversalCard ordinal={5} title="Storage presentations"><p>Storage keeps the original table. Storage new shows the same folders and files as cards, using the current shared-link visual style. Both tabs use the same file operations and access rules; no files are migrated when you switch.</p><p>In Storage new, open a folder or preview a supported file using its visual area. Use the checkbox or name to select it, then the action toolbar or the three-dot menu. New folder, search, sorting, breadcrumbs and downloads remain available; uploading directly into root is blocked.</p></UniversalCard>
     </div>
   </section>;
 }
@@ -2568,9 +2588,9 @@ function SynchronizationView({ addNotice }: { readonly addNotice: (kind: Notice[
   const servicePipelines = services.filter((service) => service.state === "active" && service.pipelineKind !== "host_service");
   const windowsDevices = devices.filter((device) => device.state === "active" && device.deviceKind === "windows_sync");
   const plutoDevices = devices.filter(device => device.state === "active" && device.deviceKind === "pluto");
-  const activePluto = plutoDevices.filter(device => device.lastSeenAt !== undefined && Date.now() - new Date(device.lastSeenAt).getTime() < 60_000).length;
+  const activePluto = plutoDevices.filter(device => device.online).length;
   const activeLinux = agents.filter((agent) => agent.observed.online).length;
-  const activeWindows = windowsDevices.filter((device) => device.lastSeenAt !== undefined && Date.now() - new Date(device.lastSeenAt).getTime() < 6 * 60_000).length;
+  const activeWindows = windowsDevices.filter((device) => device.online).length;
   const identityList = (items: readonly BackupServiceInfo[], emptyMessage: string) => <div className="pipeline-connections">{items.length === 0 ? <p className="empty-state">{emptyMessage}</p> : items.map((service) => <NeptunePipelineRow key={service.id} service={service} agent={agents.find((agent) => agent.serviceId === service.id)} pending={pending} onSetup={createEnrollment} onRevoke={() => setRevokeCandidate({ kind: "service", id: service.id, name: service.name })} />)}</div>;
 
   return <section className="workspace synchronization" aria-labelledby="synchronization-title">
@@ -2596,7 +2616,7 @@ function SynchronizationView({ addNotice }: { readonly addNotice: (kind: Notice[
         </form>
         {enrollments.map(enrollment => <div className="one-time-code" role="status" key={`${enrollment.label}:${enrollment.code}`}><span>{enrollment.label}</span><strong>{enrollment.code}</strong><small>One use · expires {new Date(enrollment.expiresAt).toLocaleString()}.</small></div>)}
       </UniversalCard>
-      <UniversalCard ordinal={2} title="Neptune fleet" className="synchronization-card"><div className="fleet-counters"><div><span>Linux agents</span><strong>{activeLinux}</strong><small>{agents.length} registered</small></div><div><span>Windows agents</span><strong>{activeWindows}</strong><small>{windowsDevices.length} registered</small></div><div><span>Pluto agents</span><strong>{activePluto}</strong><small>{plutoDevices.length} registered</small></div></div><p className="setting-meta">Active means a heartbeat observed within the current presence window. This card is informational; access is managed on each connection below.</p></UniversalCard>
+      <UniversalCard ordinal={2} title="Neptune fleet" className="synchronization-card"><div className="fleet-counters"><div><span>Linux agents</span><strong>{activeLinux}</strong><small>online · {agents.length} registered</small></div><div><span>Windows agents</span><strong>{activeWindows}</strong><small>online · {windowsDevices.length} registered</small></div><div><span>Pluto agents</span><strong>{activePluto}</strong><small>online · {plutoDevices.length} registered</small></div></div><p className="setting-meta">Online means a recent heartbeat received by Saturn. Registration and enabled copying are separate states; access is managed on each connection below.</p></UniversalCard>
       <UniversalCard ordinal={3} title="Host services" className="synchronization-card"><p>Active host recovery connections. Each installed service has an independent identity, setup code and revoke lifecycle, and writes only into <code>backups/&lt;service&gt;/&lt;host&gt;</code>.</p>{identityList(hostServices, "No active host pipelines.")}</UniversalCard>
       <UniversalCard ordinal={4} title="Service pipelines" className="synchronization-card"><p>Active service connections. Internal services store recovery archives; Volt and Mastermind use the archive and mirror pipelines selected during registration.</p>{identityList(servicePipelines, "No active service pipelines.")}</UniversalCard>
       <UniversalCard ordinal={5} title="Windows synchronization" className="synchronization-card"><p>Each Neptune Windows client mirrors its selected folders under <code>sync/&lt;connection&gt;</code>. Setup codes are one-time; the resulting credential is returned only to Neptune.</p><div className="pipeline-connections">{windowsDevices.length === 0 ? <p className="empty-state">No active Windows pipelines.</p> : windowsDevices.map((device) => <article className="pipeline-connection-card pipeline-connection-card--windows" aria-label={device.name} key={device.id}><div className="pipeline-identity"><span className="pipeline-identity__label">Connection name</span><strong>{device.name}</strong><span className="pipeline-identity__type">{device.syncFolderName ? `sync/${device.syncFolderName}` : "Setup required · isolated folder not assigned"}</span><span>{device.state} · {device.lastSeenAt === undefined ? "waiting for first heartbeat" : `last heartbeat ${new Date(device.lastSeenAt).toLocaleString()}`}{device.clientVersion === undefined ? "" : ` · Neptune ${device.clientVersion}`}</span></div><div className="inline-actions"><button className="button" type="button" disabled={pending || device.state !== "active"} onClick={() => void createWindowsEnrollment(device.id)}>Setup code</button><button className="button button--danger" type="button" disabled={pending || device.state !== "active"} onClick={() => setRevokeCandidate({ kind: "windows", id: device.id, name: device.name })}>Revoke</button></div></article>)}</div></UniversalCard>
@@ -3071,6 +3091,9 @@ function AuthenticatedApp({ health, onAnonymous, initialAccentColor }: { readonl
   const navigateFilesPath = useCallback((folderSegments: readonly string[], replace = false) => {
     commitRoute({ view: "files", folderSegments }, replace);
   }, [commitRoute]);
+  const navigateNewStoragePath = useCallback((folderSegments: readonly string[], replace = false) => {
+    commitRoute({ view: "storage-new", folderSegments }, replace);
+  }, [commitRoute]);
   const navigateInboxPath = useCallback((folderSegments: readonly string[], replace = false) => {
     commitRoute({ view: "inbox", folderSegments }, replace);
   }, [commitRoute]);
@@ -3170,6 +3193,7 @@ function AuthenticatedApp({ health, onAnonymous, initialAccentColor }: { readonl
         {route.view !== "documentation" ? null : <div className="global-actions"><button className="button button--primary" type="button" disabled={quickPending} onClick={() => quickUpload.current?.click()}>{quickPending ? "Uploading…" : "Quick upload"}</button><input ref={quickUpload} aria-label="Choose files for quick upload" className="visually-hidden-input" type="file" multiple onChange={(event) => void runQuickUpload([...event.target.files ?? []])} /></div>}
         {route.view === "dashboard" ? <DashboardView preferences={preferences} setPreferences={setPreferences} addNotice={addNotice} /> : null}
         {route.view === "files" ? <FilesView initialFolderId={ROOT_RESOURCE_ID} title="Storage" routeSegments={route.folderSegments} onPathChange={navigateFilesPath} shareCapabilities={shareCapabilities} onShareCapabilityCreated={rememberShareCapability} onShareCapabilityRevoked={forgetShareCapability} addNotice={addNotice} onUnauthorized={onAnonymous} /> : null}
+        {route.view === "storage-new" ? <FilesView initialFolderId={ROOT_RESOURCE_ID} title="Storage" presentation="new" routeSegments={route.folderSegments} onPathChange={navigateNewStoragePath} shareCapabilities={shareCapabilities} onShareCapabilityCreated={rememberShareCapability} onShareCapabilityRevoked={forgetShareCapability} addNotice={addNotice} onUnauthorized={onAnonymous} /> : null}
         {route.view === "inbox" ? <InHouseDropView health={health.gateway} routeSegments={route.folderSegments} onPathChange={navigateInboxPath} shareCapabilities={shareCapabilities} onShareCapabilityCreated={rememberShareCapability} onShareCapabilityRevoked={forgetShareCapability} addNotice={addNotice} onUnauthorized={onAnonymous} /> : null}
         {route.view === "shared" ? <SharedView shareCapabilities={shareCapabilities} onShareCapabilityCreated={rememberShareCapability} onShareCapabilityRevoked={forgetShareCapability} addNotice={addNotice} onAnonymous={onAnonymous} /> : null}
         {route.view === "synchronization" ? <SynchronizationView addNotice={addNotice} /> : null}

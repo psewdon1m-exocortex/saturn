@@ -191,6 +191,32 @@ describe("DeviceService", () => {
     await expect(service.heartbeat(`Bearer ${redeemed.token}`, "windows", "0.2.1", heartbeatAt)).resolves.toMatchObject({ clientVersion: "0.2.1", lastSeenAt: heartbeatAt });
   });
 
+  it.each(["windows_sync", "pluto"] as const)("reports %s online using Saturn time, independently of registration and copying", async (kind) => {
+    const enrollment = kind === "pluto" ? await service.createPlutoEnrollment("Outside", now) : await service.createWindowsEnrollment("Office", now);
+    expect(enrollment.device).toMatchObject({ state: "active", online: false });
+    const redeemed = kind === "pluto" ? await service.redeemPlutoEnrollment(enrollment.code, "test", now) : await service.redeemWindowsEnrollment(enrollment.code, "test", now);
+    expect(redeemed.device.online).toBe(true);
+    const windowMs = kind === "pluto" ? 60_000 : 360_000;
+    expect(await service.listDevices(0, 100, new Date(now.getTime() + windowMs - 1))).toMatchObject([{ online: true }]);
+    const staleAt = new Date(now.getTime() + windowMs);
+    expect(await service.listDevices(0, 100, staleAt)).toMatchObject([{ state: "active", online: false }]);
+    const heartbeat = kind === "pluto"
+      ? await service.plutoHeartbeat(`Bearer ${redeemed.token}`, "test", { enabled: false, intervalSeconds: 86400, uploadedFiles: 0 }, staleAt)
+      : await service.heartbeat(`Bearer ${redeemed.token}`, "windows", "test", staleAt);
+    expect(heartbeat).toMatchObject({ online: true, lastSeenAt: staleAt });
+    expect(await service.listDevices(0, 100, staleAt)).toMatchObject([{ online: true }]);
+    expect(await service.revokeDevice(redeemed.device.id, staleAt)).toMatchObject({ state: "revoked", online: false });
+    expect(await service.listDevices(0, 100, staleAt)).toMatchObject([{ state: "revoked", online: false }]);
+  });
+
+  it("does not report an expired credential online even when its heartbeat is recent", async () => {
+    const enrollment = await service.createWindowsEnrollment("Expires", now);
+    const redeemed = await service.redeemWindowsEnrollment(enrollment.code, "test", now);
+    const expiresAt = new Date(now.getTime() + 1_000);
+    expect(await service.updateDevice(redeemed.device.id, { expiresAt }, now)).toMatchObject({ online: true });
+    expect(await service.listDevices(0, 100, expiresAt)).toMatchObject([{ online: false }]);
+  });
+
   it("isolates two Windows connections, including every DAV mutation and their root folders", async () => {
     const first = await service.createWindowsEnrollment("Office PC", now);
     const second = await service.createWindowsEnrollment("Домашний ПК", now);
