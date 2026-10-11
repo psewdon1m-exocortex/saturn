@@ -85,7 +85,7 @@ async function publicShareRequest<T>(token: string, relativePath = "", options: 
 }
 
 export const api = {
-  publicAppearance: () => request<{ readonly accentColor: string }>("/auth/public-appearance"),
+  publicAppearance: (signal?: AbortSignal) => request<{ readonly accentColor: string }>("/auth/public-appearance", signal === undefined ? {} : { signal }),
   session: () => request<{ readonly state: string; readonly expiresAt?: string }>("/auth/session"),
   login: (accessKey: string) => request<{ readonly state: string }>("/auth/login", {
     method: "POST",

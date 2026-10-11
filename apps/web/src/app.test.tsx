@@ -69,6 +69,79 @@ function overview() {
   };
 }
 
+describe("startup appearance", () => {
+  it.each([false, true])("shows the selected accent without resetting it when the existing session is authenticated=%s", async (authenticated) => {
+    window.history.replaceState({}, "", "/files");
+    let resolveAppearance: (response: Response) => void = () => { throw new Error("Appearance request was not started"); };
+    let resolvePreferences: (response: Response) => void = () => { throw new Error("Preferences request was not started"); };
+    const appearance = new Promise<Response>((resolve) => { resolveAppearance = resolve; });
+    const ownerAppearance = new Promise<Response>((resolve) => { resolvePreferences = resolve; });
+    const selectedAccent = "#f0e68c";
+    const root = { id: "00000000-0000-7000-8000-000000000001", type: "folder", name: "root", storagePath: "", sizeBytes: 0, status: "active", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = requestUrl(input);
+      if (url.endsWith("/auth/public-appearance")) return appearance;
+      if (url.endsWith("/auth/preferences")) return ownerAppearance;
+      if (url.endsWith("/auth/session")) return authenticated ? json({ state: "authenticated" }) : json({ code: "unauthorized" }, 401);
+      if (url.endsWith("/auth/login")) return json({ state: "authenticated" });
+      if (url.endsWith("/public/reachability")) return json({ status: "ready" });
+      if (url.includes("/folders/resolve?")) return json([root]);
+      if (url.includes("/children")) return json([]);
+      if (url.includes("/resources/")) return json(root);
+      return json({});
+    }));
+    render(<App />);
+
+    expect(screen.getByRole("status").textContent).toBe("Opening Saturn…");
+    expect(document.querySelector(".login-view, .app-shell")).toBeNull();
+    await act(async () => { resolveAppearance(json({ accentColor: selectedAccent })); });
+    if (!authenticated) {
+      const field = await screen.findByLabelText("Access Key");
+      expect(document.documentElement.style.getPropertyValue("--accent")).toBe(selectedAccent);
+      fireEvent.change(field, { target: { value: "fixture-owner-key" } });
+      fireEvent.click(screen.getByRole("button", { name: "Enter service" }));
+    }
+    await screen.findByRole("navigation", { name: "Primary" });
+    expect(document.documentElement.style.getPropertyValue("--accent")).toBe(selectedAccent);
+    await act(async () => { resolvePreferences(json(preferences({ accentColor: selectedAccent }))); });
+    expect(document.documentElement.style.getPropertyValue("--accent")).toBe(selectedAccent);
+    expect(window.localStorage.length + window.sessionStorage.length).toBe(0);
+  });
+
+  it.each([200, 503])("keeps the login available when public appearance is invalid or unavailable (HTTP %s)", async (status) => {
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = requestUrl(input);
+      if (url.endsWith("/auth/public-appearance")) return json({ accentColor: "invalid" }, status);
+      if (url.endsWith("/auth/session")) return json({ code: "unauthorized" }, 401);
+      return json({ status: "ready" });
+    }));
+    render(<App />);
+    expect(await screen.findByLabelText("Access Key")).toBeTruthy();
+    expect(document.documentElement.style.getPropertyValue("--accent")).toBe("#00a8ff");
+  });
+
+  it("opens the login after a stalled appearance request and ignores its late response", async () => {
+    vi.useFakeTimers();
+    let resolveAppearance: (response: Response) => void = () => { throw new Error("Appearance request was not started"); };
+    const appearance = new Promise<Response>((resolve) => { resolveAppearance = resolve; });
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = requestUrl(input);
+      if (url.endsWith("/auth/public-appearance")) return appearance;
+      if (url.endsWith("/auth/session")) return json({ code: "unauthorized" }, 401);
+      return json({ status: "ready" });
+    }));
+    try {
+      render(<App />);
+      expect(document.querySelector(".login-view")).toBeNull();
+      await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+      expect(screen.getByLabelText("Access Key")).toBeTruthy();
+      expect(document.documentElement.style.getPropertyValue("--accent")).toBe("#00a8ff");
+      await act(async () => { resolveAppearance(json({ accentColor: "#f0e68c" })); });
+      expect(document.documentElement.style.getPropertyValue("--accent")).toBe("#00a8ff");
+    } finally { cleanup(); vi.useRealTimers(); }
+  });
+});
+
 describe("owner Saturn UI", () => {
   it("keeps the selected context-menu action focused across storage rerenders", async () => {
     window.history.replaceState({}, "", "/files");
@@ -112,13 +185,13 @@ describe("owner Saturn UI", () => {
     vi.stubGlobal("fetch", fetchMock);
     render(<App />);
     const field = await screen.findByLabelText("Access Key");
-    expect(document.querySelector(".login-brand__icon img")?.getAttribute("src")).toBe("/saturn-planet-on-black.png");
+    expect(document.querySelector(".login-brand__icon img")?.getAttribute("src")).toMatch(/saturn-logo\.png$/);
     expect(field).toHaveProperty("value", "");
     fireEvent.change(field, { target: { value: "temporary-owner-proof" } });
     expect(field).toHaveProperty("value", "temporary-owner-proof");
     fireEvent.click(screen.getByRole("button", { name: "Enter service" }));
     expect(await screen.findByRole("heading", { name: "dashboard" })).toBeTruthy();
-    expect(document.querySelector(".sidebar__planet")?.getAttribute("src")).toBe("/saturn-favicon.png");
+    expect(document.querySelector(".sidebar__logo")?.getAttribute("src")).toMatch(/saturn-logo\.png$/);
     expect(await screen.findByRole("heading", { name: "Tasks" })).toBeTruthy();
     expect(await screen.findByText("archive.bin")).toBeTruthy();
     expect(screen.getByText("50.0%")).toBeTruthy();
@@ -886,12 +959,12 @@ describe("owner Saturn UI", () => {
     expect(await screen.findByText("archive", { selector: ".breadcrumbs span" })).toBeTruthy();
   });
 
-  it.each(["host_service", "service", "volt", "mastermind", "windows", "pluto"] as const)("requires confirmation before revoking a %s pipeline and preserves it on cancel", async (kind) => {
+  it.each(["host_service", "window", "service", "volt", "mastermind", "windows", "pluto"] as const)("requires confirmation before revoking a %s pipeline and preserves it on cancel", async (kind) => {
     window.history.replaceState({}, "", "/synchronization");
     const now = new Date().toISOString();
     const id = crypto.randomUUID();
     const name = `${kind} selected connection`;
-    const service = { id, name, namespaceSlug: kind === "host_service" ? "updater" : "chronos", deploymentId: "vps-1", pipelineKind: kind, state: "active", storedQuotaBytes: 1024, usage: { storedBytes: 0 } };
+    const service = { id, name, namespaceSlug: kind === "host_service" ? "updater" : kind === "window" ? "window" : "chronos", deploymentId: "vps-1", pipelineKind: kind === "window" ? "host_service" : kind, state: "active", storedQuotaBytes: 1024, usage: { storedBytes: 0 } };
     const isDevice = kind === "windows" || kind === "pluto";
     const device = { id, name, deviceKind: kind === "pluto" ? "pluto" : "windows_sync", state: "active", scopeIds: [SYNC_RESOURCE_ID], rights: { read: true, write: true, move: true, delete: true }, createdAt: now, updatedAt: now };
     let revoked = false;
@@ -910,6 +983,11 @@ describe("owner Saturn UI", () => {
     render(<App />);
 
     const connection = await screen.findByRole("article", { name });
+    if (kind === "window") {
+      expect(within(connection).getByText("Window recovery")).toBeTruthy();
+      expect(within(connection).getByText("Manual recovery · Updater TUI")).toBeTruthy();
+      expect(connection.textContent).not.toContain("schedule pending");
+    }
     if (!isDevice) expect(within(connection).getByText("Host name: vps-1")).toBeTruthy();
     const deleteRequests = () => fetchMock.mock.calls.filter(call => call[1]?.method === "DELETE");
     fireEvent.click(within(connection).getByRole("button", { name: "Revoke" }));
@@ -1011,7 +1089,7 @@ describe("owner Saturn UI", () => {
     expect(screen.getByText("Pluto agents").parentElement?.textContent).toContain("1 registered");
   });
 
-  it("manages the six synchronization cards using one-time setup codes without another Access Key", async () => {
+  it.each(["updater", "window"])("manages the six synchronization cards with a %s host setup code without another Access Key", async (hostComponent) => {
     window.history.replaceState({}, "", "/synchronization");
     const now = new Date().toISOString();
     const serviceId = crypto.randomUUID();
@@ -1061,11 +1139,12 @@ describe("owner Saturn UI", () => {
     expect(within(initialServiceCard).getByText("Host name: vps-1")).toBeTruthy();
     expect(screen.queryByLabelText("Connection name")).toBeNull();
     expect(screen.queryByLabelText("Server ID")).toBeNull();
+    fireEvent.change(screen.getByLabelText("Type"), { target: { value: `host_${hostComponent}` } });
     fireEvent.change(screen.getByLabelText("Host name"), { target: { value: "edge-1" } });
     fireEvent.click(screen.getByRole("button", { name: "Create setup code" }));
     await screen.findByText("new-pipeline-code");
     const hostRequest = fetchMock.mock.calls.find((call) => requestUrl(call[0]).endsWith("/backup-services/enrollments") && call[1]?.method === "POST");
-    expect(jsonRequestBody(hostRequest?.[1])).toMatchObject({ name: "updater · edge-1", namespaceSlug: "updater", deploymentId: "edge-1", pipelineKind: "host_service", requireEncryption: true });
+    expect(jsonRequestBody(hostRequest?.[1])).toMatchObject({ name: `${hostComponent} · edge-1`, namespaceSlug: hostComponent, deploymentId: "edge-1", pipelineKind: "host_service", requireEncryption: true });
     fireEvent.change(screen.getByLabelText("Type"), { target: { value: "windows" } });
     expect(screen.queryByLabelText("Host name")).toBeNull();
     fireEvent.change(screen.getByLabelText("Connection name"), { target: { value: "Office PC" } });

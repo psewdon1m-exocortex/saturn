@@ -8,10 +8,11 @@ import { updateCookieHeaders } from "./update-overlay.js";
 import { request as agentRequest } from "./api";
 const policyHeaders = () => updateCookieHeaders(["vault_csrf_dev", "__Host-vault_csrf"], "X-Vault-CSRF");
 import { openSaturnUpdates } from "./update-flow.js";
-import { useCallback, useEffect, useId, useMemo, useRef, useState, type CSSProperties, type DragEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode, type SyntheticEvent } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode, type SyntheticEvent } from "react";
 import DOMPurify from "dompurify";
 import { marked } from "marked";
 import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
+import saturnLogo from "./assets/saturn-logo.png";
 import type { PDFDocumentLoadingTask, PDFDocumentProxy, RenderTask } from "pdfjs-dist";
 import { ApiError, api, downloadRecoverySnapshot, downloadUrl, dropApi, folderDownloadUrl, forgetRecoverableOwnerUpload, publicShareApi, recoverableOwnerUpload, resumeOwnerUpload, uploadDropFile, uploadFile, uploadRecoverySnapshot } from "./api.js";
 import {
@@ -46,9 +47,6 @@ import {
   type StorageConnectionStatus,
   type UpdateStatus,
 } from "./types.js";
-
-const saturnPlanetAlpha = "/saturn-favicon.png";
-const saturnPlanetOnBlack = "/saturn-planet-on-black.png";
 
 type GatewayState = "checking" | "ready" | "degraded";
 type GatewayHealth = { readonly gateway: GatewayState };
@@ -589,7 +587,7 @@ function LoginView({ health, onAuthenticated }: { readonly health: GatewayState;
       <div className="login-composition">
         <header className="login-brand" aria-labelledby="login-title">
           <h1 id="login-title" className="wordmark" aria-label="Saturn">saturn</h1>
-          <span className="login-brand__icon" aria-hidden="true"><img src={saturnPlanetOnBlack} alt="" /></span>
+          <span className="login-brand__icon" aria-hidden="true"><img src={saturnLogo} alt="" /></span>
         </header>
         <section className="login-panel" aria-labelledby="login-title">
           <div
@@ -2013,7 +2011,7 @@ function PublicShareView({ token }: { readonly token: string }) {
         <p className="share-client-footer">Shared securely with Saturn</p>
       </div> : <div className="share-client-shell">
         <header className="share-client-topbar">
-          <div className="share-client-brand" aria-label="Saturn"><img src={saturnPlanetAlpha} alt="" /><strong>saturn</strong></div>
+          <div className="share-client-brand" aria-label="Saturn"><img src={saturnLogo} alt="" /><strong>saturn</strong></div>
           <div className="share-client-status"><span>{accessLabel}</span><small>{expiryLabel}</small></div>
         </header>
         <section className="share-client-content" aria-labelledby="public-share-title">
@@ -2445,12 +2443,12 @@ const INTERNAL_PIPELINE_TYPES = [
   { namespace: "saturn", label: "Saturn" },
   { namespace: "laboratory", label: "Laboratory" },
 ] as const;
-type SynchronizationPipelineType = "host_updater" | "host_neptune" | "host_gryphon" | "host_wyvern"
+type SynchronizationPipelineType = "host_updater" | "host_neptune" | "host_gryphon" | "host_wyvern" | "host_window"
   | typeof INTERNAL_PIPELINE_TYPES[number]["namespace"] | "volt" | "mastermind" | "windows" | "pluto";
 
 function backupPipelineTypeLabel(service: BackupServiceInfo): string {
   if (service.pipelineKind === "host_service") {
-    const labels: Record<string, string> = { updater: "Updater recovery", neptune: "Neptune recovery", gryphon: "Gryphon recovery", wyvern: "Wyvern recovery" };
+    const labels: Record<string, string> = { updater: "Updater recovery", neptune: "Neptune recovery", gryphon: "Gryphon recovery", wyvern: "Wyvern recovery", window: "Window recovery" };
     return labels[service.namespaceSlug] ?? `Host recovery · ${service.namespaceSlug}`;
   }
   if (service.pipelineKind === "volt" || service.pipelineKind === "mastermind") {
@@ -2486,10 +2484,10 @@ function NeptunePipelineRow({ service, agent, pending, onSetup, onRevoke }: {
   const archiveLastSuccess = typeof agent?.observed.archive["lastSuccessAt"] === "string" ? agent.observed.archive["lastSuccessAt"] : service.usage.lastCompletedAt;
   const archiveNextRun = typeof agent?.observed.archive["nextRunAt"] === "string" ? agent.observed.archive["nextRunAt"] : undefined;
   return <article className="pipeline-connection-card fleet-agent" aria-label={service.name}>
-    <div className="fleet-agent__summary"><span className="pipeline-identity__label">Connection name</span><strong>{service.name}</strong><span className="pipeline-identity__type">{backupPipelineTypeLabel(service)}</span><span>Host name: {service.deploymentId}</span><span>Namespace: {service.namespaceSlug} · {service.state} · {formatBytes(service.usage.storedBytes)}/{formatBytes(service.storedQuotaBytes)} stored</span><span>{heartbeat} · {applied ? "schedule applied" : "schedule pending"}{versionPending ? ` · update ${agent.desired.version} pending` : ""}</span><span>{service.archivePipeline === false ? "Archive pipeline not selected" : archiveLastSuccess === undefined ? "no successful ZIP reported" : `last ZIP ${new Date(archiveLastSuccess).toLocaleString()}`}{archiveNextRun === undefined ? "" : ` · next ${new Date(archiveNextRun).toLocaleString()}`}{archiveLastAttempt === undefined || archiveLastAttempt === archiveLastSuccess ? "" : ` · last attempt ${new Date(archiveLastAttempt).toLocaleString()}`}</span>{agent?.observed.latestError === undefined ? null : <span className="danger-text">{agent.observed.latestError}</span>}</div>
-    <p>Automatic backup schedules are controlled from each service’s Settings → Backup. This panel shows observed state and manages identity, enrollment and access.</p>
+    <div className="fleet-agent__summary"><span className="pipeline-identity__label">Connection name</span><strong>{service.name}</strong><span className="pipeline-identity__type">{backupPipelineTypeLabel(service)}</span><span>Host name: {service.deploymentId}</span><span>Namespace: {service.namespaceSlug} · {service.state} · {formatBytes(service.usage.storedBytes)}/{formatBytes(service.storedQuotaBytes)} stored</span>{service.pipelineKind === "host_service" ? <span>Manual recovery · Updater TUI</span> : <span>{heartbeat} · {applied ? "schedule applied" : "schedule pending"}{versionPending ? ` · update ${agent.desired.version} pending` : ""}</span>}<span>{service.archivePipeline === false ? "Archive pipeline not selected" : archiveLastSuccess === undefined ? service.pipelineKind === "host_service" ? "no successful archive reported" : "no successful ZIP reported" : `last ${service.pipelineKind === "host_service" ? "archive" : "ZIP"} ${new Date(archiveLastSuccess).toLocaleString()}`}{archiveNextRun === undefined ? "" : ` · next ${new Date(archiveNextRun).toLocaleString()}`}{archiveLastAttempt === undefined || archiveLastAttempt === archiveLastSuccess ? "" : ` · last attempt ${new Date(archiveLastAttempt).toLocaleString()}`}</span>{agent?.observed.latestError === undefined ? null : <span className="danger-text">{agent.observed.latestError}</span>}</div>
+    <p>{service.pipelineKind === "host_service" ? "Create and restore recovery archives from the host’s Updater TUI. This panel manages identity, enrollment and access." : "Automatic backup schedules are controlled from each service’s Settings → Backup. This panel shows observed state and manages identity, enrollment and access."}</p>
     <div className="inline-actions"><button className="button" type="button" disabled={pending || service.state !== "active"} onClick={() => void onSetup(service.id)}>Setup code</button><button className="button button--danger" type="button" disabled={pending || service.state !== "active"} onClick={onRevoke}>Revoke</button></div>
-    {service.archivePipeline === false ? null : <details className="fleet-agent__runs"><summary>Recent ZIP runs ({runs.length})</summary>{runs.length === 0 ? <p className="empty-state">No runs recorded.</p> : <div className="compact-list">{runs.map((run) => <div className="compact-row" key={run.id}><span>{run.state} · {new Date(run.updatedAt).toLocaleString()} · {formatBytes(run.expectedSize)}</span><span>{run.receipt?.logicalPath ?? run.failureCode ?? run.filename}</span></div>)}</div>}</details>}
+    {service.archivePipeline === false ? null : <details className="fleet-agent__runs"><summary>Recent {service.pipelineKind === "host_service" ? "archive" : "ZIP"} runs ({runs.length})</summary>{runs.length === 0 ? <p className="empty-state">No runs recorded.</p> : <div className="compact-list">{runs.map((run) => <div className="compact-row" key={run.id}><span>{run.state} · {new Date(run.updatedAt).toLocaleString()} · {formatBytes(run.expectedSize)}</span><span>{run.receipt?.logicalPath ?? run.failureCode ?? run.filename}</span></div>)}</div>}</details>}
   </article>;
 }
 
@@ -2512,7 +2510,7 @@ function SynchronizationView({ addNotice }: { readonly addNotice: (kind: Notice[
   useEffect(() => { void Promise.all([loadAgents(), loadServices(), loadDevices()]); }, []);
   useEffect(() => { const timer = window.setInterval(() => { void Promise.all([loadAgents(), loadDevices()]); }, 15_000); return () => window.clearInterval(timer); }, []);
   const internalService = INTERNAL_PIPELINE_TYPES.find(type => type.namespace === pipeline);
-  const hostComponent = pipeline.startsWith("host_") ? pipeline.slice(5) as "updater" | "neptune" | "gryphon" | "wyvern" : undefined;
+  const hostComponent = pipeline.startsWith("host_") ? pipeline.slice(5) as "updater" | "neptune" | "gryphon" | "wyvern" | "window" : undefined;
   const createService = async (event: SyntheticEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (pipeline === "windows" || pipeline === "pluto" ? !connectionName : !hostName) return;
@@ -2581,7 +2579,7 @@ function SynchronizationView({ addNotice }: { readonly addNotice: (kind: Notice[
       <UniversalCard ordinal={1} title="Add pipeline" className="synchronization-card">
         <form className="backup-service-form synchronization-create" onSubmit={event => void createService(event)}>
           <label className="pipeline-create__type">Type<select aria-label="Type" value={pipeline} onChange={event => { setPipeline(event.target.value as typeof pipeline); setEnrollments([]); }}>
-            <optgroup label="Host recovery"><option value="host_updater">Updater recovery</option><option value="host_neptune">Neptune recovery</option><option value="host_gryphon">Gryphon recovery</option><option value="host_wyvern">Wyvern recovery</option></optgroup>
+            <optgroup label="Host recovery"><option value="host_updater">Updater recovery</option><option value="host_neptune">Neptune recovery</option><option value="host_gryphon">Gryphon recovery</option><option value="host_wyvern">Wyvern recovery</option><option value="host_window">Window recovery</option></optgroup>
             <optgroup label="Service pipelines">{INTERNAL_PIPELINE_TYPES.map(type => <option key={type.namespace} value={type.namespace}>{type.label}</option>)}<option value="volt">Volt</option><option value="mastermind">Mastermind</option></optgroup>
             <option className="pipeline-type-option--windows" value="windows">Windows files · Neptune client</option>
             <optgroup label="Outdoor files"><option value="pluto">Pluto · Linux files and folders</option></optgroup>
@@ -3008,10 +3006,10 @@ function SettingsView({ preferences, setPreferences, addNotice, onAnonymous }: {
 }
 
 function SidebarBrand() {
-  return <div className="sidebar__brand"><img className="sidebar__planet" src={saturnPlanetAlpha} alt="" aria-hidden="true" /><strong>saturn</strong></div>;
+  return <div className="sidebar__brand"><img className="sidebar__logo" src={saturnLogo} alt="" aria-hidden="true" /><strong>saturn</strong></div>;
 }
 
-function AuthenticatedApp({ health, onAnonymous }: { readonly health: GatewayHealth; readonly onAnonymous: () => void }) {
+function AuthenticatedApp({ health, onAnonymous, initialAccentColor }: { readonly health: GatewayHealth; readonly onAnonymous: () => void; readonly initialAccentColor: string }) {
   const [route, setRoute] = useState<OwnerRoute>(() => ownerRouteFromPathname(window.location.pathname));
   const [mobileMenu, setMobileMenu] = useState(false);
   const [narrowViewport, setNarrowViewport] = useState(() => typeof window.matchMedia === "function" && window.matchMedia("(max-width: 720px)").matches);
@@ -3021,7 +3019,7 @@ function AuthenticatedApp({ health, onAnonymous }: { readonly health: GatewayHea
   const [navigationSaving, setNavigationSaving] = useState(false);
   const [navigationAnnouncement, setNavigationAnnouncement] = useState("");
   const [notices, setNotices] = useState<readonly Notice[]>([]);
-  const [preferences, setPreferences] = useState<Omit<OwnerPreferences, "updatedAt">>(defaultPreferences);
+  const [preferences, setPreferences] = useState<Omit<OwnerPreferences, "updatedAt">>(() => ({ ...defaultPreferences, accentColor: initialAccentColor }));
   const [shareCapabilities, setShareCapabilities] = useState<Readonly<Record<string, string>>>({});
   const quickUpload = useRef<HTMLInputElement>(null);
   const mobileMenuButton = useRef<HTMLButtonElement>(null);
@@ -3058,10 +3056,10 @@ function AuthenticatedApp({ health, onAnonymous }: { readonly health: GatewayHea
     window.addEventListener("keydown", closeOnEscape);
     return () => window.removeEventListener("keydown", closeOnEscape);
   }, [mobileMenu]);
-  useEffect(() => {
+  useLayoutEffect(() => {
     const root = document.documentElement;
     root.style.setProperty("--accent", preferences.accentColor);
-  }, [preferences]);
+  }, [preferences.accentColor]);
   const commitRoute = useCallback((next: OwnerRoute, replace = false) => {
     window.history[replace ? "replaceState" : "pushState"]({}, "", ownerRouteUrl(next));
     setRoute(next);
@@ -3184,7 +3182,7 @@ function AuthenticatedApp({ health, onAnonymous }: { readonly health: GatewayHea
   );
 }
 
-function OwnerApp() {
+function OwnerApp({ initialAccentColor }: { readonly initialAccentColor: string }) {
   const health = useGatewayHealth();
   const [auth, setAuth] = useState<"checking" | "anonymous" | "authenticated">("checking");
   useEffect(() => {
@@ -3194,7 +3192,7 @@ function OwnerApp() {
   }, []);
   if (auth === "checking") return <main className="boot-state" role="status">Opening Saturn…</main>;
   if (auth === "anonymous") return <LoginView health={health.gateway} onAuthenticated={() => setAuth("authenticated")} />;
-  return <AuthenticatedApp health={health} onAnonymous={() => setAuth("anonymous")} />;
+  return <AuthenticatedApp health={health} onAnonymous={() => setAuth("anonymous")} initialAccentColor={initialAccentColor} />;
 }
 
 function DropApp() {
@@ -3202,15 +3200,29 @@ function DropApp() {
 }
 
 export function App() {
+  const [initialAccentColor, setInitialAccentColor] = useState<string>();
   useEffect(() => {
     let active = true;
-    void api.publicAppearance().then((appearance) => {
-      if (active && /^#[0-9a-fA-F]{6}$/.test(appearance.accentColor)) document.documentElement.style.setProperty("--accent", appearance.accentColor);
-    }).catch(() => undefined);
-    return () => { active = false; };
+    const controller = new AbortController();
+    const finish = (accentColor: string) => {
+      if (!active) return;
+      active = false;
+      window.clearTimeout(timeout);
+      document.documentElement.style.setProperty("--accent", accentColor);
+      setInitialAccentColor(accentColor);
+    };
+    const timeout = window.setTimeout(() => {
+      controller.abort();
+      finish(defaultPreferences.accentColor);
+    }, 5_000);
+    void api.publicAppearance(controller.signal).then((appearance) => {
+      finish(/^#[0-9a-fA-F]{6}$/.test(appearance.accentColor) ? appearance.accentColor : defaultPreferences.accentColor);
+    }).catch(() => finish(defaultPreferences.accentColor));
+    return () => { active = false; window.clearTimeout(timeout); controller.abort(); };
   }, []);
+  if (initialAccentColor === undefined) return <main className="boot-state" role="status">Opening Saturn…</main>;
   const route = window.location.pathname.replace(/\/+$/, "");
   if (route === "/drop") return <DropApp />;
   const share = /^\/s\/([A-Za-z0-9_-]{43})$/.exec(route);
-  return share?.[1] === undefined ? <OwnerApp /> : <PublicShareView token={share[1]} />;
+  return share?.[1] === undefined ? <OwnerApp initialAccentColor={initialAccentColor} /> : <PublicShareView token={share[1]} />;
 }

@@ -15,6 +15,7 @@ export function createPipelineMockState() {
     { namespace: "neptune", kind: "host_service", name: "Neptune · mock-vps-1", scenario: "ready" },
     { namespace: "gryphon", kind: "host_service", name: "Gryphon · mock-vps-2", scenario: "offline" },
     { namespace: "wyvern", kind: "host_service", name: "Wyvern · mock-vps-2", scenario: "pending" },
+    { namespace: "window", kind: "host_service", name: "Window · mock-vps-1", scenario: "ready" },
     { namespace: "volt", kind: "volt", name: "Volt · archives + mirror", scenario: "ready", mirror: "volt" },
     { namespace: "mastermind", kind: "mastermind", name: "Mastermind · mirror only", scenario: "ready", mirror: "mastermind", archive: false },
     { namespace: "chronos", kind: "service", name: "Chronos · archives only", scenario: "error" },
@@ -41,8 +42,8 @@ export function createPipelineMockState() {
   return {
     services, devices,
     agents(): NeptuneAgentInfo[] {
-      return services.map((service, index) => {
-        const spec = specs[index];
+      return services.filter(service => service.namespaceSlug !== "window").map((service, index) => {
+        const spec = specs.find(spec => spec.namespace === service.namespaceSlug);
         const online = spec?.scenario !== "offline" && service.state === "active";
         return { serviceId: service.id, desired: { revision: 4, archiveEnabled: service.archivePipeline !== false,
           archiveIntervalHours: 24, mirrorEnabled: service.mirrorRoot !== undefined, mirrorIntervalMinutes: 15 },

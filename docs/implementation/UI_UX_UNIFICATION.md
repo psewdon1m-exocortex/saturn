@@ -22,13 +22,19 @@ generic padded panel, so the visible composition, hierarchy and control geometry
 were materially different.
 
 The operator explicitly requested adoption of the updated Part 01 login contract.
-Saturn therefore uses its beige watercolor planet on black in the `100x100px`
-brand box, keeps the wordmark and icon outside the panel, and leaves only reachability, one empty
+Saturn therefore keeps its image in the `100x100px` brand box, keeps the
+wordmark and icon outside the panel, and leaves only reachability, one empty
 masked Access Key control and one submit action inside the panel. The change is
 limited to web presentation and focus/error handling: owner-authentication API,
 cookie sessions, rate limiting and storage boundaries are unchanged. Rollback is
 a front-end revert. Acceptance requires component tests plus browser geometry,
 responsive, keyboard, rejected-key, reduced-motion and console checks.
+
+The September acceptance used the beige watercolor planet. On 2026-10-11,
+the operator explicitly replaced Saturn's artwork with
+`.src/saturn-devouring-his-son.png`; its full square image now supplies the
+login, sidebar, public-share header and browser icons. Export details are in
+`BRANDING_SATURN.md`. This asset change does not extend to other services.
 
 ## Material-divergence decisions — existing sidebar
 
@@ -81,6 +87,45 @@ that a single file stays at or below the 90% refusal watermark, and shows the
 authoritative capacity returned by the Gateway. Saving affects both owner and
 Drop uploads without a process restart; environment values remain bootstrap
 fallbacks only.
+
+## Startup accent — operator request, 2026-10-11
+
+The startup screen uses neutral text while Saturn obtains the operator's
+configured accent from `/api/v1/auth/public-appearance`. The validated color is
+applied before the login, owner shell, Drop Point or public-share view mounts.
+The owner shell initializes its appearance from that same color while the full
+preferences load, and applies subsequent saved accent changes in a layout
+effect before browser paint. Mounting the shell therefore does not reset the
+selected color to the blue baseline.
+
+The appearance request is cancellable and bounded to five seconds. An invalid,
+failed or stalled response opens the UI with the baseline color; a late response
+cannot overwrite that startup decision. The current server setting supplies the
+initial appearance without relying on browser storage.
+
+Verification: the production web build, lint for the changed TypeScript files
+and all 78 web tests passed. Isolated Chromium sampled animation frames at
+1440 and 390 px with delayed public appearance and owner preferences responses.
+Login, existing sessions, the login-to-owner transition, Drop Point and both
+public-share variants used the selected accent from their first rendered frame;
+the initial loading text stayed neutral. No uncaught browser errors occurred.
+
+## Visual scrollbar suppression — operator request, 2026-10-11
+
+Saturn hides native scrollbar tracks and thumbs throughout its web UI, including
+the page viewport and nested scrolling areas such as Trash, Storage, Settings
+logs, previews and dialogs. The shared stylesheet uses `scrollbar-width: none`
+and the WebKit scrollbar pseudo-element. Existing overflow rules, scrollable
+content and native wheel, trackpad, touch and keyboard behavior remain intact.
+The operator requested this change specifically for Saturn; it does not change
+the presentation policy of other services.
+
+Verification: the production web build and all 73 web tests passed. Isolated
+Chromium checked all primary destinations, Documentation, login, Drop Point
+and both public-share variants at 1440, 390 and 320 px. A 100-record Trash list
+retained wheel, Page Down and mobile swipe scrolling with its last Restore
+action reachable; a 100-event nested log viewport retained keyboard scrolling
+and had no reserved scrollbar gutter. No uncaught browser errors occurred.
 
 ## Input state
 

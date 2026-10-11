@@ -40,7 +40,10 @@ afterAll(async () => {
 describe("development pipeline preview", () => {
   it("has all pipeline groups, capability choices, offline and pending agents, and isolated Windows folders", () => {
     const state = createPipelineMockState();
-    expect(state.services.filter(service => service.pipelineKind === "host_service")).toHaveLength(4);
+    expect(state.services.filter(service => service.pipelineKind === "host_service")).toHaveLength(5);
+    const window = state.services.find(service => service.namespaceSlug === "window");
+    expect(window).toMatchObject({ name: "MOCK · Window · mock-vps-1", requireEncryption: true });
+    expect(state.agents().some(agent => agent.serviceId === window?.id)).toBe(false);
     expect(state.services.find(service => service.pipelineKind === "volt")).toMatchObject({ archivePipeline: true, mirrorRoot: "volt" });
     expect(state.services.find(service => service.pipelineKind === "mastermind")).toMatchObject({ archivePipeline: false, mirrorRoot: "mastermind" });
     expect(state.agents().filter(agent => agent.observed.online)).toHaveLength(6);
@@ -58,7 +61,7 @@ describe("development pipeline preview", () => {
     expect(response.headers.get("X-Saturn-Dev-Mock")).toBe("pipelines");
     const services = await response.json() as { id: string; name?: string }[];
     expect(services[0]?.id).toBe("real-service");
-    expect(services.filter(service => service.name?.startsWith("MOCK ·"))).toHaveLength(7);
+    expect(services.filter(service => service.name?.startsWith("MOCK ·"))).toHaveLength(8);
   });
 
   it("requires CSRF for mock mutations and never forwards them to the real control plane", async () => {

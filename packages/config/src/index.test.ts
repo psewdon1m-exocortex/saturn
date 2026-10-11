@@ -24,6 +24,55 @@ const valid = {
 };
 
 describe("loadEnvironment", () => {
+  it.each(["test", "production"] as const)("loads a 0.2.6 recovered configuration on a fresh %s process", (environment) => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "saturn-legacy-config-"));
+    try {
+      const password = path.join(directory, "database-password");
+      fs.writeFileSync(password, "legacy-fixture-database-password", { mode: 0o600 });
+      const input = {
+        ...valid, NODE_ENV: environment, STORAGE_RUNTIME_CONFIG_DIR: directory,
+        PG_COMMAND_TIMEOUT_MS: "5000", PG_DUMP_IDLE_TIMEOUT_MS: "3000",
+        ...(environment === "production" ? {
+          PUBLIC_ORIGIN: "https://drive.acme.test", DATABASE_URL: "postgres://vault@postgres/vault",
+          DATABASE_PASSWORD_FILE: password, STORAGE_AUTH_MODE: "private_key_file",
+          STORAGE_PASSWORD_FILE: "", STORAGE_PRIVATE_KEY_FILE: path.join(directory, "storage-key"),
+        } : {}),
+      };
+      const target = loadEnvironment(input);
+      const data = publicConfig(loadEnvironment({ ...input, TRASH_RETENTION_MS: "86400000" }));
+      const storage = data.storage as Record<string, unknown>;
+      const recovery = data.recovery as Record<string, unknown>;
+      delete storage.requireFsync;
+      delete recovery.commandTimeoutMs;
+      delete recovery.dumpIdleTimeoutMs;
+      // This file survives a service update and is read by API, worker and the rollback CLI.
+      fs.writeFileSync(path.join(directory, "public-recovery.json"), JSON.stringify(data));
+      const restored = loadEnvironment(input);
+      expect(restored.limits.trashRetentionMs).toBe(86400000);
+      expect(restored.storage.requireFsync).toBe(environment === "production");
+      expect(restored.recovery.commandTimeoutMs).toBe(5000);
+      expect(restored.recovery.dumpIdleTimeoutMs).toBe(3000);
+      expect(restored.storage.privateKeyFile).toBe(target.storage.privateKeyFile);
+      expect(validateRecoveredConfiguration(data, target, input).limits.trashRetentionMs).toBe(86400000);
+      writeRecoveredConfiguration(data, target);
+      expect(loadEnvironment(input).storage.requireFsync).toBe(environment === "production");
+    } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+  });
+
+  it("continues rejecting missing required fields and malformed new recovery fields", () => {
+    const target = loadEnvironment(valid);
+    const data = publicConfig(target);
+    const missing = { ...data };
+    delete missing.publicOrigin;
+    expect(() => validateRecoveredConfiguration(missing, target, valid)).toThrow("Invalid recovery configuration: publicOrigin");
+    expect(() => validateRecoveredConfiguration({ ...data, storage: { ...data.storage as object, requireFsync: null } }, target, valid))
+      .toThrow("Invalid recovery configuration: storage.requireFsync");
+    expect(() => validateRecoveredConfiguration({ ...data, recovery: { ...data.recovery as object, commandTimeoutMs: "5000" } }, target, valid))
+      .toThrow("Invalid recovery configuration: recovery.commandTimeoutMs");
+    expect(() => validateRecoveredConfiguration({ ...data, recovery: { ...data.recovery as object, dumpIdleTimeoutMs: -1 } }, target, valid))
+      .toThrow("Invalid Saturn");
+  });
+
   it("restores every public setting on a fresh process while retaining target host trust paths", () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "saturn-config-restore-"));
     try {

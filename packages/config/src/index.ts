@@ -658,6 +658,14 @@ export function recoveryConfigurationPath(config: SaturnConfig): string {
   return path.join(config.storageRuntimeConfigDirectory, "public-recovery.json");
 }
 
+// These fields are absent from 0.2.6 backups and persisted recovery overlays.
+// Keep the target's validated environment/defaults when reading that format.
+const recoveryFieldsWithTargetDefaults = new Set([
+  "storage.requireFsync",
+  "recovery.commandTimeoutMs",
+  "recovery.dumpIdleTimeoutMs",
+]);
+
 /** Local credentials, executable paths, bind addresses and deployment mode stay on the target host. */
 export function recoveredConfigurationEnvironment(value: unknown, config: SaturnConfig): Record<string, string> {
   const result: Record<string, string> = {};
@@ -668,7 +676,11 @@ export function recoveredConfigurationEnvironment(value: unknown, config: Saturn
       const record = source as Record<string, unknown>;
       const template = expected as Record<string, unknown>;
       for (const name of Object.keys(record)) if (!Object.hasOwn(template, name)) throw new Error(`Unknown recovery configuration: ${key}.${name}`);
-      for (const [name, item] of Object.entries(template)) visit(record[name], item, [...segments, name]);
+      for (const [name, item] of Object.entries(template)) {
+        const child = [...segments, name];
+        if (!Object.hasOwn(record, name) && recoveryFieldsWithTargetDefaults.has(child.join("."))) continue;
+        visit(record[name], item, child);
+      }
       return;
     }
     if (typeof source !== typeof expected || (typeof source === "number" && !Number.isFinite(source)) || (typeof source === "string" && source.length > 2048))

@@ -11,10 +11,11 @@ Normative inputs:
 - [Saturn left-menu reference](../../.src/saturn%20left%20menu.png) — exact Saturn
   composition and geometry.
 
-The Saturn-specific template is authoritative for the rail geometry and brand.
-Its transparent beige watercolor planet asset is bundled into the Web
-production build; the opaque black-background variant is reserved for the
-login composition.
+The Saturn-specific template defines the rail and navigation geometry. The
+operator's artwork replacement of 2026-10-11 supersedes its beige watercolor
+planet: `.src/saturn-devouring-his-son.png` now supplies the bundled logo, as
+documented in `BRANDING_SATURN.md`. The square image and wordmark occupy
+separate vertical areas within the existing 285 px brand region.
 
 ## Entry state
 
@@ -27,8 +28,9 @@ login composition.
 
 - fixed 250 px black desktop rail whose rightmost pixel is a continuous white
   level-one boundary;
-- template planet at its original crop, lowercase accent `saturn` wordmark and
-  no additional health row inside the rail;
+- complete artwork in a 192 × 192 px square at x=31, y=6, followed by the
+  lowercase accent `saturn` wordmark at y=212 without overlap; no additional
+  health row inside the rail;
 - primary rows start at y=285, use a 221×42 px box from x=18 to x=239 and
   display the label on the left with a stable two-digit ordinal on the right;
 - the template identities are `Dashboard 01`, `Storage 02`, reserved `03`,

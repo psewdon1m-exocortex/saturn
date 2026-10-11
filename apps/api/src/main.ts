@@ -13,6 +13,7 @@ import { DATABASE, DEVICE_SERVICE } from "./tokens.js";
 import { registerWebDav } from "./webdav.js";
 import { registerResourceReader } from "./resource-reader.js";
 import { TransferMonitorService } from "./transfer-monitor.service.js";
+import { registerRawBodyParsers } from "./raw-body-parsers.js";
 
 const config = loadEnvironment();
 const adapter = new FastifyAdapter({
@@ -39,13 +40,7 @@ for (const method of ["PROPFIND", "MKCOL", "MOVE", "COPY"]) {
   adapter.getInstance().addHttpMethod(method);
 }
 await adapter.getInstance().register(fastifyCookie as unknown as FastifyPluginCallback);
-adapter.getInstance().addContentTypeParser(
-  ["application/offset+octet-stream", "application/octet-stream", "text/plain", "application/xml", "text/xml"],
-  (request, payload, done) => {
-    void request;
-    done(null, payload);
-  },
-);
+registerRawBodyParsers(adapter.getInstance());
 const app = await NestFactory.create<NestFastifyApplication>(AppModule, adapter, { bufferLogs: true });
 app.enableShutdownHooks();
 app.setGlobalPrefix("api/v1", { exclude: ["health/live", "health/ready", "internal/gryphon/command", { path: "a/:assetId/:filename", method: RequestMethod.ALL }] });

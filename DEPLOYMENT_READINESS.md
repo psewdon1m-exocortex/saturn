@@ -6,11 +6,11 @@ and the shared-agent contracts in
 [Part 09](https://github.com/psewdon1m-exocortex/general/blob/main/PART_09_SERVICE_AGENTS_DEPLOYMENT_AND_LIFECYCLE.md) and
 [Part 10](https://github.com/psewdon1m-exocortex/general/blob/main/PART_10_SERVICE_AGENTS_UI_AND_OPERATOR_WORKFLOWS.md).
 
-Saturn 0.2.9 pins the published Updater 0.6.13 and Neptune 0.1.13 host
+Saturn 0.2.10 pins the published Updater 0.6.16 and Neptune 0.1.13 host
 artifacts. Its release qualification records the exact published Kernel 0.3.10
 machine-principal migration, resolution and revocation contract for INT-16.
 
-The 0.2.9 recovery hardening retires dead one-shot WebDAV uploads after a
+The 0.2.10 recovery hardening retires dead one-shot WebDAV uploads after a
 coordinated restart without deleting resumable, owner, Drop or recoverable
 payloads. Conditional retries revalidate the target identity and cannot replace
 a newer or trashed resource. Reconciliation scans are single-owner operations,
@@ -31,6 +31,23 @@ Populate actual Kernel/Volt bootstrap coordinates, service tokens, SFTP host fin
 Keep the Access Key and host-recovery passphrase separately from recovery files. Main-service recovery retains user settings and application data while preserving or requiring re-enrollment of external host trust. Host recovery is controlled through `sudo updater tui`: Updater, Neptune, Gryphon and Wyvern are optional independent pipelines with separate setup codes, producer identities and revoke lifecycles. Gateway stores each configured service under its own `backups/<service>/<server>` tree; an absent service needs no identity. Saturn exposes neither a helper-recovery browser form nor a proxy route. The files exclude executables, release trust keys, systemd units and head deployment environments. Install trusted software before restoring one downloaded service-scoped file. Each file fails explicitly at 128 MiB expanded or 10000 files; it never silently omits data or replaces neighboring service roots.
 
 ## Acceptance evidence
+
+`apps/api/src/host-recovery-http.integration.test.ts` runs the actual
+Nest/Fastify backup controllers with the production raw-body parsers and local
+filesystem storage. It rejects missing/unsupported chunk Content-Type with
+HTTP 415 and no accepted bytes, resumes all five host scopes, verifies exact
+stored bytes and denies a peer identity. With `UPDATER_HTTP_TEST_SOURCE` set to
+the absolute Updater checkout path, it also runs the Go client's real
+enrollment, private credential persistence, capabilities, publication, replay,
+download, checksum, decryption and isolated restore through that server.
+Run `pnpm --filter @saturn/api exec vitest run src/host-recovery-http.integration.test.ts --reporter=verbose`.
+Metadata is in-memory by default. Set `SATURN_HOST_RECOVERY_TEST_DATABASE_URL`
+to a disposable local database to exercise the real PostgreSQL repository in
+a unique migrated schema, cleaned up after the test. Both modes passed for all
+five scopes; production SFTP and remote host lifecycle remain outside this
+HTTP regression. The parser extraction
+preserves the existing accepted media types and does not require a new Saturn
+release to accept the corrected Updater publisher.
 
 The seven-area policy in .github/pre-push-gate.json is required after native CI verification. Public indexing is intentionally not applicable. For an uncommitted local review run the gate with --worktree after the native checks. Gate PASS checks policy/evidence/verification linkage; it is not a substitute for executing the integration scenarios.
 

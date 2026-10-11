@@ -35,7 +35,7 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           repository: psewdon1m-exocortex/kernel
-          ref: f0edf9b3d8363c9d00432f7c01614e62e62b9f3e
+          ref: b89703f7b23051e20f01bf607e3d2a0e922dfaf5
           path: .kernel-contract
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
