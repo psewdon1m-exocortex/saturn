@@ -213,6 +213,12 @@ abandon them first; arbitrary column removal would discard their preconditions.
 Up/down/up is tested. A reversible schema alone does not make old code's data
 safety behavior equivalent: older code lacks the race, hash and ZIP fixes.
 
+From layout v3 onward the candidate recovery CLI reads `storage_layout` from
+the database restored by `restore-rollback`, aligns the physical Storage Box to
+that exact version before checksum verification, and restores the pre-restore
+physical layout if verification fails. This avoids both starting old code on
+`#` paths and incorrectly downgrading a future v3-to-v3 rollback.
+
 ## Ongoing operation
 
 - Drop retains valuable failed partial buffers and counts their bytes until

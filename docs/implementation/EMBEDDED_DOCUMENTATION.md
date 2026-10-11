@@ -64,6 +64,9 @@ substring matching over group/title/summary/keywords/rendered body. The displaye
 query is preserved; it is not persisted in a URL or browser storage. The clear
 cross occupies a permanent 32 px track, hides/disables when empty and returns
 focus to the input on the next animation frame. Escape uses the same path.
+The visible placeholder is **Search**, which fits the canonical 220 px control
+without clipping; the accessible input name remains **Search documentation**.
+The page heading is lowercase **documentation**, as requested by the operator.
 Filtering resets only the article before rendering and clamps navigation.
 No matches keep both tracks and a labelled empty result.
 

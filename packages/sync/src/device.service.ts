@@ -1,7 +1,7 @@
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { Readable } from "node:stream";
 import type { AuditSink } from "@saturn/audit";
-import { ROOT_RESOURCE_ID, BACKUPS_RESOURCE_ID, UploadPreconditionError, type FileService, type Resource } from "@saturn/file-core";
+import { ROOT_RESOURCE_ID, OUTDOOR_CONNECTIONS_RESOURCE_ID, UploadPreconditionError, type FileService, type Resource } from "@saturn/file-core";
 import {logicalResourcePath, readerMetadata, readerRange} from "./resource-reader.js";
 import { v7 as uuidv7 } from "uuid";
 import {
@@ -110,8 +110,7 @@ export class DeviceService {
   async #plutoRoot(device: DeviceRecord): Promise<Resource> {
     if (device.deviceKind !== "pluto" || !device.syncRootId || device.scopeIds.length !== 1 || device.scopeIds[0] !== device.syncRootId) throw new DeviceServiceError("forbidden");
     const root = await this.input.files.getResource(device.syncRootId).catch(() => undefined);
-    const parent = root?.parentId ? await this.input.files.getResource(root.parentId).catch(() => undefined) : undefined;
-    if (!root || root.type !== "folder" || root.status !== "active" || !parent || parent.status !== "active" || parent.name !== "pluto" || parent.parentId !== BACKUPS_RESOURCE_ID) throw new DeviceServiceError("forbidden");
+    if (!root || root.type !== "folder" || root.status !== "active" || root.parentId !== OUTDOOR_CONNECTIONS_RESOURCE_ID) throw new DeviceServiceError("forbidden");
     return root;
   }
 
@@ -131,13 +130,8 @@ export class DeviceService {
     if (!this.input.options.enabled) throw new DeviceServiceError("forbidden");
     const name = cleanName(value).normalize("NFC");
     if (name === "." || name === ".." || /[\\/]/.test(name)) throw new DeviceServiceError("invalid_path");
-    let parent = await this.#child(BACKUPS_RESOURCE_ID, "pluto");
-    if (!parent) {
-      try { parent = await this.input.files.createFolder(BACKUPS_RESOURCE_ID, "pluto"); }
-      catch (error) { parent = await this.#child(BACKUPS_RESOURCE_ID, "pluto"); if (!parent) throw error; }
-    }
-    if (parent.type !== "folder" || await this.#child(parent.id, name)) throw new DeviceServiceError("conflict");
-    const root = await this.input.files.createFolder(parent.id, name);
+    if (await this.#child(OUTDOOR_CONNECTIONS_RESOURCE_ID, name)) throw new DeviceServiceError("conflict");
+    const root = await this.input.files.createFolder(OUTDOOR_CONNECTIONS_RESOURCE_ID, name);
     const record = await this.input.repository.create({ id: uuidv7(), name, deviceKind: "pluto", syncRootId: root.id, tokenHash: this.#hash(randomBytes(32).toString("base64url")), scopeIds: [root.id], rights: { read: true, write: true, move: false, delete: false }, createdAt: now });
     return this.createPlutoEnrollmentForDevice(record.id, now);
   }
@@ -378,8 +372,16 @@ export class DeviceService {
     if (upload.auditActorType !== "device_token" || upload.auditActorId !== context.device.id) throw new DeviceServiceError("not_found");
     const parent = await this.input.files.getResource(upload.parentId);
     if (parent.status !== "active") throw new DeviceServiceError("not_found");
-    const resolved = await this.#resolve(context, parent.storagePath.split("/"));
-    if (resolved.resource.id !== upload.parentId) throw new DeviceServiceError("forbidden");
+    const root = await this.#windowsRoot(context.device);
+    let ancestor = parent;
+    let scoped = ancestor.id === root.id;
+    for (let depth = 0; !scoped && depth < 128; depth += 1) {
+      if (ancestor.parentId === undefined) break;
+      ancestor = await this.input.files.getResource(ancestor.parentId).catch(() => { throw new DeviceServiceError("forbidden"); });
+      if (ancestor.status !== "active") throw new DeviceServiceError("forbidden");
+      scoped = ancestor.id === root.id;
+    }
+    if (!scoped) throw new DeviceServiceError("forbidden");
     if (!allowExpired && upload.status !== "active" && upload.expiresAt <= new Date()) throw new DeviceServiceError("conflict");
     return upload;
   }

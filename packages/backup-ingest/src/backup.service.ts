@@ -32,6 +32,11 @@ function validatePage(offset: number, limit: number): void {
   if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 500) throw new BackupServiceError("invalid");
 }
 function startOfUtcDay(value: Date): Date { return new Date(Date.UTC(value.getUTCFullYear(), value.getUTCMonth(), value.getUTCDate())); }
+function logicalBackupPath(storagePath: string): string {
+  const physicalRoot = "# sync inner services";
+  if (!storagePath.startsWith(`${physicalRoot}/`)) throw new Error("Backup final path is outside the managed archive root");
+  return `/backups/${storagePath.slice(physicalRoot.length + 1)}`;
+}
 function publicRun(value: BackupRunRecord) {
   return {
     id: value.id, serviceId: value.serviceId, filename: value.filename, createdAt: value.sourceCreatedAt, backupType: value.backupType,
@@ -154,7 +159,7 @@ export class BackupIngestService {
       || value.sourceVersion.length < 1 || value.sourceVersion.length > 200 || /[\r\n]/.test(value.sourceVersion) || !Number.isSafeInteger(value.expectedSize) || value.expectedSize < 1 || value.expectedSize > context.service.maxBackupBytes
       || !Number.isFinite(value.createdAt.getTime()) || value.createdAt.getTime() > now.getTime() + 86_400_000 || value.createdAt.getUTCFullYear() < 2000 || (context.service.requireEncryption && !value.encrypted)) throw new BackupServiceError("invalid");
     const id = uuidv7(); const date = value.createdAt.toISOString(); const parts = date.slice(0, 10).split("-"); const stamp = date.replace(/[:.]/g, "-");
-    const backupRootPath = this.input.backupRootPath === undefined ? "backups" : await this.input.backupRootPath();
+    const backupRootPath = this.input.backupRootPath === undefined ? "# sync inner services" : await this.input.backupRootPath();
     const run: BackupRunRecord = { id, serviceId: context.service.id, clientKeyHash: this.hmac("backup-run-idempotency", value.idempotencyKey), filename,
       sourceCreatedAt: value.createdAt, backupType: value.backupType, expectedSize: value.expectedSize, expectedSha256: sha256, sourceVersion: value.sourceVersion,
       encrypted: value.encrypted, state: "pending", receivedSize: 0, tempPath: joinStoragePath("_system", "incoming", "backups", context.service.id, `${id}.part`),
@@ -208,7 +213,7 @@ export class BackupIngestService {
       if (!(await this.input.storage.exists(sourcePath))) throw new Error("Backup upload is missing"); const digest = await this.digest(sourcePath);
       if (digest.bytes !== selected.expectedSize || digest.sha256 !== selected.expectedSha256) { if (sourcePath === selected.tempPath) await this.input.storage.delete(sourcePath).catch(() => undefined); await this.input.repository.failRun(context.service.id, runId, "checksum_mismatch", new Date()); throw new Error("Backup checksum or size differs"); }
       if (sourcePath === selected.tempPath) { await this.ensureParents(selected.finalPath); if (await this.input.storage.exists(selected.finalPath)) throw new Error("Backup final object already exists"); await this.input.storage.rename(selected.tempPath, selected.finalPath); }
-      const committedAt = new Date(); const receipt: BackupReceipt = { schema: "vault.service-backup-receipt.v1", runId, serviceId: context.service.id, serviceSlug: context.service.slug, logicalPath: `/${selected.finalPath}`, sizeBytes: digest.bytes, sha256: digest.sha256, committedAt: committedAt.toISOString() };
+      const committedAt = new Date(); const receipt: BackupReceipt = { schema: "vault.service-backup-receipt.v1", runId, serviceId: context.service.id, serviceSlug: context.service.slug, logicalPath: logicalBackupPath(selected.finalPath), sizeBytes: digest.bytes, sha256: digest.sha256, committedAt: committedAt.toISOString() };
       const completed = await this.input.repository.completeRun(context.service.id, runId, receipt, committedAt);
       await this.publishCatalog(completed).catch(() => undefined);
       await this.audit("backup.run.completed", runId, { serviceId: context.service.id, sizeBytes: digest.bytes, sha256: digest.sha256 }, actorId); return publicRun(completed);

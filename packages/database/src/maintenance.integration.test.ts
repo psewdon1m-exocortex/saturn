@@ -115,7 +115,7 @@ it.skipIf(!baseUrl)("keeps nested writers live with one query connection and rec
 
     const upload = randomUUID(), operation = randomUUID();
     await db.withSql(async sql => {
-      const roots = await sql<{ id: string }[]>`SELECT id FROM resources WHERE storage_path='sync'`;
+      const roots = await sql<{ id: string }[]>`SELECT id FROM resources WHERE storage_path='# sync windows'`;
       const root = roots[0]?.id;
       if (root === undefined) throw new Error("Sync root was not migrated");
       await sql`INSERT INTO upload_sessions (id,idempotency_key,parent_id,filename,temp_path,target_path,expected_size,received_size,status,expires_at)

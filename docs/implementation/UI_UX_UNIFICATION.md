@@ -74,8 +74,8 @@ and Trash retention groups, without an Advanced security disclosure. The
 Sessions group and its revoke-all action are removed from Settings. Shared-host
 recovery belongs to the root-only `sudo updater tui`; Saturn exposes no helper
 recovery form or proxy route. Updater publishes independently encrypted files
-through Gateway under `backups/updater`, `backups/neptune`, `backups/gryphon`
-and `backups/wyvern`. Storage configuration and upload limits remain available
+through Gateway under `# sync inner services/updater`, `# sync inner services/neptune`,
+`# sync inner services/gryphon` and `# sync inner services/wyvern`. Storage configuration and upload limits remain available
 to an already authenticated owner session. The
 Access Key rotation dialog remains the narrow exception: it always asks for the
 exact current key inside the operation, rotates the session and revokes the
@@ -346,3 +346,45 @@ Windows one-way sync, catalog reconciliation and control-plane recovery limits
 are documented in the embedded guide and relevant technical records. See
 [Embedded documentation](EMBEDDED_DOCUMENTATION.md) for maintenance ownership,
 verification commands and coverage limits.
+
+## Auto-hide content width — operator request, 2026-10-11
+
+The operator explicitly requested removal of the dark strip remaining after
+the left menu closes. Saturn therefore keeps Part 01's 18 px activation area
+as a transparent overlay and expands the main content to the viewport's left
+edge instead of reserving 18 px. This is an authorized presentation departure
+from the previous visible activation strip. The fixed sidebar still reserves
+250 px; pointer/focus reveal and the narrow-screen menu overlay are retained.
+The embedded operator guide describes this behavior.
+
+## Dashboard title alignment — 2026-10-11
+
+The shared workspace header places the Dashboard title at the same vertical
+origin as Storage and Shared: a 15 px top inset on desktop and 48 px in the
+narrow layout. It uses top alignment instead of the former bottom alignment,
+preserving the existing 123/112 px header and divider positions. Dashboard
+cards and their interactions retain their existing layout.
+
+## Storage new context actions — operator request, 2026-10-11
+
+The operator requested removal of card checkboxes, ellipsis buttons and the
+selection action panel in Storage new. Card metadata/name clicks and
+Ctrl/Cmd/Shift selection remain available without inserting a toolbar. Actions
+open through right-click or Shift+F10/the context-menu key; the extended menu
+retains versions, overwrite, move, copy-to-folder and confirmed group trash.
+Its height is bounded by the viewport and its own scrolling stays available.
+This presentation change is scoped to Storage new; the original Storage table,
+toolbar and context menu retain their existing controls and handlers.
+
+The operator subsequently requested a matching light shared-access dialog for
+Storage new. Its object heading, URL panel, policy facts and immediate revoke
+action use the private Storage new palette and typography. It reuses the common
+dialog's focus, Escape, bounded scroll and drag behavior, and the existing share
+capability/clipboard/revoke handlers. The original Storage share dialog stays
+unchanged; no global dialog theme or share permission is modified.
+
+New folder in Storage new also uses the operator-requested light dialog style:
+a bounded 560 px panel, the current destination path, a labeled name field and
+Create folder/Cancel controls. The top action and context-menu entry share the
+existing create-folder handler; the original Storage form keeps its dark
+presentation and Apply control.

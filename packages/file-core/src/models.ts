@@ -5,6 +5,13 @@ export const SYNC_RESOURCE_ID = "00000000-0000-7000-8000-000000000004";
 export const VOLT_RESOURCE_ID = "00000000-0000-7000-8000-000000000005";
 export const LABORATORY_RESOURCE_ID = "00000000-0000-7000-8000-000000000006";
 export const BACKUPS_RESOURCE_ID = "00000000-0000-7000-8000-000000000007";
+export const REFERENCES_RESOURCE_ID = "00000000-0000-7000-8000-000000000008";
+export const OUTDOOR_CONNECTIONS_RESOURCE_ID = "00000000-0000-7000-8000-000000000009";
+
+// Semantic aliases for layout v3. The legacy constants remain stable because
+// enrolled clients and backup producers are bound to these UUIDs, not names.
+export const WINDOWS_SYNC_RESOURCE_ID = SYNC_RESOURCE_ID;
+export const INNER_SERVICES_RESOURCE_ID = BACKUPS_RESOURCE_ID;
 
 export type ResourceType = "file" | "folder";
 export type ResourceStatus = "pending" | "active" | "trashed" | "missing" | "error" | "quarantined" | "purged";

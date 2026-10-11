@@ -4,6 +4,8 @@ import { ServiceLogsPanel } from "./ServiceLogsPanel";
 import { StorageAnalysisPanel } from "./storage-analysis-panel.js";
 import { DocumentationPage } from "./documentation-page.js";
 import { StorageNewGrid } from "./storage-new-grid.js";
+import { StorageNewShareDetails } from "./storage-new-share-details.js";
+import { StorageNewNavigation, type StorageHistoryNavigation } from "./storage-new-navigation.js";
 import { openAgentInitialization, confirmAgentAction, type InitializationJob } from "./agent-initialize.js";
 import { BackupPolicyPanel } from "./service-agents";
 import { updateCookieHeaders } from "./update-overlay.js";
@@ -13,7 +15,7 @@ import { openSaturnUpdates } from "./update-flow.js";
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode, type SyntheticEvent } from "react";
 import DOMPurify from "dompurify";
 import { marked } from "marked";
-import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
+import pdfWorkerUrl from "pdfjs-dist/legacy/build/pdf.worker.min.mjs?url";
 import saturnLogo from "./assets/saturn-logo.png";
 import type { PDFDocumentLoadingTask, PDFDocumentProxy, RenderTask } from "pdfjs-dist";
 import { ApiError, api, downloadRecoverySnapshot, downloadUrl, dropApi, folderDownloadUrl, forgetRecoverableOwnerUpload, publicShareApi, recoverableOwnerUpload, resumeOwnerUpload, uploadDropFile, uploadFile, uploadRecoverySnapshot } from "./api.js";
@@ -22,9 +24,11 @@ import {
   DROP_POINT_RESOURCE_ID,
   LABORATORY_RESOURCE_ID,
   MASTERMIND_RESOURCE_ID,
-  VOLT_RESOURCE_ID,
+  OUTDOOR_CONNECTIONS_RESOURCE_ID,
+  REFERENCES_RESOURCE_ID,
   ROOT_RESOURCE_ID,
   SYNC_RESOURCE_ID,
+  VOLT_RESOURCE_ID,
   type BackupServiceInfo,
   type BackupRunInfo,
   type ArchiveJobInfo,
@@ -58,11 +62,20 @@ type DashboardCardName = OwnerPreferences["dashboardOrder"][number];
 type SettingsCardName = OwnerPreferences["settingsOrder"][number];
 type Notice = { readonly id: string; readonly kind: "success" | "error" | "info"; readonly message: string };
 type OwnerRoute = { readonly view: ViewName; readonly folderSegments: readonly string[] };
+type OwnerHistory = { readonly session: string; readonly index: number; readonly routes: readonly OwnerRoute[] };
+const OWNER_HISTORY_KEY = "saturnOwnerHistory";
+
+function ownerHistoryIndex(value: unknown, history: OwnerHistory): number | undefined {
+  if (typeof value !== "object" || value === null || !(OWNER_HISTORY_KEY in value)) return undefined;
+  const position = (value as Record<string, unknown>)[OWNER_HISTORY_KEY];
+  if (typeof position !== "object" || position === null || !("session" in position) || !("index" in position)) return undefined;
+  return position.session === history.session && typeof position.index === "number" && Number.isInteger(position.index) && position.index >= 0 && position.index < history.routes.length ? position.index : undefined;
+}
 type SortField = "name" | "modified" | "size";
 type SortDirection = "ascending" | "descending";
 type ResourceClipboard = { readonly operation: "copy" | "cut"; readonly resource: Resource };
 type ContextMenuState = { readonly x: number; readonly y: number; readonly resource?: Resource };
-type ContextAction = "copy" | "cut" | "paste" | "download" | "folder" | "trash" | "rename" | "share" | "extract" | "compress";
+type ContextAction = "copy" | "cut" | "paste" | "download" | "folder" | "trash" | "rename" | "share" | "extract" | "compress" | "open" | "preview" | "versions" | "overwrite" | "move" | "copy-to";
 type FileKind = "folder" | "image" | "video" | "audio" | "pdf" | "markdown" | "document" | "archive" | "file";
 
 const NAV_ITEMS: Readonly<Record<PrimaryViewName, { readonly label: string }>> = {
@@ -130,6 +143,8 @@ const PROTECTED_ROOT_RESOURCE_IDS = new Set([
   MASTERMIND_RESOURCE_ID,
   SYNC_RESOURCE_ID,
   VOLT_RESOURCE_ID,
+  REFERENCES_RESOURCE_ID,
+  OUTDOOR_CONNECTIONS_RESOURCE_ID,
 ]);
 
 const defaultPreferences: Omit<OwnerPreferences, "updatedAt"> = {
@@ -320,12 +335,13 @@ function ResourceVisual({ resource }: { readonly resource: Resource }) {
 }
 
 async function importPdfJs() {
-  const module = await import("pdfjs-dist");
+  const module = await import("pdfjs-dist/legacy/build/pdf.mjs");
   module.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
   return module;
 }
 
 let pdfJsModulePromise: ReturnType<typeof importPdfJs> | undefined;
+const bufferedPdfPreviewLimitBytes = 16 * 1024 * 1024;
 
 function loadPdfJs(): ReturnType<typeof importPdfJs> {
   pdfJsModulePromise ??= importPdfJs();
@@ -347,20 +363,39 @@ function PdfPreview({ resource }: { readonly resource: Resource }) {
   useEffect(() => {
     let active = true;
     let task: PDFDocumentLoadingTask | undefined;
+    const controller = new AbortController();
     setPage(1); setPages(1); setDocument(undefined); setError(""); setLoading(true);
-    void loadPdfJs().then(({ getDocument }) => {
-      task = getDocument({
-        url: downloadUrl(resource.id, true),
-        withCredentials: true,
-        rangeChunkSize: 1024 * 1024,
-      });
+    void loadPdfJs().then(async ({ getDocument }) => {
+      if (resource.sizeBytes <= bufferedPdfPreviewLimitBytes) {
+        const response = await fetch(downloadUrl(resource.id, true), {
+          credentials: "same-origin",
+          headers: { Accept: "application/pdf" },
+          signal: controller.signal,
+        });
+        if (!response.ok) throw new Error(`PDF preview request failed with status ${String(response.status)}`);
+        const contentLength = Number(response.headers.get("content-length"));
+        if (Number.isFinite(contentLength) && contentLength > bufferedPdfPreviewLimitBytes) throw new Error("PDF preview response exceeds the buffered preview limit");
+        const bytes = new Uint8Array(await response.arrayBuffer());
+        if (bytes.byteLength > bufferedPdfPreviewLimitBytes) throw new Error("PDF preview response exceeds the buffered preview limit");
+        task = getDocument({ data: bytes });
+      } else {
+        task = getDocument({
+          url: downloadUrl(resource.id, true),
+          withCredentials: true,
+          rangeChunkSize: 1024 * 1024,
+        });
+      }
       return task.promise;
     }).then((loaded) => {
       if (!active) return;
       setDocument(loaded); setPages(loaded.numPages); setLoading(false);
-    }).catch(() => { if (active) { setLoading(false); setError("PDF preview could not be loaded."); } });
-    return () => { active = false; if (task !== undefined) void task.destroy(); };
-  }, [resource.id]);
+    }).catch((reason: unknown) => {
+      if (active && !(reason instanceof DOMException && reason.name === "AbortError")) {
+        setLoading(false); setError("PDF preview could not be loaded.");
+      }
+    });
+    return () => { active = false; controller.abort(); if (task !== undefined) void task.destroy(); };
+  }, [resource.id, resource.sizeBytes]);
 
   useEffect(() => {
     const element = pageViewport.current;
@@ -474,43 +509,76 @@ function SortButton({ field, activeField, direction, children, onChange }: {
   readonly onChange: (field: SortField) => void;
 }) {
   const active = field === activeField;
-  return <button className={`sort-button ${active ? "sort-button--active" : ""}`} type="button" onClick={() => onChange(field)} aria-sort={active ? direction : "none"}>{children}<span aria-hidden="true">{active ? direction === "ascending" ? "↑" : "↓" : "↕"}</span></button>;
+  return <button className={`sort-button ${active ? "sort-button--active" : ""}`} type="button" onClick={() => onChange(field)} aria-pressed={active} aria-description={active ? `Sorted ${direction}` : "Not sorted"}>{children}<span aria-hidden="true">{active ? direction === "ascending" ? "↑" : "↓" : "↕"}</span></button>;
 }
 
-function ResourceContextMenu({ state, canPaste, canCompress, canExtract, protectedRoot, onAction, onClose }: {
+function ResourceContextMenu({ state, canPaste, canCompress, canExtract, protectedRoot, modern = false, canPreview = false, canTrashSelection = false, pending = false, onAction, onClose }: {
   readonly state: ContextMenuState;
   readonly canPaste: boolean;
   readonly canCompress: boolean;
   readonly canExtract: boolean;
   readonly protectedRoot: boolean;
+  readonly modern?: boolean;
+  readonly canPreview?: boolean;
+  readonly canTrashSelection?: boolean;
+  readonly pending?: boolean;
   readonly onAction: (action: ContextAction) => void;
   readonly onClose: () => void;
 }) {
   const menu = useRef<HTMLDivElement>(null);
   const closeMenu = useRef(onClose);
+  const returnFocus = useRef<HTMLElement | null>(null);
   useEffect(() => { closeMenu.current = onClose; }, [onClose]);
   const actions = [
-    { id: "copy", label: "Copy", disabled: state.resource === undefined },
+    ...(modern && state.resource !== undefined ? [
+      { id: "open", label: "Open", disabled: false },
+      { id: "preview", label: "Preview", disabled: !canPreview },
+      { id: "versions", label: "Versions", disabled: state.resource.type !== "file" },
+      { id: "overwrite", label: "Overwrite", disabled: state.resource.type !== "file" },
+      { id: "move", label: "Move", disabled: protectedRoot },
+      { id: "copy-to", label: "Copy to folder", disabled: protectedRoot },
+    ] as const : []),
+    { id: "copy", label: "Copy", disabled: state.resource === undefined || protectedRoot },
     { id: "cut", label: "Cut", disabled: state.resource === undefined || protectedRoot },
     { id: "paste", label: "Paste", disabled: !canPaste },
     { id: "download", label: "Download", disabled: state.resource === undefined },
     { id: "folder", label: "New folder", disabled: false },
-    { id: "trash", label: "Delete", disabled: state.resource === undefined || protectedRoot, danger: true },
-    { id: "rename", label: "Rename", disabled: state.resource === undefined },
+    { id: "trash", label: "Delete", disabled: state.resource === undefined || (modern ? !canTrashSelection : protectedRoot), danger: true },
+    { id: "rename", label: "Rename", disabled: state.resource === undefined || protectedRoot },
     { id: "share", label: "Share", disabled: state.resource === undefined },
     { id: "extract", label: "Extract here", disabled: !canExtract },
     { id: "compress", label: "Compress to ZIP", disabled: !canCompress },
   ] as const;
   useEffect(() => {
     const close = () => closeMenu.current();
+    const initialWindowScroll = { left: window.scrollX, top: window.scrollY };
+    const initialAncestorScroll = new Map<HTMLElement, { left: number; top: number }>();
+    if (modern) for (let ancestor = menu.current?.parentElement; ancestor != null; ancestor = ancestor.parentElement) {
+      initialAncestorScroll.set(ancestor, { left: ancestor.scrollLeft, top: ancestor.scrollTop });
+    }
+    const closeOnScroll = (event: Event) => {
+      if (modern) {
+        if (event.target instanceof Node && menu.current?.contains(event.target)) return;
+        // A pointer/focus scroll can be delivered after opening despite already
+        // being reflected in the menu coordinates. Dismiss only on a new move.
+        if (event.target === document && window.scrollX === initialWindowScroll.left && window.scrollY === initialWindowScroll.top) return;
+        if (event.target instanceof HTMLElement) {
+          const initial = initialAncestorScroll.get(event.target);
+          if (initial !== undefined && event.target.scrollLeft === initial.left && event.target.scrollTop === initial.top) return;
+        }
+      }
+      close();
+    };
     window.addEventListener("pointerdown", close);
     window.addEventListener("resize", close);
-    window.addEventListener("scroll", close, true);
-    menu.current?.querySelector<HTMLButtonElement>("button:not(:disabled)")?.focus();
-    return () => { window.removeEventListener("pointerdown", close); window.removeEventListener("resize", close); window.removeEventListener("scroll", close, true); };
-  }, [state]);
+    window.addEventListener("scroll", closeOnScroll, true);
+    returnFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    menu.current?.querySelector<HTMLButtonElement>("button:not(:disabled)")?.focus({ preventScroll: modern });
+    return () => { window.removeEventListener("pointerdown", close); window.removeEventListener("resize", close); window.removeEventListener("scroll", closeOnScroll, true); };
+  }, [state, modern]);
   const keyboard = (event: ReactKeyboardEvent<HTMLDivElement>) => {
-    if (event.key === "Escape") { event.preventDefault(); onClose(); return; }
+    if (modern && event.code === "Space") { event.stopPropagation(); return; }
+    if (event.key === "Escape") { event.preventDefault(); onClose(); if (modern) returnFocus.current?.focus({ preventScroll: true }); return; }
     if (event.key !== "ArrowDown" && event.key !== "ArrowUp" && event.key !== "Home" && event.key !== "End") return;
     event.preventDefault();
     const buttons = [...(menu.current?.querySelectorAll<HTMLButtonElement>("button:not(:disabled)") ?? [])];
@@ -519,12 +587,12 @@ function ResourceContextMenu({ state, canPaste, canCompress, canExtract, protect
     const next = event.key === "Home" ? 0 : event.key === "End" ? buttons.length - 1 : event.key === "ArrowDown" ? (index + 1) % buttons.length : (index <= 0 ? buttons.length : index) - 1;
     buttons[next]?.focus();
   };
-  const width = 155;
-  const height = actions.length * 25;
+  const width = modern ? 220 : 155;
+  const height = modern ? Math.min(actions.length * 40 + 18, window.innerHeight - 16) : actions.length * 25;
   const x = Math.max(8, Math.min(state.x, window.innerWidth - width - 8));
   const y = Math.max(8, Math.min(state.y, window.innerHeight - height - 8));
   return <div ref={menu} className="context-menu" role="menu" aria-label={state.resource === undefined ? "Folder actions" : `Actions for ${state.resource.name}`} style={{ left: x, top: y }} onKeyDown={keyboard} onPointerDown={(event) => event.stopPropagation()}>
-    {actions.map((action, index) => <button className={"danger" in action ? "context-menu__danger" : ""} type="button" role="menuitem" key={action.id} disabled={action.disabled} onClick={() => onAction(action.id)}><span className="context-menu__ordinal" aria-hidden="true">{String(index + 1)}.</span><span>{action.label}</span></button>)}
+    {actions.map((action, index) => <button className={"danger" in action ? "context-menu__danger" : ""} type="button" role="menuitem" key={action.id} disabled={action.disabled || modern && pending} onClick={() => { if (modern) returnFocus.current?.focus({ preventScroll: true }); onAction(action.id); }}><span className="context-menu__ordinal" aria-hidden="true">{String(index + 1)}.</span><span>{action.label}</span></button>)}
   </div>;
 }
 
@@ -636,13 +704,14 @@ function LoginView({ health, onAuthenticated }: { readonly health: GatewayState;
   );
 }
 
-function Dialog({ title, description, children, onClose, dismissible = true, className = "" }: {
+function Dialog({ title, description, children, onClose, dismissible = true, className = "", initialFocus }: {
   readonly title: string;
   readonly description?: string;
   readonly children: ReactNode;
   readonly onClose: () => void;
   readonly dismissible?: boolean;
   readonly className?: string;
+  readonly initialFocus?: string;
 }) {
   const titleId = useId();
   const dialog = useRef<HTMLElement>(null);
@@ -654,7 +723,7 @@ function Dialog({ title, description, children, onClose, dismissible = true, cla
   useEffect(() => {
     previousFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const node = dialog.current;
-    const focusable = node?.querySelector<HTMLElement>("button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [href], [tabindex]:not([tabindex='-1'])");
+    const focusable = (initialFocus === undefined ? undefined : node?.querySelector<HTMLElement>(initialFocus)) ?? node?.querySelector<HTMLElement>("button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [href], [tabindex]:not([tabindex='-1'])");
     focusable?.focus();
     const handleKey = (event: KeyboardEvent) => {
       if (event.key === "Escape" && dismissible) { event.preventDefault(); close.current(); return; }
@@ -667,7 +736,7 @@ function Dialog({ title, description, children, onClose, dismissible = true, cla
     };
     window.addEventListener("keydown", handleKey);
     return () => { window.removeEventListener("keydown", handleKey); previousFocus.current?.focus(); };
-  }, [dismissible]);
+  }, [dismissible, initialFocus]);
   const moveDialog = (event: ReactPointerEvent<HTMLElement>) => {
     const start = drag.current; const node = dialog.current;
     if (start === undefined || node === null) return;
@@ -933,7 +1002,7 @@ function NoticeStack({ notices, dismiss }: { readonly notices: readonly Notice[]
   );
 }
 
-function FilesView({ initialFolderId, title, routeSegments, onPathChange, shareCapabilities, onShareCapabilityCreated, onShareCapabilityRevoked, addNotice, onUnauthorized, embeddedInHouse = false, refreshKey = 0, presentation = "original" }: {
+function FilesView({ initialFolderId, title, routeSegments, onPathChange, shareCapabilities, onShareCapabilityCreated, onShareCapabilityRevoked, addNotice, onUnauthorized, embeddedInHouse = false, refreshKey = 0, presentation = "original", storageHistory }: {
   readonly initialFolderId: string;
   readonly title: string;
   readonly routeSegments: readonly string[];
@@ -946,6 +1015,7 @@ function FilesView({ initialFolderId, title, routeSegments, onPathChange, shareC
   readonly embeddedInHouse?: boolean;
   readonly refreshKey?: number;
   readonly presentation?: "original" | "new";
+  readonly storageHistory?: StorageHistoryNavigation;
 }) {
   const modern = presentation === "new";
   const [pathAttempt, setPathAttempt] = useState(0);
@@ -961,6 +1031,7 @@ function FilesView({ initialFolderId, title, routeSegments, onPathChange, shareC
   const [uploadProgress, setUploadProgress] = useState<number | undefined>();
   const [form, setForm] = useState<"folder" | "rename" | "move" | "copy" | undefined>();
   const [formName, setFormName] = useState("");
+  const modernFolderForm = modern && form === "folder";
   const [destinationId, setDestinationId] = useState("");
   const [confirmTrash, setConfirmTrash] = useState(false);
   const [versions, setVersions] = useState<{ readonly resource: Resource; readonly items: readonly FileVersion[] } | undefined>();
@@ -1147,6 +1218,10 @@ function FilesView({ initialFolderId, title, routeSegments, onPathChange, shareC
 
   const openContextMenu = (event: ReactMouseEvent, resource?: Resource) => {
     event.preventDefault();
+    if (modern) {
+      if (pending || loading || folderUnavailable) return;
+      (event.currentTarget as HTMLElement).focus({ preventScroll: true });
+    }
     if (resource !== undefined && !selected.has(resource.id)) selectOnly(resource);
     setContextMenu({ x: event.clientX, y: event.clientY, ...(resource === undefined ? {} : { resource }) });
   };
@@ -1362,8 +1437,13 @@ function FilesView({ initialFolderId, title, routeSegments, onPathChange, shareC
     if (action === "extract") { void extractArchive(resource); return; }
     if (action === "copy" || action === "cut") { setClipboard({ operation: action, resource }); addNotice("info", `${resource.name} ready to ${action}.`); return; }
     if (action === "download") { window.location.assign(resource.type === "file" ? downloadUrl(resource.id) : folderDownloadUrl(resource.id)); return; }
-    if (action === "trash") { selectOnly(resource); setConfirmTrash(true); return; }
+    if (action === "trash") { if (!modern) selectOnly(resource); setConfirmTrash(true); return; }
     if (action === "rename") { selectOnly(resource); setForm("rename"); setFormName(resource.name); return; }
+    if (action === "open") { const resourceId = resource.id; if (resource.type === "folder") openFolder(resource); else if (previewable(resource)) setPreview(resource); else window.location.assign(downloadUrl(resourceId)); return; }
+    if (action === "preview") { if (previewable(resource)) setPreview(resource); return; }
+    if (action === "versions") { void showVersions(resource); return; }
+    if (action === "overwrite") { selectOnly(resource); overwriteInput.current?.click(); return; }
+    if (action === "move" || action === "copy-to") { selectOnly(resource); setForm(action === "move" ? "move" : "copy"); setDestinationId(folderId); setFormName(resource.name); return; }
     beginShare(resource);
   };
 
@@ -1424,11 +1504,18 @@ function FilesView({ initialFolderId, title, routeSegments, onPathChange, shareC
       </header>}
       <div className="storage-browserbar">
         <div className="storage-path-summary">
+          {modern && storageHistory !== undefined ? <div className="storage-new-location">
+            <StorageNewNavigation {...storageHistory} canUp={routeSegments.length > 0} onUp={() => onPathChange(routeSegments.slice(0, -1))} busy={pending || loading} />
+            <nav className="breadcrumbs" aria-label="Folder breadcrumbs">
+              {breadcrumbs.map((item, index) => <button type="button" key={`${item.id}-${String(index)}`} onClick={() => navigateBreadcrumb(index)}>{item.name}</button>)}
+              <span>{folder?.id === initialFolderId ? "root" : folder?.name ?? routeSegments.at(-1) ?? title}</span>
+            </nav>
+          </div> :
           <nav className="breadcrumbs" aria-label="Folder breadcrumbs">
             {embeddedInHouse ? <><span className="breadcrumbs__boundary">root</span><span className="breadcrumbs__separator" aria-hidden="true">›</span></> : null}
             {breadcrumbs.map((item, index) => <button type="button" key={`${item.id}-${String(index)}`} onClick={() => navigateBreadcrumb(index)}>{item.name}</button>)}
             <span>{folder?.id === initialFolderId ? initialFolderId === ROOT_RESOURCE_ID ? "root" : title.toLocaleLowerCase() : folder?.name ?? routeSegments.at(-1) ?? title}</span>
-          </nav>
+          </nav>}
           <p className="storage-meta" aria-live="polite">{String(visible.length)} items · {String(selectedItems.length)} selected · {formatStorageBytes(visibleSizeBytes)}{embeddedInHouse && uploadProgress !== undefined ? ` · uploading ${String(Math.round(uploadProgress * 100))}%` : ""}</p>
         </div>
         <label className="search-control storage-search">
@@ -1438,24 +1525,24 @@ function FilesView({ initialFolderId, title, routeSegments, onPathChange, shareC
         {embeddedInHouse || modern ? null : <button className="button storage-upload" type="button" onClick={() => uploadInput.current?.click()} disabled={pending || atStorageRoot || folderUnavailable || loading}>Upload here</button>}
         <input ref={uploadInput} aria-label="Choose files to upload" className="visually-hidden-input" type="file" multiple onChange={(event) => void performUpload([...event.target.files ?? []])} />
       </div>
-      <div className={`selection-bar storage-selection-bar${modern ? " storage-new-selection" : ""}`} hidden={modern && selectedItems.length === 0 && clipboard === undefined} role="toolbar" aria-label="Selection actions">
+      <input ref={overwriteInput} aria-label="Choose replacement file" className="visually-hidden-input" type="file" onChange={(event) => { if (single !== undefined) void performUpload([...event.target.files ?? []], single); }} />
+      {modern ? null : <div className="selection-bar storage-selection-bar" role="toolbar" aria-label="Selection actions">
         <span>{clipboard === undefined ? selectedItems.length === 0 ? "No selection" : `${String(selectedItems.length)} selected` : `${clipboard.operation === "copy" ? "Copy" : "Cut"}: ${clipboard.resource.name}`}</span>
         <button type="button" disabled={single === undefined} onClick={() => { if (single?.type === "folder") openFolder(single); }}>Open</button>
         <button type="button" disabled={single === undefined} onClick={() => { if (single !== undefined) window.location.assign(single.type === "file" ? downloadUrl(single.id) : folderDownloadUrl(single.id)); }}>Download</button>
         <button type="button" disabled={!previewable(single)} onClick={() => { if (previewable(single)) setPreview(single); }}>Preview</button>
         <button type="button" disabled={single?.type !== "file"} onClick={() => { if (single !== undefined) void showVersions(single); }}>Versions</button>
         <button type="button" disabled={single?.type !== "file" || pending} onClick={() => overwriteInput.current?.click()}>Overwrite</button>
-        <input ref={overwriteInput} aria-label="Choose replacement file" className="visually-hidden-input" type="file" onChange={(event) => { if (single !== undefined) void performUpload([...event.target.files ?? []], single); }} />
-        <button type="button" disabled={single === undefined} onClick={() => { if (single !== undefined) { setForm("rename"); setFormName(single.name); } }}>Rename</button>
+        <button type="button" disabled={single === undefined || singleProtectedRoot} onClick={() => { if (single !== undefined) { setForm("rename"); setFormName(single.name); } }}>Rename</button>
         <button type="button" disabled={single === undefined || singleProtectedRoot} onClick={() => { if (single !== undefined) { setForm("move"); setDestinationId(folderId); setFormName(single.name); } }}>Move</button>
-        <button type="button" disabled={single === undefined} onClick={() => { if (single !== undefined) { setForm("copy"); setDestinationId(folderId); setFormName(single.name); } }}>Copy</button>
+        <button type="button" disabled={single === undefined || singleProtectedRoot} onClick={() => { if (single !== undefined) { setForm("copy"); setDestinationId(folderId); setFormName(single.name); } }}>Copy</button>
         <button type="button" disabled={clipboard === undefined || pending} onClick={() => void pasteClipboard()}>Paste</button>
         <button type="button" disabled={single === undefined} onClick={() => { if (single !== undefined) beginShare(single); }}>Share</button>
         <button className="danger-link" type="button" disabled={selectedItems.length === 0 || selectedProtectedRoot} onClick={() => setConfirmTrash(true)}>Trash</button>
-      </div>
+      </div>}
       {modern ? <>
         <div className="storage-new-sort" aria-label="Sort storage"><span>Files and folders</span><div><SortButton field="name" activeField={sort.field} direction={sort.direction} onChange={changeSort}>Name</SortButton><SortButton field="modified" activeField={sort.field} direction={sort.direction} onChange={changeSort}>Modified</SortButton><SortButton field="size" activeField={sort.field} direction={sort.direction} onChange={changeSort}>Size</SortButton></div></div>
-        <StorageNewGrid items={visible} selected={selected} loading={loading} error={pathError} emptyMessage={search.trim() ? "No matching items. Try another search." : atStorageRoot ? "No folders yet. Create a folder to start storing files." : "This folder is empty. Create a folder or upload files."} shares={activeShareByResource} pending={pending} kind={resourceKind} icon={(kind) => <FileKindIcon kind={kind} />} size={formatStorageBytes} date={formatStorageDate} onSelect={selectResource} canPreview={previewable} onOpen={(item) => { const id = item.id; if (item.type === "folder") openFolder(item); else if (previewable(item)) setPreview(item); else window.location.assign(downloadUrl(id)); }} onMenu={openContextMenu} onKeyboardMenu={(item, x, y) => { if (!selected.has(item.id)) selectOnly(item); setContextMenu({ x, y, resource: item }); }} onShare={setShareDetails} onRetry={() => setPathAttempt((attempt) => attempt + 1)} onDelete={() => { if (selectedItems.length > 0 && !selectedProtectedRoot) setConfirmTrash(true); }} />
+        <StorageNewGrid items={visible} selected={selected} loading={loading} error={pathError} emptyMessage={search.trim() ? "No matching items. Try another search." : atStorageRoot ? "No folders yet. Create a folder to start storing files." : "This folder is empty. Create a folder or upload files."} shares={activeShareByResource} pending={pending} kind={resourceKind} icon={(kind) => <FileKindIcon kind={kind} />} size={formatStorageBytes} date={formatStorageDate} onSelect={selectResource} canPreview={previewable} onOpen={(item) => { const id = item.id; if (item.type === "folder") openFolder(item); else if (previewable(item)) setPreview(item); else window.location.assign(downloadUrl(id)); }} onMenu={openContextMenu} onKeyboardMenu={(item, x, y) => { if (pending || loading || folderUnavailable) return; if (item !== undefined && !selected.has(item.id)) selectOnly(item); setContextMenu({ x, y, ...(item === undefined ? {} : { resource: item }) }); }} onShare={setShareDetails} onRetry={() => setPathAttempt((attempt) => attempt + 1)} onDelete={() => { if (selectedItems.length > 0 && !selectedProtectedRoot) setConfirmTrash(true); }} />
       </> : <div className="collection storage-collection" tabIndex={0} onContextMenu={(event) => openContextMenu(event)} onKeyDown={(event) => { if (event.key === "Delete" && selectedItems.length > 0 && !selectedProtectedRoot) setConfirmTrash(true); }}>
         <div className="file-row file-row--head storage-file-row">
           <SortButton field="name" activeField={sort.field} direction={sort.direction} onChange={changeSort}>Name</SortButton>
@@ -1483,17 +1570,18 @@ function FilesView({ initialFolderId, title, routeSegments, onPathChange, shareC
         ))}
       </div>}
       {activeArchiveJobs.length === 0 ? null : <div className="storage-archive-jobs" role="status">{activeArchiveJobs.map((job) => <span key={job.id}>{job.kind === "extract" ? "Extracting" : "Compressing"} {job.outputName} · {job.state}</span>)}</div>}
-      <p className="drop-hint">{modern && folderUnavailable ? "File actions will be available when this folder has loaded." : atStorageRoot ? "Create arbitrary folders here, then open one to upload files. Preinstalled folders can be renamed but not moved or deleted." : "Drag and drop files anywhere in this workspace to upload into the current folder."}</p>
+      <p className="drop-hint">{modern && folderUnavailable ? "File actions will be available when this folder has loaded." : atStorageRoot ? "Create arbitrary folders here, then open one to upload files. Preinstalled system folders cannot be renamed, copied, moved or deleted." : "Drag and drop files anywhere in this workspace to upload into the current folder."}</p>
       {draggingFiles ? <div className={`storage-drop-overlay ${atStorageRoot ? "storage-drop-overlay--blocked" : ""}`} aria-hidden="true"><strong>{atStorageRoot ? "OPEN A FOLDER" : "UPLOAD HERE"}</strong><span>{atStorageRoot ? "Files cannot be stored directly in root" : folder?.name ?? title}</span></div> : null}
 
       {form === undefined ? null : (
-        <Dialog title={form === "folder" ? "Create folder" : `${form[0]?.toUpperCase() ?? ""}${form.slice(1)} ${single?.name ?? "item"}`} onClose={() => setForm(undefined)}>
+        <Dialog title={modernFolderForm ? "New folder" : form === "folder" ? "Create folder" : `${form[0]?.toUpperCase() ?? ""}${form.slice(1)} ${single?.name ?? "item"}`} className={modernFolderForm ? "storage-new-dialog storage-new-folder-dialog" : ""} {...(modernFolderForm ? { initialFocus: "input" } : {})} onClose={() => setForm(undefined)}>
           <form className="dialog-form" onSubmit={(event) => void submitForm(event)}>
+            {modernFolderForm ? <><p className="storage-new-folder-intro">Add a folder to organize your files.</p><div className="storage-new-folder-location"><span>Create in</span><strong>{["root", ...routeSegments].join(" / ")}</strong></div></> : null}
             {form === "move" || form === "copy" ? (
               <label>Destination folder ID<input value={destinationId} onChange={(event) => setDestinationId(event.target.value)} required autoComplete="off" /></label>
             ) : null}
-            <label>{form === "folder" ? "Folder name" : "Name"}<input value={formName} onChange={(event) => setFormName(event.target.value)} required autoComplete="off" autoFocus /></label>
-            <div className="dialog__actions"><button className="button" type="button" onClick={() => setForm(undefined)}>Cancel</button><button className="button button--primary" type="submit" disabled={pending}>Apply</button></div>
+            <label>{form === "folder" ? "Folder name" : "Name"}<input value={formName} onChange={(event) => setFormName(event.target.value)} {...(modernFolderForm ? { placeholder: "e.g. Project materials" } : {})} required autoComplete="off" autoFocus={!modernFolderForm} /></label>
+            <div className="dialog__actions"><button className="button" type="button" onClick={() => setForm(undefined)}>Cancel</button><button className="button button--primary" type="submit" disabled={pending || modernFolderForm && !formName.trim()}>{modernFolderForm ? pending ? "Creating…" : "Create folder" : "Apply"}</button></div>
           </form>
         </Dialog>
       )}
@@ -1513,7 +1601,7 @@ function FilesView({ initialFolderId, title, routeSegments, onPathChange, shareC
       )}
       {restoreVersion === undefined ? null : <ConfirmDialog title="Restore historical version" description="The selected version becomes current. The current bytes are archived as another reversible version." confirmLabel="Restore version" pending={pending} onConfirm={() => void restoreSelectedVersion()} onClose={() => setRestoreVersion(undefined)} />}
       {preview === undefined ? null : <QuickPreview resource={preview} onClose={() => setPreview(undefined)} />}
-      {contextMenu === undefined ? null : <ResourceContextMenu state={contextMenu} canPaste={clipboard !== undefined} canCompress={selectedItems.length > 0 && !atStorageRoot} canExtract={contextMenu.resource !== undefined && resourceKind(contextMenu.resource) === "archive"} protectedRoot={contextMenu.resource !== undefined && PROTECTED_ROOT_RESOURCE_IDS.has(contextMenu.resource.id)} onAction={contextAction} onClose={() => setContextMenu(undefined)} />}
+      {contextMenu === undefined ? null : <ResourceContextMenu state={contextMenu} canPaste={clipboard !== undefined} canCompress={selectedItems.length > 0 && !atStorageRoot} canExtract={contextMenu.resource !== undefined && resourceKind(contextMenu.resource) === "archive"} protectedRoot={contextMenu.resource !== undefined && PROTECTED_ROOT_RESOURCE_IDS.has(contextMenu.resource.id)} modern={modern} canPreview={previewable(contextMenu.resource)} canTrashSelection={selectedItems.length > 0 && !selectedProtectedRoot} pending={pending} onAction={contextAction} onClose={() => setContextMenu(undefined)} />}
       {shareResource === undefined ? null : <Dialog title={`Share — ${shareResource.name}`} description="Create a read-only capability. Expiry and password are optional." onClose={closeShareComposer}><form className="dialog-form" onSubmit={(event) => void createShare(event)}>
         <label>Access<select value={shareMode} onChange={(event) => setShareMode(event.target.value as ShareInfo["mode"])}>{shareResource.type === "file" ? <><option value="view">View</option><option value="download">Download</option></> : <><option value="browse">Browse</option><option value="download_folder">Browse + download all</option></>}</select></label>
         <label>Expires<input type="datetime-local" value={shareExpiresAt} min={new Date().toISOString().slice(0, 16)} onChange={(event) => setShareExpiresAt(event.target.value)} /></label>
@@ -1521,11 +1609,11 @@ function FilesView({ initialFolderId, title, routeSegments, onPathChange, shareC
         {shareError ? <p className="form-error" role="alert">{shareError}</p> : null}
         <div className="dialog__actions"><button className="button" type="button" onClick={closeShareComposer}>Cancel</button><button className="button button--primary" type="submit" disabled={pending}>Create share</button></div>
       </form></Dialog>}
-      {shareDetails === undefined ? null : <Dialog title="Share" description={shareDetails.resourceName} onClose={() => setShareDetails(undefined)}><div className="share-details">
+      {shareDetails === undefined ? null : <Dialog title={modern ? "Shared access" : "Share"} {...(modern ? {} : { description: shareDetails.resourceName })} className={modern ? "storage-new-dialog storage-new-share-dialog" : ""} onClose={() => setShareDetails(undefined)}>{modern ? <StorageNewShareDetails share={shareDetails} url={shareCapabilities[shareDetails.id]} pending={pending} access={formatShareAccess(shareDetails.mode)} onCopy={() => shareCapabilities[shareDetails.id] === undefined ? copyShareCapability(shareDetails) : copyText(shareCapabilities[shareDetails.id] ?? "")} onRevoke={() => void revokeShare(shareDetails)} /> : <div className="share-details">
         {shareCapabilities[shareDetails.id] === undefined ? <div className="share-link-field"><p className="muted">Load and copy this link. Legacy hash-only records are securely replaced once because their original token cannot be recovered.</p><button className="button" type="button" disabled={pending || shareDetails.state !== "active"} onClick={() => void copyShareCapability(shareDetails)}>Copy link</button></div> : <div className="share-link-field"><input aria-label="Share link" value={shareCapabilities[shareDetails.id]} readOnly /><button className="button" type="button" onClick={() => void copyText(shareCapabilities[shareDetails.id] ?? "")}>Copy</button></div>}
         <dl><div><dt>Access</dt><dd>{shareDetails.mode.replace("_", " ")}</dd></div><div><dt>Expires</dt><dd>{shareDetails.expiresAt === undefined ? "None" : new Date(shareDetails.expiresAt).toLocaleString()}</dd></div><div><dt>Password</dt><dd>{shareDetails.locked ? "On" : "Off"}</dd></div><div><dt>Status</dt><dd>{shareDetails.state}</dd></div></dl>
         <div className="dialog__actions"><button className="button button--danger" type="button" disabled={pending || shareDetails.state !== "active"} onClick={() => void revokeShare(shareDetails)}>Revoke</button></div>
-      </div></Dialog>}
+      </div>}</Dialog>}
     </section>
   );
 }
@@ -2599,15 +2687,15 @@ function SynchronizationView({ addNotice }: { readonly addNotice: (kind: Notice[
             <label><input type="checkbox" checked={mirrorPipeline} onChange={event => setMirrorPipeline(event.target.checked)} />{pipeline === "volt" ? "personal.volt mirror" : "Full vault tree mirror"}</label>
             <small>Select one or both. Automatic scheduling is managed in service Settings.</small>
           </fieldset>}
-          <p className="pipeline-preview">Namespace: <code>{hostComponent ?? (pipeline === "windows" ? `sync/${connectionName || "<connection>"}` : pipeline === "pluto" ? `backups/pluto/${connectionName || "<connection>"}` : pipeline)}</code></p>
+          <p className="pipeline-preview">Namespace: <code>{hostComponent ?? (pipeline === "windows" ? `# sync windows/${connectionName || "<connection>"}` : pipeline === "pluto" ? `# sync outdoor connections/${connectionName || "<connection>"}` : pipeline)}</code></p>
           <button className="button button--primary" type="submit" disabled={pending}>Create setup code</button>
         </form>
         {enrollments.map(enrollment => <div className="one-time-code" role="status" key={`${enrollment.label}:${enrollment.code}`}><span>{enrollment.label}</span><strong>{enrollment.code}</strong><small>One use · expires {new Date(enrollment.expiresAt).toLocaleString()}.</small></div>)}
       </UniversalCard>
       <UniversalCard ordinal={2} title="Neptune fleet" className="synchronization-card"><div className="fleet-counters"><div><span>Linux agents</span><strong>{activeLinux}</strong><small>online · {agents.length} registered</small></div><div><span>Windows agents</span><strong>{activeWindows}</strong><small>online · {windowsDevices.length} registered</small></div><div><span>Pluto agents</span><strong>{activePluto}</strong><small>online · {plutoDevices.length} registered</small></div></div><p className="setting-meta">Online means a recent heartbeat received by Saturn. Registration and enabled copying are separate states; access is managed on each connection below.</p></UniversalCard>
-      <UniversalCard ordinal={3} title="Host services" className="synchronization-card"><p>Active host recovery connections. Each installed service has an independent identity, setup code and revoke lifecycle, and writes only into <code>backups/&lt;service&gt;/&lt;host&gt;</code>.</p>{identityList(hostServices, "No active host pipelines.")}</UniversalCard>
+      <UniversalCard ordinal={3} title="Host services" className="synchronization-card"><p>Active host recovery connections. Each installed service has an independent identity, setup code and revoke lifecycle, and writes only into <code># sync inner services/&lt;service&gt;/&lt;host&gt;</code>.</p>{identityList(hostServices, "No active host pipelines.")}</UniversalCard>
       <UniversalCard ordinal={4} title="Service pipelines" className="synchronization-card"><p>Active service connections. Internal services store recovery archives; Volt and Mastermind use the archive and mirror pipelines selected during registration.</p>{identityList(servicePipelines, "No active service pipelines.")}</UniversalCard>
-      <UniversalCard ordinal={5} title="Windows synchronization" className="synchronization-card"><p>Each Neptune Windows client mirrors its selected folders under <code>sync/&lt;connection&gt;</code>. Setup codes are one-time; the resulting credential is returned only to Neptune.</p><div className="pipeline-connections">{windowsDevices.length === 0 ? <p className="empty-state">No active Windows pipelines.</p> : windowsDevices.map((device) => <article className="pipeline-connection-card pipeline-connection-card--windows" aria-label={device.name} key={device.id}><div className="pipeline-identity"><span className="pipeline-identity__label">Connection name</span><strong>{device.name}</strong><span className="pipeline-identity__type">{device.syncFolderName ? `sync/${device.syncFolderName}` : "Setup required · isolated folder not assigned"}</span><span>{device.state} · {device.lastSeenAt === undefined ? "waiting for first heartbeat" : `last heartbeat ${new Date(device.lastSeenAt).toLocaleString()}`}{device.clientVersion === undefined ? "" : ` · Neptune ${device.clientVersion}`}</span></div><div className="inline-actions"><button className="button" type="button" disabled={pending || device.state !== "active"} onClick={() => void createWindowsEnrollment(device.id)}>Setup code</button><button className="button button--danger" type="button" disabled={pending || device.state !== "active"} onClick={() => setRevokeCandidate({ kind: "windows", id: device.id, name: device.name })}>Revoke</button></div></article>)}</div></UniversalCard>
+      <UniversalCard ordinal={5} title="Windows synchronization" className="synchronization-card"><p>Each Neptune Windows client mirrors its selected folders under <code># sync windows/&lt;connection&gt;</code>. Setup codes are one-time; the resulting credential is returned only to Neptune.</p><div className="pipeline-connections">{windowsDevices.length === 0 ? <p className="empty-state">No active Windows pipelines.</p> : windowsDevices.map((device) => <article className="pipeline-connection-card pipeline-connection-card--windows" aria-label={device.name} key={device.id}><div className="pipeline-identity"><span className="pipeline-identity__label">Connection name</span><strong>{device.name}</strong><span className="pipeline-identity__type">{device.syncFolderName ? `# sync windows/${device.syncFolderName}` : "Setup required · isolated folder not assigned"}</span><span>{device.state} · {device.lastSeenAt === undefined ? "waiting for first heartbeat" : `last heartbeat ${new Date(device.lastSeenAt).toLocaleString()}`}{device.clientVersion === undefined ? "" : ` · Neptune ${device.clientVersion}`}</span></div><div className="inline-actions"><button className="button" type="button" disabled={pending || device.state !== "active"} onClick={() => void createWindowsEnrollment(device.id)}>Setup code</button><button className="button button--danger" type="button" disabled={pending || device.state !== "active"} onClick={() => setRevokeCandidate({ kind: "windows", id: device.id, name: device.name })}>Revoke</button></div></article>)}</div></UniversalCard>
     <UniversalCard ordinal={6} title="Outdoor backups · Pluto" className="synchronization-card"><p>Standalone Linux agents copy selected files and folders. Configure sources, interval and enable copying in Pluto TUI.</p><div className="pipeline-connections">{plutoDevices.length === 0 ? <p className="empty-state">No active Pluto pipelines.</p> : plutoDevices.map(device => <PlutoPipelineCard key={device.id} device={device} pending={pending} onSetup={() => void createWindowsEnrollment(device.id)} onRevoke={() => setRevokeCandidate({ kind: "pluto", id: device.id, name: device.name })} />)}</div></UniversalCard>
     </div>
     {revokeCandidate === undefined ? null : <ConfirmDialog title={`Revoke ${revokeCandidate.name}?`} description={revokeCandidate.kind === "pluto" ? "This disconnects Pluto and stops access to this pipeline. Stored files and their versions remain unchanged." : revokeCandidate.kind === "windows" ? "This disconnects the Windows synchronization pipeline and revokes this client's access. Stored files remain unchanged." : "This disconnects the pipeline and revokes its backup and linked mirror access. Stored files and recovery archives remain unchanged."} confirmLabel="Revoke pipeline" danger pending={pending} onConfirm={confirmRevoke} onClose={() => setRevokeCandidate(undefined)} />}
@@ -3019,6 +3107,8 @@ function SidebarBrand() {
 
 function AuthenticatedApp({ health, onAnonymous, initialAccentColor }: { readonly health: GatewayHealth; readonly onAnonymous: () => void; readonly initialAccentColor: string }) {
   const [route, setRoute] = useState<OwnerRoute>(() => ownerRouteFromPathname(window.location.pathname));
+  const [ownerHistory, setOwnerHistory] = useState<OwnerHistory>(() => ({ session: crypto.randomUUID(), index: 0, routes: [route] }));
+  const ownerHistoryRef = useRef(ownerHistory);
   const [mobileMenu, setMobileMenu] = useState(false);
   const [narrowViewport, setNarrowViewport] = useState(() => typeof window.matchMedia === "function" && window.matchMedia("(max-width: 720px)").matches);
   const [sidebarReveal, setSidebarReveal] = useState(false);
@@ -3042,8 +3132,24 @@ function AuthenticatedApp({ health, onAnonymous, initialAccentColor }: { readonl
   }, []);
   useEffect(() => {
     const canonical = ownerRouteUrl(ownerRouteFromPathname(window.location.pathname));
-    if ((window.location.pathname.replace(/\/+$/, "") || "/") !== canonical) window.history.replaceState({}, "", canonical);
-    const restoreRoute = () => setRoute(ownerRouteFromPathname(window.location.pathname));
+    const currentState = typeof window.history.state === "object" && window.history.state !== null ? window.history.state as Record<string, unknown> : {};
+    window.history.replaceState({ ...currentState, [OWNER_HISTORY_KEY]: { session: ownerHistoryRef.current.session, index: 0 } }, "", canonical);
+    const restoreRoute = () => {
+      const next = ownerRouteFromPathname(window.location.pathname);
+      const current = ownerHistoryRef.current;
+      const index = ownerHistoryIndex(window.history.state, current);
+      const known = index === undefined ? undefined : current.routes[index];
+      const history: OwnerHistory = known !== undefined && ownerRouteUrl(known) === ownerRouteUrl(next)
+        ? { ...current, index: index ?? 0 }
+        : { session: crypto.randomUUID(), index: 0, routes: [next] };
+      if (history.session !== current.session) {
+        const state = typeof window.history.state === "object" && window.history.state !== null ? window.history.state as Record<string, unknown> : {};
+        window.history.replaceState({ ...state, [OWNER_HISTORY_KEY]: { session: history.session, index: history.index } }, "", window.location.href);
+      }
+      ownerHistoryRef.current = history;
+      setOwnerHistory(history);
+      setRoute(next);
+    };
     window.addEventListener("popstate", restoreRoute);
     return () => window.removeEventListener("popstate", restoreRoute);
   }, []);
@@ -3069,7 +3175,14 @@ function AuthenticatedApp({ health, onAnonymous, initialAccentColor }: { readonl
     root.style.setProperty("--accent", preferences.accentColor);
   }, [preferences.accentColor]);
   const commitRoute = useCallback((next: OwnerRoute, replace = false) => {
-    window.history[replace ? "replaceState" : "pushState"]({}, "", ownerRouteUrl(next));
+    const current = ownerHistoryRef.current;
+    const history: OwnerHistory = replace
+      ? { ...current, routes: current.routes.map((item, index) => index === current.index ? next : item) }
+      : { ...current, index: current.index + 1, routes: [...current.routes.slice(0, current.index + 1), next] };
+    const currentState = replace && typeof window.history.state === "object" && window.history.state !== null ? window.history.state as Record<string, unknown> : {};
+    window.history[replace ? "replaceState" : "pushState"]({ ...currentState, [OWNER_HISTORY_KEY]: { session: history.session, index: history.index } }, "", ownerRouteUrl(next));
+    ownerHistoryRef.current = history;
+    setOwnerHistory(history);
     setRoute(next);
   }, []);
   const navigate = (next: ViewName) => {
@@ -3181,7 +3294,7 @@ function AuthenticatedApp({ health, onAnonymous, initialAccentColor }: { readonl
         {route.view !== "documentation" ? null : <div className="global-actions"><button className="button button--primary" type="button" disabled={quickPending} onClick={() => quickUpload.current?.click()}>{quickPending ? "Uploading…" : "Quick upload"}</button><input ref={quickUpload} aria-label="Choose files for quick upload" className="visually-hidden-input" type="file" multiple onChange={(event) => void runQuickUpload([...event.target.files ?? []])} /></div>}
         {route.view === "dashboard" ? <DashboardView preferences={preferences} setPreferences={setPreferences} addNotice={addNotice} /> : null}
         {route.view === "files" ? <FilesView initialFolderId={ROOT_RESOURCE_ID} title="Storage" routeSegments={route.folderSegments} onPathChange={navigateFilesPath} shareCapabilities={shareCapabilities} onShareCapabilityCreated={rememberShareCapability} onShareCapabilityRevoked={forgetShareCapability} addNotice={addNotice} onUnauthorized={onAnonymous} /> : null}
-        {route.view === "storage-new" ? <FilesView initialFolderId={ROOT_RESOURCE_ID} title="Storage" presentation="new" routeSegments={route.folderSegments} onPathChange={navigateNewStoragePath} shareCapabilities={shareCapabilities} onShareCapabilityCreated={rememberShareCapability} onShareCapabilityRevoked={forgetShareCapability} addNotice={addNotice} onUnauthorized={onAnonymous} /> : null}
+        {route.view === "storage-new" ? <FilesView initialFolderId={ROOT_RESOURCE_ID} title="Storage" presentation="new" routeSegments={route.folderSegments} onPathChange={navigateNewStoragePath} storageHistory={{ canBack: ownerHistory.routes[ownerHistory.index - 1]?.view === "storage-new", canForward: ownerHistory.routes[ownerHistory.index + 1]?.view === "storage-new", onBack: () => window.history.back(), onForward: () => window.history.forward() }} shareCapabilities={shareCapabilities} onShareCapabilityCreated={rememberShareCapability} onShareCapabilityRevoked={forgetShareCapability} addNotice={addNotice} onUnauthorized={onAnonymous} /> : null}
         {route.view === "inbox" ? <InHouseDropView health={health.gateway} routeSegments={route.folderSegments} onPathChange={navigateInboxPath} shareCapabilities={shareCapabilities} onShareCapabilityCreated={rememberShareCapability} onShareCapabilityRevoked={forgetShareCapability} addNotice={addNotice} onUnauthorized={onAnonymous} /> : null}
         {route.view === "shared" ? <SharedView shareCapabilities={shareCapabilities} onShareCapabilityCreated={rememberShareCapability} onShareCapabilityRevoked={forgetShareCapability} addNotice={addNotice} onAnonymous={onAnonymous} /> : null}
         {route.view === "synchronization" ? <SynchronizationView addNotice={addNotice} /> : null}

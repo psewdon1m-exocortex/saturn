@@ -27,8 +27,18 @@ const storage = new SftpStorageAdapter(config.storage);
 let storageLayout;
 try {
   storageLayout = await migrateStorageLayout(storage, "up");
+  try {
+    const applied = await migrate(config.databaseUrl, migrationsDirectory);
+    process.stdout.write(`${JSON.stringify({ direction: "up", applied, storageLayout })}\n`);
+  } catch (error) {
+    // Database and physical paths are one release unit. Never leave the old
+    // catalog pointed at layout-v3 names when the SQL migration is rejected.
+    const rollback = await migrateStorageLayout(storage, "down").catch((rollbackError) => {
+      throw new AggregateError([error, rollbackError], "Database migration failed and storage layout rollback also failed");
+    });
+    process.stderr.write(`${JSON.stringify({ direction: "down", storageLayout: rollback, reason: "database_migration_failed" })}\n`);
+    throw error;
+  }
 } finally {
   await storage.close().catch(() => undefined);
 }
-const applied = await migrate(config.databaseUrl, migrationsDirectory);
-process.stdout.write(`${JSON.stringify({ direction: "up", applied, storageLayout })}\n`);

@@ -21,12 +21,19 @@ export function StorageNewGrid({ items, selected, loading, error, emptyMessage, 
   readonly canPreview: (resource: Resource) => boolean;
   readonly onOpen: (resource: Resource) => void;
   readonly onMenu: (event: MouseEvent, resource?: Resource) => void;
-  readonly onKeyboardMenu: (resource: Resource, x: number, y: number) => void;
+  readonly onKeyboardMenu: (resource: Resource | undefined, x: number, y: number) => void;
   readonly onShare: (share: ShareInfo) => void;
   readonly onRetry: () => void;
   readonly onDelete: () => void;
 }) {
-  return <div className="storage-new-grid" aria-label="Stored files and folders" aria-busy={loading} tabIndex={0} onContextMenu={(event) => onMenu(event)} onKeyDown={(event) => { if (event.key === "Delete") onDelete(); }}>
+  return <div className="storage-new-grid" aria-label="Stored files and folders" aria-busy={loading} tabIndex={0} onContextMenu={(event) => onMenu(event)} onKeyDown={(event) => {
+    if (event.key === "Delete") onDelete();
+    if (event.target === event.currentTarget && (event.key === "ContextMenu" || event.key === "F10" && event.shiftKey)) {
+      event.preventDefault();
+      const bounds = event.currentTarget.getBoundingClientRect();
+      onKeyboardMenu(undefined, bounds.left + 40, bounds.top + 40);
+    }
+  }}>
     {loading ? <p className="storage-new-empty" role="status">Loading folder…</p> : error ? <div className="storage-new-empty" role="alert"><p>{error}</p><button type="button" onClick={onRetry}>Try again</button></div> : items.length === 0 ? <p className="storage-new-empty">{emptyMessage}</p> : items.map((item) => {
       const fileKind = kind(item);
       const share = shares.get(item.id);
@@ -37,16 +44,15 @@ export function StorageNewGrid({ items, selected, loading, error, emptyMessage, 
         onContextMenu={(event) => { event.stopPropagation(); onMenu(event, item); }}
         onKeyDown={(event) => {
           if (event.code === "Space") event.stopPropagation();
-          if (event.target !== event.currentTarget) return;
-          if (event.key === "Enter") { event.preventDefault(); onOpen(item); }
-          if (event.code === "Space") { event.preventDefault(); onSelect(item, event.ctrlKey || event.metaKey, event.shiftKey); }
           if (event.key === "ContextMenu" || event.key === "F10" && event.shiftKey) {
-            event.preventDefault();
+            event.preventDefault(); event.stopPropagation(); event.currentTarget.focus({ preventScroll: true });
             const bounds = event.currentTarget.getBoundingClientRect();
             onKeyboardMenu(item, bounds.left + 40, bounds.top + 40);
           }
+          if (event.target !== event.currentTarget) return;
+          if (event.key === "Enter") { event.preventDefault(); onOpen(item); }
+          if (event.code === "Space") { event.preventDefault(); onSelect(item, event.ctrlKey || event.metaKey, event.shiftKey); }
         }}>
-        <div className="storage-new-file__controls"><label><input type="checkbox" aria-label={`Select ${item.name}`} checked={selected.has(item.id)} readOnly onClick={(event) => onSelect(item, true, event.shiftKey)} /></label><button className="storage-new-file__menu" type="button" disabled={pending} aria-label={`Actions for ${item.name}`} onClick={(event) => { if (event.detail === 0) { const bounds = event.currentTarget.getBoundingClientRect(); onKeyboardMenu(item, bounds.left, bounds.bottom); } else onMenu(event, item); }}>···</button></div>
         <button className={`storage-new-file__visual storage-new-file__visual--${fileKind}`} type="button" aria-label={`${action} ${item.name}`} disabled={pending} onClick={() => onOpen(item)}>
           {icon(fileKind)}
           {fileKind === "image" ? <img src={downloadUrl(item.id, true)} alt="" loading="lazy" onError={(event) => { event.currentTarget.hidden = true; }} /> : null}

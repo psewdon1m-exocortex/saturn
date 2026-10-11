@@ -97,9 +97,9 @@ release can publish artifacts.
 ## Release identity
 
 Production releases are created only by tags matching
-`saturn-vMAJOR.MINOR.PATCH`. The current fix identity is `saturn-v0.2.12`; its
+`saturn-vMAJOR.MINOR.PATCH`. The current fix identity is `saturn-v0.2.13`; its
 versioned OCI repositories are `saturn-app` and `saturn-web`, and its
-installation bundle is `saturn-0.2.12.zip`. Legacy unscoped tags such as
+installation bundle is `saturn-0.2.13.zip`. Legacy unscoped tags such as
 `v0.0.1` run verification only and cannot publish a Saturn release. Publish
 the pinned `updater-v0.6.17` dependency before the Saturn tag. Existing
 releases through `saturn-v0.2.8` remain immutable.
@@ -109,7 +109,7 @@ releases through `saturn-v0.2.8` remain immutable.
 Each service keeps its own bootstrap and environment. For Saturn:
 
 ```sh
-curl -fsSL https://github.com/psewdon1m-exocortex/saturn/releases/download/saturn-v0.2.12/bootstrap.sh | sudo sh
+curl -fsSL https://github.com/psewdon1m-exocortex/saturn/releases/download/saturn-v0.2.13/bootstrap.sh | sudo sh
 sudoedit /etc/vault/.env.production
 sudo chmod 600 /etc/vault/.env.production
 sudo vaultctl validate
@@ -125,7 +125,7 @@ the existing configuration. This also repairs the earlier Linux file-secret
 validation failures:
 
 ```sh
-curl -fsSL https://github.com/psewdon1m-exocortex/saturn/releases/download/saturn-v0.2.12/bootstrap.sh | sudo sh -s -- --refresh
+curl -fsSL https://github.com/psewdon1m-exocortex/saturn/releases/download/saturn-v0.2.13/bootstrap.sh | sudo sh -s -- --refresh
 ```
 
 Edit only these values in `/etc/vault/.env.production`:

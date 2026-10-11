@@ -37,14 +37,14 @@ describe.skipIf(!enabled)('storage catalog PostgreSQL round trip',()=>{
     await manager.initialize();
     const roots=await database.withSql(sql=>sql<{storage_path:string}[]>`SELECT storage_path FROM resources WHERE parent_id='00000000-0000-7000-8000-000000000001'`);
     for(const root of roots)await storage.mkdir(root.storage_path);
-    await storage.write('sync/known.txt',Readable.from('abd'),{offset:0,create:true});
-    await storage.mkdir('sync/new-folder');await storage.write('sync/new-folder/new.txt',Readable.from('new'),{offset:0,create:true});
+    await storage.write('# sync windows/known.txt',Readable.from('abd'),{offset:0,create:true});
+    await storage.mkdir('# sync windows/new-folder');await storage.write('# sync windows/new-folder/new.txt',Readable.from('new'),{offset:0,create:true});
     await database.withSql(async sql=>{
       await sql`INSERT INTO resources(id,type,parent_id,name,storage_path,size_bytes,sha256,status)
-        VALUES (${knownId},'file',${SYNC_RESOURCE_ID},'known.txt','sync/known.txt',3,${hash('abc')},'active'),
-          (${goneId},'file',${SYNC_RESOURCE_ID},'gone.txt','sync/gone.txt',3,${hash('old')},'active')`;
+        VALUES (${knownId},'file',${SYNC_RESOURCE_ID},'known.txt','# sync windows/known.txt',3,${hash('abc')},'active'),
+          (${goneId},'file',${SYNC_RESOURCE_ID},'gone.txt','# sync windows/gone.txt',3,${hash('old')},'active')`;
       await sql`INSERT INTO file_versions(id,resource_id,storage_path,sha256,size_bytes,mime_type,reason)
-        VALUES (${versionId},${knownId},'sync/known.txt',${hash('abc')},3,'text/plain','initial')`;
+        VALUES (${versionId},${knownId},'# sync windows/known.txt',${hash('abc')},3,'text/plain','initial')`;
       await sql`UPDATE resources SET current_version_id=${versionId} WHERE id=${knownId}`;
       await sql`INSERT INTO shares(id,token_hash,resource_id,resource_type,mode,state,classification_ceiling,created_at,updated_at)
         VALUES (${fileShare},${hash(fileShare)},${knownId},'file','download','active','internal',now(),now()),
@@ -71,11 +71,11 @@ describe.skipIf(!enabled)('storage catalog PostgreSQL round trip',()=>{
     const result=await new StorageCatalogService(database,manager).latest();
     expect(result.job?.state).toBe('ready');expect(result.job?.canSynchronize).toBe(true);
     expect(result.items).toEqual(expect.arrayContaining([
-      expect.objectContaining({kind:'added',storagePath:'sync/new-folder/new.txt'}),
-      expect.objectContaining({kind:'changed',storagePath:'sync/known.txt'}),
-      expect.objectContaining({kind:'missing',storagePath:'sync/gone.txt'}),
+      expect.objectContaining({kind:'added',storagePath:'# sync windows/new-folder/new.txt'}),
+      expect.objectContaining({kind:'changed',storagePath:'# sync windows/known.txt'}),
+      expect.objectContaining({kind:'missing',storagePath:'# sync windows/gone.txt'}),
     ]));
-    expect(await storage.exists('sync/new-folder/new.txt')).toBe(true);
+    expect(await storage.exists('# sync windows/new-folder/new.txt')).toBe(true);
     const known=await database.withSql(sql=>sql<{sha256:string}[]>`SELECT sha256 FROM resources WHERE id=${knownId}`);
     expect(known[0]?.sha256).toBe(hash('abc'));
   });
@@ -86,12 +86,12 @@ describe.skipIf(!enabled)('storage catalog PostgreSQL round trip',()=>{
     const rows=await database.withSql(sql=>sql<{id:string;storage_path:string;status:string;sha256:string;current_version_id:string}[]>`SELECT id,storage_path,status,sha256,current_version_id FROM resources WHERE type='file'`);
     expect(rows.find(row=>row.id===knownId)?.sha256).toBe(hash('abd'));
     expect(rows.find(row=>row.id===goneId)?.status).toBe('missing');
-    expect(rows.find(row=>row.storage_path==='sync/new-folder/new.txt')?.status).toBe('active');
+    expect(rows.find(row=>row.storage_path==='# sync windows/new-folder/new.txt')?.status).toBe('active');
     const old=await database.withSql(sql=>sql<{state:string;sha256:string}[]>`SELECT state,sha256 FROM file_versions WHERE id=${versionId}`);
     expect(old[0]).toMatchObject({state:'missing',sha256:hash('abc')});
     const totals=await database.withSql(sql=>sql<{size_bytes:string}[]>`SELECT size_bytes FROM resources WHERE id=${SYNC_RESOURCE_ID}`);
     expect(Number(totals[0]?.size_bytes)).toBe(6);
-    expect(await fs.readFile(path.join(directory,'storage/sync/known.txt'),'utf8')).toBe('abd');
+    expect(await fs.readFile(path.join(directory,'storage/# sync windows/known.txt'),'utf8')).toBe('abd');
     const shares=await database.withSql(sql=>sql<{id:string;state:string}[]>`SELECT id,state FROM shares`);
     expect(shares.find(row=>row.id===fileShare)?.state).toBe('revoked');
     expect(shares.find(row=>row.id===rootShare)?.state).toBe('revoked');
@@ -104,19 +104,28 @@ describe.skipIf(!enabled)('storage catalog PostgreSQL round trip',()=>{
     expect(report.job?.canSynchronize).toBe(false);
   });
   it('uses stable Volt role IDs for confidential imports after a folder rename',async()=>{
-    await storage.rename('volt','private');
+    await storage.rename('# volt','private');
     await database.withSql(async sql=>{await sql`UPDATE resources SET name='private',storage_path='private',updated_at=now() WHERE id=${VOLT_RESOURCE_ID}`;});
-    await storage.write('private/vault.kdbx',Readable.from('opaque'),{offset:0,create:true});
-    await service.start();await service.runNext();const report=await service.latest();if(report.job===null)throw new Error('Report absent');
-    await service.synchronize(report.job.id);await service.runNext();
-    expect((await service.latest()).job?.state).toBe('synchronized');
-    const imported=await database.withSql(sql=>sql<{retention_class:string;security_classification:string}[]>`SELECT retention_class,security_classification FROM resources WHERE storage_path='private/vault.kdbx'`);
-    expect(imported[0]).toMatchObject({retention_class:'keepass',security_classification:'confidential'});
+    try {
+      await storage.write('private/vault.kdbx',Readable.from('opaque'),{offset:0,create:true});
+      await service.start();await service.runNext();const report=await service.latest();if(report.job===null)throw new Error('Report absent');
+      await service.synchronize(report.job.id);await service.runNext();
+      expect((await service.latest()).job?.state).toBe('synchronized');
+      const imported=await database.withSql(sql=>sql<{retention_class:string;security_classification:string}[]>`SELECT retention_class,security_classification FROM resources WHERE storage_path='private/vault.kdbx'`);
+      expect(imported[0]).toMatchObject({retention_class:'keepass',security_classification:'confidential'});
+    } finally {
+      await storage.rename('private','# volt');
+      await database.withSql(async sql=>{await sql`UPDATE resources SET
+        name=CASE WHEN id=${VOLT_RESOURCE_ID} THEN '# volt' ELSE name END,
+        storage_path=CASE WHEN storage_path='private' THEN '# volt' ELSE '# volt/' || substring(storage_path FROM char_length('private/') + 1) END,
+        updated_at=now()
+        WHERE storage_path='private' OR storage_path LIKE 'private/%'`;});
+    }
   });
   it('rejects a report after remote contents changed without modifying catalog rows',async()=>{
-    await storage.write('sync/known.txt',Readable.from('abe'),{offset:0,create:false,truncate:true});
+    await storage.write('# sync windows/known.txt',Readable.from('abe'),{offset:0,create:false,truncate:true});
     await service.start();await service.runNext();const report=await service.latest();if(report.job===null)throw new Error('Report absent');
-    await storage.write('sync/known.txt',Readable.from('abf'),{offset:0,create:false,truncate:true});
+    await storage.write('# sync windows/known.txt',Readable.from('abf'),{offset:0,create:false,truncate:true});
     await service.synchronize(report.job.id);await service.runNext();
     expect((await service.latest()).job?.state).toBe('stale');
     const known=await database.withSql(sql=>sql<{sha256:string}[]>`SELECT sha256 FROM resources WHERE id=${knownId}`);

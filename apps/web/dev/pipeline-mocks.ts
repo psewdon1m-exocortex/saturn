@@ -68,7 +68,7 @@ export function createPipelineMockState() {
         createdAt: timestamp(-3 * hour), expectedSize: 12 * 1024 ** 2, sha256: "0".repeat(64),
         sourceVersion: "mock-preview", encrypted: service.requireEncryption, state: "complete",
         receivedSize: 12 * 1024 ** 2, updatedAt: timestamp(-3 * hour),
-        receipt: { logicalPath: `MOCK · backups/${service.namespaceSlug}/${service.deploymentId}/preview.zip`,
+        receipt: { logicalPath: `MOCK · /backups/${service.namespaceSlug}/${service.deploymentId}/preview.zip`,
           committedAt: timestamp(-3 * hour), sizeBytes: 12 * 1024 ** 2, sha256: "0".repeat(64) } }];
     },
   };

@@ -4,6 +4,7 @@ import type { Resource } from "@saturn/file-core";
 export const MASTERMIND_RESOURCE_ID = "00000000-0000-7000-8000-000000000003";
 export const SYNC_RESOURCE_ID = "00000000-0000-7000-8000-000000000004";
 export const VOLT_RESOURCE_ID = "00000000-0000-7000-8000-000000000005";
+export const OUTDOOR_CONNECTIONS_RESOURCE_ID = "00000000-0000-7000-8000-000000000009";
 
 export interface DeviceRights {
   readonly read: boolean;

@@ -1,5 +1,8 @@
 # Saturn storage root layout v2
 
+> Historical layout. Production upgrades migrate this layout to
+> `STORAGE_ROOT_LAYOUT_V3.md`; the v2 names remain only as the rollback target.
+
 This document specializes [Part 03 — backup and recovery](https://github.com/psewdon1m-exocortex/general/blob/main/PART_03_BACKUP_AND_RECOVERY.md); that central contract remains authoritative.
 
 Status: implemented; root-management policy revised in generation 13  

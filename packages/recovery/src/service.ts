@@ -158,7 +158,7 @@ export class SaturnBackupService {
 
   async publishToStorage(created: CreatedBackup): Promise<{ readonly storagePath: string; readonly sha256: string; readonly bytes: number }> {
     if (this.#storage === undefined) throw new Error("Backup storage publication is not configured");
-    const directory = "backups/gateway";
+    const directory = "# sync inner services/gateway";
     await ensureStorageTree(this.#storage, directory);
     const filename = `${created.manifest.createdAt.replaceAll(":", "-")}_${created.manifest.backupId}.zip`;
     const target = `${directory}/${filename}`;

@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
+import net from "node:net";
 import fs from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
@@ -10,6 +11,7 @@ const vaultRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..
 const outputPath = path.join(vaultRoot, "artifacts", "verification", "stage-03-file-core.json");
 const pnpmScript = path.join(vaultRoot, "node_modules", "pnpm", "bin", "pnpm.cjs");
 const docker = process.platform === "win32" ? "docker.exe" : "docker";
+const project = "vault-stage3";
 const report = {
   schema: "vault.stage-verification.v1",
   stage: 3,
@@ -18,8 +20,23 @@ const report = {
   checks: [],
 };
 const children = [];
+const temporaryPaths = [];
 let environment = process.env;
 let ownerToken = "";
+
+async function freePort() {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer();
+    server.unref();
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      if (!address || typeof address === "string") { server.close(); reject(new Error("Could not reserve a verification port")); return; }
+      const port = address.port;
+      server.close((error) => error ? reject(error) : resolve(port));
+    });
+  });
+}
 
 function pass(name, detail = {}) {
   report.checks.push({ name, status: "pass", detail });
@@ -128,20 +145,21 @@ try {
   pass("workspace quality gates", { lint: "pass", typecheck: "pass", tests: "pass", build: "pass" });
   pass("controller storage boundary", { controllersScanned: await assertNoHandlerBypass() });
 
-  run(docker, ["compose", "-p", "vault-dev", "down", "--remove-orphans"], environment, true);
-  run(docker, ["compose", "-p", "vault-stage3", "down", "--remove-orphans"], environment, true);
-  await fs.rm(path.join(vaultRoot, "data", "sftp"), { recursive: true, force: true });
-  const prepared = await prepareDevelopmentEnvironment();
-  environment = { ...process.env, ...prepared.environment };
+  run(docker, ["compose", "-p", project, "down", "--remove-orphans"], environment, true);
+  const runtimeNamespace = `stage3-${Date.now().toString(36)}`;
+  const runtimeDirectory = path.join(vaultRoot, ".tmp", runtimeNamespace);
+  temporaryPaths.push(runtimeDirectory);
+  const prepared = await prepareDevelopmentEnvironment({ postgresPort: await freePort(), sftpPort: await freePort(), runtimeNamespace });
+  environment = { ...process.env, ...prepared.environment, STORAGE_RUNTIME_CONFIG_DIR: path.join(runtimeDirectory, "storage-runtime") };
   ownerToken = (await fs.readFile(prepared.environment.OWNER_BOOTSTRAP_TOKEN_FILE, "utf8")).trim();
-  run(docker, ["compose", "-p", "vault-stage3", "up", "-d", "--wait"]);
+  run(docker, ["compose", "-p", project, "up", "-d", "--wait"]);
   pass("PostgreSQL and local SFTP ready");
 
   run(process.execPath, [pnpmScript, "--filter", "@saturn/database", "migrate"]);
   const rolledBack = run(process.execPath, [pnpmScript, "--filter", "@saturn/database", "rollback"]);
-  if (!rolledBack.stdout.includes("0002_file_core")) throw new Error("Stage 3 migration rollback did not select 0002_file_core");
+  if (!rolledBack.stdout.includes("0047_storage_layout_v3")) throw new Error("Stage 3 migration rollback did not select the current storage-layout migration");
   run(process.execPath, [pnpmScript, "--filter", "@saturn/database", "migrate"]);
-  pass("file schema migration round trip", { migration: "0002_file_core" });
+  pass("file schema migration round trip", { foundation: "0002_file_core", current: "0047_storage_layout_v3" });
 
   const worker = startArtifact("apps/worker/dist/main.js");
   let api = startArtifact("apps/api/dist/main.js");
@@ -264,8 +282,8 @@ try {
   throw error;
 } finally {
   for (const child of [...children].reverse()) await stopChild(child);
-  run(docker, ["compose", "-p", "vault-stage3", "down", "--remove-orphans"], environment, true);
-  await fs.rm(path.join(vaultRoot, "data", "sftp"), { recursive: true, force: true });
+  run(docker, ["compose", "-p", project, "down", "--remove-orphans"], environment, true);
+  for (const target of temporaryPaths) await fs.rm(target, { recursive: true, force: true }).catch(() => undefined);
   await fs.mkdir(path.dirname(outputPath), { recursive: true });
   report.finishedAt = new Date().toISOString();
   await fs.writeFile(outputPath, `${JSON.stringify(report, null, 2)}\n`, "utf8");

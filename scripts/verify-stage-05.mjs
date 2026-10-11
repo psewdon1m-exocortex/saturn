@@ -1,5 +1,6 @@
 import { randomUUID, createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
+import net from "node:net";
 import fs from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
@@ -15,7 +16,22 @@ const container = `${project}-postgres-1`;
 const report = { schema: "vault.stage-verification.v1", stage: 5, startedAt: new Date().toISOString(), success: false, checks: [] };
 let environment = process.env;
 let stageDirectory;
+let runtimeDirectory;
 const databasesToClose = [];
+
+async function freePort() {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer();
+    server.unref();
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      if (!address || typeof address === "string") { server.close(); reject(new Error("Could not reserve a verification port")); return; }
+      const port = address.port;
+      server.close((error) => error ? reject(error) : resolve(port));
+    });
+  });
+}
 
 function pass(name, detail = {}) {
   report.checks.push({ name, status: "pass", detail });
@@ -71,14 +87,16 @@ try {
   pass("workspace quality gates", { install: "frozen", lint: "pass", typecheck: "pass", tests: "pass", build: "pass" });
 
   run(docker, ["compose", "-p", project, "down", "--remove-orphans"], environment, true);
-  const prepared = await prepareDevelopmentEnvironment();
-  environment = { ...process.env, ...prepared.environment };
+  const runtimeNamespace = `stage5-${randomUUID().replaceAll("-", "")}`;
+  runtimeDirectory = path.join(vaultRoot, ".tmp", runtimeNamespace);
+  const prepared = await prepareDevelopmentEnvironment({ postgresPort: await freePort(), sftpPort: await freePort(), runtimeNamespace });
+  environment = { ...process.env, ...prepared.environment, STORAGE_RUNTIME_CONFIG_DIR: path.join(runtimeDirectory, "storage-runtime") };
   run(docker, ["compose", "-p", project, "up", "-d", "--wait"]);
   run(process.execPath, [pnpmScript, "--filter", "@saturn/database", "migrate"]);
   const rollback = run(process.execPath, [pnpmScript, "--filter", "@saturn/database", "rollback"]);
-  if (!rollback.stdout.includes("0004_recovery")) throw new Error("Recovery migration rollback did not select 0004");
+  if (!rollback.stdout.includes("0047_storage_layout_v3")) throw new Error("Recovery migration rollback did not select the current storage-layout migration");
   run(process.execPath, [pnpmScript, "--filter", "@saturn/database", "migrate"]);
-  pass("recovery schema migration round trip", { migration: "0004_recovery" });
+  pass("recovery schema migration round trip", { foundation: "0004_recovery", current: "0047_storage_layout_v3" });
 
   const recovery = await import(pathToFileURL(path.join(vaultRoot, "packages", "recovery", "dist", "index.js")));
   const databaseModule = await import(pathToFileURL(path.join(vaultRoot, "packages", "database", "dist", "index.js")));
@@ -172,7 +190,8 @@ try {
   if (remoteHash.digest("hex") !== created.archiveSha256) throw new Error("Storage publication read-back failed");
   await localStorage.delete(published.storagePath);
   await localStorage.close();
-  pass("StorageAdapter backup publication and cleanup", { storagePathClass: "backups/gateway/<generated>.zip", bytes: published.bytes });
+  if (!published.storagePath.startsWith("# sync inner services/gateway/")) throw new Error("Recovery backup used the wrong layout-v3 namespace");
+  pass("StorageAdapter backup publication and cleanup", { storagePathClass: "# sync inner services/gateway/<generated>.zip", bytes: published.bytes });
 
   recreateDatabase("vault_stage5_clean");
   const cleanDatabase = new databaseModule.Database(databaseUrl(environment.DATABASE_URL, "vault_stage5_clean"), { max: 2 });
@@ -266,6 +285,7 @@ try {
   for (const database of databasesToClose.reverse()) await database.close().catch(() => undefined);
   run(docker, ["compose", "-p", project, "down", "--remove-orphans"], environment, true);
   if (stageDirectory !== undefined) await fs.rm(stageDirectory, { recursive: true, force: true });
+  if (runtimeDirectory !== undefined) await fs.rm(runtimeDirectory, { recursive: true, force: true });
   await fs.mkdir(path.dirname(outputPath), { recursive: true });
   report.finishedAt = new Date().toISOString();
   await fs.writeFile(outputPath, `${JSON.stringify(report, null, 2)}\n`, "utf8");

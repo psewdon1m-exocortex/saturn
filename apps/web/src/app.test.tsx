@@ -4,7 +4,7 @@ import { App } from "./app.js";
 import { DROP_POINT_RESOURCE_ID, SYNC_RESOURCE_ID } from "./types.js";
 
 const pdfJsMock = vi.hoisted(() => ({ getDocument: vi.fn() }));
-vi.mock("pdfjs-dist", () => ({ GlobalWorkerOptions: { workerSrc: "" }, getDocument: pdfJsMock.getDocument }));
+vi.mock("pdfjs-dist/legacy/build/pdf.mjs", () => ({ GlobalWorkerOptions: { workerSrc: "" }, getDocument: pdfJsMock.getDocument }));
 
 HTMLDialogElement.prototype.showModal = function () {this.setAttribute("open", "");};
 HTMLDialogElement.prototype.close = function () {this.removeAttribute("open");this.dispatchEvent(new Event("close"));};
@@ -630,7 +630,7 @@ describe("owner Saturn UI", () => {
     await waitFor(() => expect(screen.getByRole("heading", { name: "Tasks" }).closest("article")?.textContent).toContain("07Tasks"));
   });
 
-  it("keeps preinstalled roots renameable and copyable but not movable or trashable", async () => {
+  it("keeps preinstalled roots immutable while ordinary root folders remain editable", async () => {
     window.history.replaceState({}, "", "/files");
     const now = new Date().toISOString();
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
@@ -640,7 +640,7 @@ describe("owner Saturn UI", () => {
       if (url.endsWith("/auth/preferences")) return json(preferences({ updatedAt: now }));
       if (url.includes("/folders/resolve?")) return json([{ id: "00000000-0000-7000-8000-000000000001", type: "folder", name: "root", storagePath: "", sizeBytes: 0, status: "active", createdAt: now, updatedAt: now }]);
       if (url.includes("/folders/") && url.includes("/children")) return json([
-        { id: "00000000-0000-7000-8000-000000000004", parentId: "00000000-0000-7000-8000-000000000001", type: "folder", name: "sync", storagePath: "sync", sizeBytes: 144_076, status: "active", createdAt: now, updatedAt: now },
+        { id: "00000000-0000-7000-8000-000000000004", parentId: "00000000-0000-7000-8000-000000000001", type: "folder", name: "# sync windows", storagePath: "# sync windows", sizeBytes: 144_076, status: "active", createdAt: now, updatedAt: now },
         { id: "01900000-0000-7000-8000-000000000001", parentId: "00000000-0000-7000-8000-000000000001", type: "folder", name: "ordinary", storagePath: "ordinary", sizeBytes: 0, status: "active", createdAt: now, updatedAt: now },
       ]);
       if (url.includes("/resources/")) return json({ id: "00000000-0000-7000-8000-000000000001", type: "folder", name: "root", storagePath: "", sizeBytes: 0, status: "active", createdAt: now, updatedAt: now });
@@ -650,15 +650,15 @@ describe("owner Saturn UI", () => {
 
     await waitFor(() => expect(document.querySelector(".storage-meta")?.textContent).toBe("2 items · 0 selected · 140.7 KB"));
     expect(screen.getByText("140.7 KB")).toBeTruthy();
-    fireEvent.click(await screen.findByLabelText("Select sync"));
+    fireEvent.click(await screen.findByLabelText("Select # sync windows"));
     const trashAction = screen.getAllByRole("button", { name: "Trash" }).find((button) => button.classList.contains("danger-link"));
     if (trashAction === undefined) throw new Error("Selection trash action is missing");
-    expect(screen.getByRole("button", { name: "Rename" })).toHaveProperty("disabled", false);
+    expect(screen.getByRole("button", { name: "Rename" })).toHaveProperty("disabled", true);
     expect(screen.getByRole("button", { name: "Move" })).toHaveProperty("disabled", true);
-    expect(screen.getByRole("button", { name: "Copy" })).toHaveProperty("disabled", false);
+    expect(screen.getByRole("button", { name: "Copy" })).toHaveProperty("disabled", true);
     expect(trashAction).toHaveProperty("disabled", true);
 
-    fireEvent.click(screen.getByLabelText("Select sync"));
+    fireEvent.click(screen.getByLabelText("Select # sync windows"));
     fireEvent.click(screen.getByLabelText("Select ordinary"));
     expect(screen.getByRole("button", { name: "Move" })).toHaveProperty("disabled", false);
     expect(screen.getByRole("button", { name: "Copy" })).toHaveProperty("disabled", false);
@@ -782,6 +782,7 @@ describe("owner Saturn UI", () => {
         { id: folderId, parentId: rootId, type: "folder", name: "projects", storagePath: "projects", sizeBytes: 6144, status: "active", createdAt: now, updatedAt: now },
       ]);
       if (url.includes(`/folders/${folderId}/children`)) return json([pdf, markdown, video]);
+      if (url.endsWith(`/files/${pdf.id}/preview`)) return new Response(new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d, 0x31, 0x2e, 0x37]), { headers: { "content-length": "8", "content-type": "application/pdf" } });
       if (url.endsWith(`/files/${markdown.id}/preview`)) return new Response(`# First heading\n\n${"A long paragraph. ".repeat(200)}\n\n## Last heading`, { headers: { "content-type": "text/markdown" } });
       if (url.includes("/shares?") || url.includes("/archives/jobs?")) return json([]);
       return json({});
@@ -793,6 +794,7 @@ describe("owner Saturn UI", () => {
     expect(await screen.findByRole("dialog", { name: "Preview manual.pdf" })).toBeTruthy();
     await waitFor(() => expect(screen.getByRole("button", { name: "Next" })).toHaveProperty("disabled", false));
     expect(pdfJsMock.getDocument).toHaveBeenCalledTimes(1);
+    expect(pdfJsMock.getDocument).toHaveBeenCalledWith({ data: new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d, 0x31, 0x2e, 0x37]) });
     expect(getPage).toHaveBeenLastCalledWith(1);
     fireEvent.click(screen.getByRole("button", { name: "Next" }));
     await waitFor(() => expect(getPage).toHaveBeenLastCalledWith(2));
@@ -857,7 +859,8 @@ describe("owner Saturn UI", () => {
     expect([...document.querySelectorAll(".share-owner-row__access")].map((item) => item.textContent)).toEqual(["Download", "Browse"]);
 
     const modifiedSort = screen.getByRole("button", { name: "Modified" });
-    expect(modifiedSort.getAttribute("aria-sort")).toBe("descending");
+    expect(modifiedSort.getAttribute("aria-pressed")).toBe("true");
+    expect(modifiedSort.getAttribute("aria-description")).toBe("Sorted descending");
     fireEvent.click(modifiedSort);
     expect([...document.querySelectorAll(".share-owner-row__name")].map((item) => item.textContent)).toEqual(["alpha archive", "zeta-report.pdf"]);
     fireEvent.click(screen.getByRole("button", { name: "Name" }));
@@ -1112,7 +1115,7 @@ describe("owner Saturn UI", () => {
     const request = fetchMock.mock.calls.find(call => requestUrl(call[0]).endsWith("/devices/enrollments") && call[1]?.method === "POST");
     expect(jsonRequestBody(request?.[1])).toEqual({ name: device.name, deviceKind: "pluto" });
     const card = await screen.findByRole("article", { name: device.name });
-    expect(within(card).getByText("backups/pluto/Outside configs")).toBeTruthy();
+    expect(within(card).getByText("# sync outdoor connections/Outside configs")).toBeTruthy();
     expect(within(card).getByText(/Copying disabled/)).toBeTruthy();
     expect(screen.getByRole("heading", { name: "Outdoor backups · Pluto" })).toBeTruthy();
     expect(screen.getByText("Pluto agents").parentElement?.textContent).toContain("1 registered");

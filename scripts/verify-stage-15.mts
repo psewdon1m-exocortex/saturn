@@ -54,6 +54,7 @@ async function main(): Promise<void> {
     database = new Database(databaseUrl.toString(), { max: 4, maintenanceBarrier: true });
 
     const prepareFixture = async (fixturePath: string, marker: string): Promise<Buffer> => {
+      if (!(await baseStorage.exists("_system").catch(() => false))) await baseStorage.mkdir("_system");
       await baseStorage.mkdir(fixturePath);
       await baseStorage.mkdir(`${fixturePath}/project files`);
       const sample = Buffer.from(`saturn ${marker} independent storage verification ${suffix}\n`, "utf8");

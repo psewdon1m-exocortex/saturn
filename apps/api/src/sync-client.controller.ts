@@ -8,6 +8,7 @@ import { SaturnApiExceptionFilter } from "./saturn-api-exception.filter.js";
 import { AUTH_SERVICE, DEVICE_SERVICE } from "./tokens.js";
 
 const resumableUploadSchema = z.object({ path: z.string().min(1).max(4096), expectedSize: z.number().int().nonnegative(), expectedSha256: z.string().regex(/^[a-f0-9]{64}$/), idempotencyKey: z.string().regex(/^[a-f0-9]{64}$/), ifMatch: z.string().max(100).optional(), ifNoneMatch: z.literal("*").optional() }).strict();
+const saturnBasePalette = { blackColor: "#000000", whiteColor: "#ffffff" } as const;
 
 @Controller("sync")
 @UseFilters(SaturnApiExceptionFilter)
@@ -57,6 +58,6 @@ export class SyncClientController {
     catch { throw new UnauthorizedException({ code: "device_authentication_required" }); }
     const preferences = await this.owner.getPreferences();
     reply.header("Cache-Control", "no-store");
-    return { accentColor: preferences.accentColor, updatedAt: preferences.updatedAt };
+    return { accentColor: preferences.accentColor, ...saturnBasePalette, updatedAt: preferences.updatedAt };
   }
 }

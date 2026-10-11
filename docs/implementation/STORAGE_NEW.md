@@ -16,8 +16,16 @@ The original information sequence is service title → path/count → search →
 table. The optional sequence is current folder title/actions → complete path
 and count → search/sort → file cards. Modification time, size and sharing status
 remain visible. Full names wrap rather than relying on hover-only tooltips.
-Selection exposes the common action toolbar; context menus, versions, overwrite,
-sharing/revocation, archive jobs, confirmations and quick preview are reused.
+Cards have no checkboxes or ellipsis buttons, and selection does not insert an
+action toolbar. Select names/card metadata with a click, Ctrl/Cmd for multiple
+items or Shift for a range; selected cards remain outlined and the count remains
+visible. Right-click a card for its actions or the grid background for folder
+actions. Shift+F10/the context-menu key opens the same menu from keyboard focus;
+Escape closes it and restores focus. The bounded menu scrolls on short screens.
+Open/preview, versions, overwrite, move and copy-to-folder are available there
+alongside clipboard, sharing, archive and confirmed trash actions. Group
+selection remains available for ZIP and trash; protected roots still block
+destructive operations. Existing handlers, dialogs and quick preview are reused.
 Root uploads remain blocked; protected roots cannot be moved or trashed.
 
 ## Private visual contract
@@ -32,8 +40,40 @@ targets, main actions 46 px. Cards reserve 148 px
 visual areas (132 px on small screens), with a 230 px minimum desktop track and
 16 px gaps. At 720 px and below, actions/search stack and cards become one
 column; content scrolls in normal page flow. Keyboard focus and reduced-motion
-styles are explicit. Original dialogs and previews retain the common dark
-operator contract.
+styles are explicit. The operator also requested a light shared-access dialog
+for the card's Shared action. It shows the object name, copyable URL and access,
+expiry, password and current status in a bounded 640 px panel. Copy uses the
+existing capability endpoint (including legacy link replacement), exposes the
+URL for manual copying, and blocks duplicate clicks while copying. Revoke uses
+the existing immediate revocation handler and preserves stored files. Escape,
+focus trapping/return, header dragging and internal scrolling reuse the common
+dialog behavior. New folder uses the same light control treatment in a bounded
+560 px dialog, with the complete destination path, a labeled name field and a
+Create folder action. Both the top action and the context-menu action use the
+existing folder-creation handler for the resolved current folder. The original
+Storage dialogs and other dialogs/previews retain the common dark operator
+contract.
+
+Breadcrumb hover underlines the folder label without changing its background or
+text color. Path separators remain undecorated; keyboard focus keeps its outline.
+Name, Modified and Size likewise use underline on hover/focus without a filled
+background. The current sort remains identified by its arrow and darker label.
+On desktop the search field's lower edge aligns with the breadcrumb divider;
+the item count stays below it. At 720 px and below search follows the path/count
+on its own full-width row.
+Back and Forward arrows beside the path traverse known adjacent Storage new
+entries in the current browser session using browser history; they do not leave
+the tab for another Saturn section. Opening a folder after Back discards the
+forward branch. Up one level opens the parent path and is disabled at root.
+Unavailable directions and navigation while loading or mutating are disabled.
+After a reload the known history starts at the current path; Up remains available
+for a directly opened nested URL. Controls have 40 px targets, accessible names,
+keyboard focus and thin inline SVG arrows in the private light palette.
+
+In auto-hide sidebar mode the workspace extends to the left viewport edge.
+The 18 px navigation activation area is a transparent overlay, so it neither
+reserves content width nor paints a dark strip on this light presentation.
+Pointer, keyboard and mobile menu entry remain available.
 
 Image cards lazily request the **existing authenticated owner preview** endpoint
 and fall back to a type icon. Other types show icons and open the existing quick
@@ -59,9 +99,10 @@ future. Removal is not automatic and belongs to the operator.
 
 `pnpm verify` runs lint, all builds, type checks and the default tests.
 `storage-new.test.tsx` checks routing, old navigation compatibility, preservation
-of the original collection, selection/search, archive submission, file chooser
+of the original collection, right-click/keyboard menus, selection/search, archive submission, file chooser
 and drag/drop dispatch, root restrictions, trash confirmation and failed-path
-retry. `auth.controller.test.ts` checks both preference generations.
+retry, group trash/clipboard paste and the right-clicked file's version/overwrite
+identity. `auth.controller.test.ts` checks both preference generations.
 
 For reproducible visual/browser acceptance, build the web app, then run
 `node scripts/verify-storage-new.mjs` from the Saturn repository. By default the

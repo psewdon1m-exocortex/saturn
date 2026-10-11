@@ -64,14 +64,14 @@ export function DocumentationPage() {
   };
 
   return <section className="workspace documentation-workspace" aria-labelledby="documentation-title">
-    <header className="workspace__head"><h1 className="page-title" id="documentation-title">Documentation</h1></header>
+    <header className="workspace__head"><h1 className="page-title" id="documentation-title">documentation</h1></header>
     <div className="documentation-inset">
       <div className="documentation-page">
         <nav ref={navigationRef} className="documentation-nav" aria-label="Documentation navigation" tabIndex={0}>
           <div className="documentation-nav-inner">
             <div className="documentation-search">
               <svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5" /><path d="m16 16 5 5" /></svg>
-              <input ref={inputRef} type="search" aria-label="Search documentation" placeholder="Search documentation" value={query}
+              <input ref={inputRef} type="search" aria-label="Search documentation" placeholder="Search" value={query}
                 onChange={event => changeQuery(event.target.value)} onKeyDown={event => { if (event.key === "Escape" && query) { event.preventDefault(); clearQuery(); } }} />
               <button type="button" className="documentation-search-clear" aria-label="Clear search" aria-hidden={!query} disabled={!query} tabIndex={query ? 0 : -1} onClick={clearQuery}>
                 <svg aria-hidden="true" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18" /></svg>

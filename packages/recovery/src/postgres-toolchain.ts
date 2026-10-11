@@ -114,16 +114,33 @@ export class PostgresCommandToolchain implements LogicalDatabaseToolchain {
     }
   }
 
-  restoreDump(dumpPath: string, mode: "clean" | "replace", signal?: AbortSignal): Promise<void> {
+  async restoreDump(dumpPath: string, mode: "clean" | "replace", signal?: AbortSignal): Promise<void> {
     if (mode === "replace" && this.#replacementSchema === undefined) throw new Error("Replacement restore must preserve the original schema first");
+    if (mode === "clean") {
+      const occupied = await this.#database.withSql(async sql => {
+        const rows = await sql<{ readonly occupied: boolean }[]>`
+          SELECT EXISTS (
+            SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public'
+            UNION ALL
+            SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public'
+            UNION ALL
+            SELECT 1 FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace
+              WHERE n.nspname = 'public' AND t.typtype IN ('d', 'e', 'r')
+          ) AS occupied
+        `;
+        return rows[0]?.occupied !== false;
+      });
+      if (occupied) throw new Error("Clean restore target must have an empty public schema");
+    }
     const connection = connectionArguments(this.#databaseUrl);
-    return runPgProcess({ executable: this.#pgRestoreExecutable, args: [
+    await runPgProcess({ executable: this.#pgRestoreExecutable, args: [
       ...this.#pgRestorePrefixArgs,
       "--exit-on-error",
       "--single-transaction",
       "--no-owner",
       "--no-acl",
-      ...(mode === "replace" ? ["--clean", "--if-exists"] : []),
+      "--clean",
+      "--if-exists",
       ...(this.#commandConnectionArgs ?? connection.args),
     ], environment: { ...connection.environment, PGCONNECT_TIMEOUT: "10", PGOPTIONS: `-c statement_timeout=${String(this.#commandTimeoutMs)} -c lock_timeout=${String(Math.min(this.#commandTimeoutMs,30_000))}` },
       inputPath: dumpPath, timeoutMs: this.#commandTimeoutMs, ...(signal === undefined ? {} : { signal }) });

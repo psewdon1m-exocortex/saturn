@@ -27,7 +27,7 @@ plaintext credential, session, cache, build output or temporary upload.
 - `BACKUP_VALIDATING`: the ZIP is closed and independently read, bounded and
   checked against its manifest.
 - `BACKUP_COMMITTED`: the verified ZIP has been atomically renamed locally and,
-  when configured, copied to `backups/gateway/` through
+  when configured, copied to `# sync inner services/gateway/` through
   `StorageAdapter`.
 - `RESTORE_VALIDATING`: every ZIP entry, size, path, digest and allow-list rule
   is checked before a database command can run.

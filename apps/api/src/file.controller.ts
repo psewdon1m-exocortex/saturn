@@ -135,7 +135,7 @@ export class FileController {
   ) {}
 
   #isVolt(resource: { readonly storagePath: string }): boolean {
-    return resource.storagePath === "volt" || resource.storagePath.startsWith("volt/");
+    return resource.storagePath === "# volt" || resource.storagePath.startsWith("# volt/");
   }
 
   #requireRecentProof(resource: { readonly storagePath: string }, request: AuthenticatedOwnerRequest): void {

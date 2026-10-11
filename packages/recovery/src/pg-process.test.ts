@@ -5,12 +5,16 @@ import { expect, it } from "vitest";
 import { PostgresCommandToolchain } from "./postgres-toolchain.js";
 import type { Database } from "@saturn/database";
 
+function cleanDatabase(occupied = false): Database {
+  return { withSql: async (callback: Parameters<Database["withSql"]>[0]) => callback((async () => [{ occupied }]) as never) } as unknown as Database;
+}
+
 it.each(["dump", "restore", "idle", "cancel"])("bounds and reaps a stalled %s subprocess", async mode => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(),"saturn-pg-deadline-"));
   try {
     const helper=path.join(dir,"stall.mjs"), pidFile=path.join(dir,"child.pid"), dump=path.join(dir,"dump");
     await fs.writeFile(helper,"import fs from 'node:fs';fs.writeFileSync(process.argv[2],String(process.pid));process.stdin.resume();setInterval(()=>{},1000);");
-    const tool=new PostgresCommandToolchain({ databaseUrl:"postgres://fixture@localhost/fixture",database:{} as Database,
+    const tool=new PostgresCommandToolchain({ databaseUrl:"postgres://fixture@localhost/fixture",database:cleanDatabase(),
       pgDumpExecutable:process.execPath,pgRestoreExecutable:process.execPath,pgDumpPrefixArgs:[helper,pidFile],pgRestorePrefixArgs:[helper,pidFile],
       maximumDumpBytes:1024,commandTimeoutMs:mode==="idle"?2000:500,dumpIdleTimeoutMs:mode==="idle"?400:2000 });
     const controller=new AbortController();
@@ -33,8 +37,18 @@ it.each(["dump", "restore", "idle", "cancel"])("bounds and reaps a stalled %s su
 it("observes failed spawn and pipe errors without an unhandled EPIPE", async () => {
   const dir=await fs.mkdtemp(path.join(os.tmpdir(),"saturn-pg-start-"));
   try {
-    const tool=new PostgresCommandToolchain({databaseUrl:"postgres://fixture@localhost/fixture",database:{} as Database,pgRestoreExecutable:path.join(dir,"missing"),maximumDumpBytes:1024,commandTimeoutMs:500});
+    const tool=new PostgresCommandToolchain({databaseUrl:"postgres://fixture@localhost/fixture",database:cleanDatabase(),pgRestoreExecutable:path.join(dir,"missing"),maximumDumpBytes:1024,commandTimeoutMs:500});
     const input=path.join(dir,"input");await fs.writeFile(input,"valuable");
     await expect(tool.restoreDump(input,"clean")).rejects.toThrow();
   }finally{await fs.rm(dir,{recursive:true,force:true});}
+});
+
+it("rejects a clean restore into a populated public schema before spawning pg_restore", async () => {
+  const tool = new PostgresCommandToolchain({
+    databaseUrl: "postgres://fixture@localhost/fixture",
+    database: cleanDatabase(true),
+    pgRestoreExecutable: path.join(os.tmpdir(), "must-not-start-pg-restore"),
+    maximumDumpBytes: 1024,
+  });
+  await expect(tool.restoreDump(path.join(os.tmpdir(), "unused.dump"), "clean")).rejects.toThrow("empty public schema");
 });

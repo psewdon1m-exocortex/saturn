@@ -1,5 +1,6 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
+import net from "node:net";
 import fs from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
@@ -35,6 +36,20 @@ const temporaryPaths = [];
 let environment = process.env;
 let database;
 let browser;
+
+async function freePort() {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer();
+    server.unref();
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      if (!address || typeof address === "string") { server.close(); reject(new Error("Could not reserve a verification port")); return; }
+      const port = address.port;
+      server.close((error) => error ? reject(error) : resolve(port));
+    });
+  });
+}
 
 function pass(name, detail = {}) { report.checks.push({ name, status: "pass", detail }); process.stdout.write(`PASS ${name}\n`); }
 
@@ -132,18 +147,21 @@ try {
   pass("workspace quality gates", { install: "frozen", lint: "pass", typecheck: "pass", tests: 63, build: "pass" });
 
   run(docker, ["compose", "-p", project, "down", "--remove-orphans"], environment, true);
-  const prepared = await prepareDevelopmentEnvironment();
+  const runtimeNamespace = `stage9-${randomUUID().replaceAll("-", "")}`;
+  const runtimeDirectory = path.join(vaultRoot, ".tmp", runtimeNamespace);
+  temporaryPaths.push(runtimeDirectory);
+  const prepared = await prepareDevelopmentEnvironment({ postgresPort: await freePort(), sftpPort: await freePort(), runtimeNamespace });
   const ownerAccessKey = (await fs.readFile(prepared.environment.OWNER_BOOTSTRAP_TOKEN_FILE, "utf8")).trim();
   const devicePepper = (await fs.readFile(prepared.environment.DEVICE_PEPPER_FILE, "utf8")).trim();
   const postgresPassword = decodeURIComponent(new URL(prepared.environment.DATABASE_URL).password);
   for (const value of [ownerAccessKey, devicePepper, postgresPassword]) knownSecrets.add(value);
-  environment = { ...process.env, ...prepared.environment, PUBLIC_ORIGIN: publicOrigin, DEVICE_DELETE_MAX_ITEMS: "4", DEVICE_DELETE_WINDOW_MS: "900000", LOG_LEVEL: "info" };
+  environment = { ...process.env, ...prepared.environment, STORAGE_RUNTIME_CONFIG_DIR: path.join(runtimeDirectory, "storage-runtime"), PUBLIC_ORIGIN: publicOrigin, DEVICE_DELETE_MAX_ITEMS: "4", DEVICE_DELETE_WINDOW_MS: "900000", LOG_LEVEL: "info" };
   run(docker, ["compose", "-p", project, "up", "-d", "--wait"]);
   run(process.execPath, [pnpmScript, "--filter", "@saturn/database", "migrate"]);
   const rollback = run(process.execPath, [pnpmScript, "--filter", "@saturn/database", "rollback"]);
-  if (!rollback.stdout.includes("0008_device_sync")) throw new Error("Stage 9 migration rollback did not select 0008");
+  if (!rollback.stdout.includes("0047_storage_layout_v3")) throw new Error("Stage 9 migration rollback did not select the current storage-layout migration");
   run(process.execPath, [pnpmScript, "--filter", "@saturn/database", "migrate"]);
-  pass("device sync schema migration round trip", { migration: "0008_device_sync", canonicalRoots: 3 });
+  pass("device sync schema migration round trip", { foundation: "0008_device_sync", current: "0047_storage_layout_v3", canonicalRoots: 3 });
 
   start(process.execPath, [path.join(vaultRoot, "apps", "worker", "dist", "main.js")]);
   start(process.execPath, [path.join(vaultRoot, "apps", "api", "dist", "main.js")]);
@@ -157,8 +175,8 @@ try {
   if (login.status !== 201) throw new Error("Owner login failed");
   for (const value of ownerJar.values()) knownSecrets.add(value);
   const canonical = await Promise.all([mastermindId, syncId, voltId].map((id) => apiRequest(`/resources/${id}`, { jar: ownerJar }).then(json)));
-  if (canonical.map((item) => item.name).join(",") !== "mastermind,sync,volt") throw new Error("Canonical sync roots are missing");
-  pass("canonical logical roots and Gateway-only bootstrap", { roots: ["mastermind", "sync", "volt"], storageCredentialsExposed: false });
+  if (canonical.map((item) => item.name).join(",") !== "# mastermind,# sync windows,# volt") throw new Error("Canonical sync roots are missing");
+  pass("canonical physical roots and stable WebDAV aliases", { physicalRoots: ["# mastermind", "# sync windows", "# volt"], webDavAliases: ["mastermind", "sync", "volt"], storageCredentialsExposed: false });
 
   const notesDevice = await createDevice(ownerJar, "Stage Laptop", [mastermindId]);
   const notesAuth = basic(notesDevice.token);
@@ -255,7 +273,7 @@ try {
   const keepassPut = await dav("volt/passwords.kdbx", keepassAuth, { method: "PUT", headers: { "Content-Type": "application/octet-stream" }, body: initialBytes });
   const keepassEtag = keepassPut.headers.get("etag");
   if (keepassPut.status !== 201 || keepassEtag === null || (await dav("volt/passwords.kdbx", notesAuth)).status !== 404) throw new Error("Dedicated KeePass scope failed");
-  const keepassResource = await database.withSql(async (sql) => (await sql`SELECT id, retention_class, security_classification FROM resources WHERE storage_path = 'volt/passwords.kdbx'`)[0]);
+  const keepassResource = await database.withSql(async (sql) => (await sql`SELECT id, retention_class, security_classification FROM resources WHERE storage_path = '# volt/passwords.kdbx'`)[0]);
   if (keepassResource.retention_class !== "keepass" || keepassResource.security_classification !== "confidential") throw new Error("Automatic KeePass policy failed");
   const shareDenied = await apiRequest("/shares", { method: "POST", jar: ownerJar, json: { resourceId: keepassResource.id, mode: "download" } });
   const previewDenied = await apiRequest(`/files/${keepassResource.id}/preview`, { jar: ownerJar });
@@ -288,17 +306,25 @@ try {
   browser = await chromium.launch({ headless: true });
   const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
   const page = await context.newPage(); const browserErrors = []; page.on("pageerror", (error) => browserErrors.push(error.message));
-  await page.goto(publicOrigin, { waitUntil: "networkidle" }); await page.getByLabel("Owner access key").fill(ownerAccessKey); await page.getByRole("button", { name: "Enter Saturn" }).click();
-  await page.getByRole("button", { name: "Settings" }).click(); await page.getByRole("heading", { name: "Settings" }).waitFor();
-  await page.getByLabel("Owner access key").fill(ownerAccessKey); await page.getByRole("button", { name: "Re-authenticate" }).click();
-  await page.getByLabel("Device name").fill("Browser Laptop"); await page.getByLabel("Mastermind").check(); await page.getByRole("button", { name: "Create device password" }).click();
-  const tokenText = await page.getByText("Copy this WebDAV password now").locator("..").innerText(); const browserToken = /\b([A-Za-z0-9_-]{43})\b/.exec(tokenText)?.[1];
-  if (browserToken === undefined) throw new Error("Browser device token was not disclosed once"); knownSecrets.add(browserToken);
+  await page.goto(publicOrigin, { waitUntil: "networkidle" }); await page.getByLabel("Access Key").fill(ownerAccessKey); await page.getByRole("button", { name: "Enter service" }).click();
+  await page.getByRole("button", { name: "Synchronization" }).click(); await page.getByRole("heading", { name: "synchronization", exact: true }).waitFor();
   const axe = await new AxeBuilder({ page }).analyze(); const serious = axe.violations.filter((item) => ["serious", "critical"].includes(item.impact ?? ""));
-  if (serious.length > 0 || await page.evaluate(() => localStorage.length + sessionStorage.length) !== 0) throw new Error("Device settings accessibility/storage policy failed");
-  await page.screenshot({ path: desktopScreenshot, fullPage: true }); await page.setViewportSize({ width: 320, height: 720 }); await page.waitForTimeout(200); await page.screenshot({ path: mobileScreenshot, fullPage: true });
+  if (serious.length > 0 || await page.evaluate(() => localStorage.length + sessionStorage.length) !== 0) throw new Error("Synchronization accessibility/storage policy failed");
+  await page.screenshot({ path: desktopScreenshot, fullPage: true }); await page.setViewportSize({ width: 320, height: 720 }); await page.waitForTimeout(200);
+  const clippedTitles = await page.locator(".synchronization-card .universal-card__head h2").evaluateAll((nodes) => nodes.filter((node) => node.scrollWidth > node.clientWidth + 1 || node.scrollHeight > node.clientHeight + 1).map((node) => node.textContent));
+  const mobileLayout = await page.evaluate(() => ({
+    overflow: document.documentElement.scrollWidth > window.innerWidth + 1,
+    viewport: window.innerWidth,
+    scrollWidth: document.documentElement.scrollWidth,
+    offenders: [...document.querySelectorAll("body *")].filter((element) => {
+      const bounds = element.getBoundingClientRect();
+      return bounds.right > window.innerWidth + 1 || bounds.left < -1;
+    }).slice(0, 8).map((element) => ({ tag: element.tagName, className: element.className, text: element.textContent?.trim().slice(0, 80), bounds: element.getBoundingClientRect().toJSON() })),
+  }));
+  if (clippedTitles.length > 0 || mobileLayout.overflow) throw new Error(`Synchronization mobile layout overflow: titles=${JSON.stringify(clippedTitles)} layout=${JSON.stringify(mobileLayout)}`);
+  await page.screenshot({ path: mobileScreenshot, fullPage: true });
   if (browserErrors.length > 0) throw new Error(`Device browser errors: ${browserErrors.join(" | ")}`);
-  pass("owner device browser workflow", { recentProof: true, oneTimeToken: true, browserStorageEntries: 0, seriousOrCriticalViolations: 0, viewports: [1440, 320] });
+  pass("owner synchronization browser workflow", { currentPipelineUi: true, browserStorageEntries: 0, seriousOrCriticalViolations: 0, clippedTitles: 0, horizontalOverflow: false, viewports: [1440, 320] });
 
   const exportDirectory = path.join(vaultRoot, ".tmp", `stage9-export-${randomUUID()}`); temporaryPaths.push(exportDirectory);
   const recoveryModule = await import(pathToFileURL(path.join(vaultRoot, "packages", "recovery", "dist", "index.js")));
@@ -320,6 +346,6 @@ try {
 finally {
   await browser?.close().catch(() => undefined); await database?.close().catch(() => undefined); for (const child of [...children].reverse()) await stop(child);
   run(docker, ["compose", "-p", project, "down", "--remove-orphans"], environment, true);
-  await fs.rm(path.join(vaultRoot, "data", "sftp"), { recursive: true, force: true }); for (const target of temporaryPaths) await fs.rm(target, { recursive: true, force: true }).catch(() => undefined);
+  for (const target of temporaryPaths) await fs.rm(target, { recursive: true, force: true }).catch(() => undefined);
   await fs.mkdir(path.dirname(outputPath), { recursive: true }); report.finishedAt = new Date().toISOString(); await fs.writeFile(outputPath, `${JSON.stringify(report, null, 2)}\n`, "utf8"); knownSecrets.clear();
 }

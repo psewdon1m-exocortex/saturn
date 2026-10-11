@@ -1,5 +1,5 @@
 import { Readable } from "node:stream";
-import { BACKUPS_RESOURCE_ID, type FileService, type Resource } from "@saturn/file-core";
+import { OUTDOOR_CONNECTIONS_RESOURCE_ID, type FileService, type Resource } from "@saturn/file-core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DeviceService, DeviceServiceError, normalizeDavPath, resourceEtag } from "./device.service.js";
 import { MASTERMIND_RESOURCE_ID, VOLT_RESOURCE_ID, SYNC_RESOURCE_ID, type DeviceEnrollmentRecord, type DeviceRecord, type DeviceRepository, type DeviceRights, type SyncConflict } from "./types.js";
@@ -77,10 +77,10 @@ function folder(id: string, parentId: string | undefined, name: string): Resourc
 
 class MemoryFiles {
   resources = new Map<string, Resource>([
-    [BACKUPS_RESOURCE_ID, folder(BACKUPS_RESOURCE_ID, "root", "backups")],
-    [MASTERMIND_RESOURCE_ID, folder(MASTERMIND_RESOURCE_ID, "root", "mastermind")],
-    [SYNC_RESOURCE_ID, folder(SYNC_RESOURCE_ID, "root", "sync")],
-    [VOLT_RESOURCE_ID, folder(VOLT_RESOURCE_ID, "root", "volt")],
+    [OUTDOOR_CONNECTIONS_RESOURCE_ID, folder(OUTDOOR_CONNECTIONS_RESOURCE_ID, "root", "# sync outdoor connections")],
+    [MASTERMIND_RESOURCE_ID, folder(MASTERMIND_RESOURCE_ID, "root", "# mastermind")],
+    [SYNC_RESOURCE_ID, folder(SYNC_RESOURCE_ID, "root", "# sync windows")],
+    [VOLT_RESOURCE_ID, folder(VOLT_RESOURCE_ID, "root", "# volt")],
   ]);
   uploadBytes = new Map<string, Buffer[]>();
   uploads = new Map<string, { parentId: string; filename: string; overwriteResourceId?: string }>();
@@ -99,7 +99,8 @@ class MemoryFiles {
     const upload = this.uploads.get(id); if (upload === undefined) throw new Error("Upload not found");
     const bytes = Buffer.concat(this.uploadBytes.get(id) ?? []);
     const targetId = upload.overwriteResourceId ?? crypto.randomUUID();
-    const value: Resource = { id: targetId, type: "file", parentId: upload.parentId, name: upload.filename, storagePath: `mastermind/${upload.filename}`, mimeType: "application/octet-stream", sizeBytes: bytes.length, sha256: Buffer.from(bytes).toString("hex").padEnd(64, "0").slice(0, 64), status: "active", securityClassification: "internal", createdAt: now, updatedAt: now };
+    const parent = await this.getResource(upload.parentId);
+    const value: Resource = { id: targetId, type: "file", parentId: upload.parentId, name: upload.filename, storagePath: `${parent.storagePath}/${upload.filename}`, mimeType: "application/octet-stream", sizeBytes: bytes.length, sha256: Buffer.from(bytes).toString("hex").padEnd(64, "0").slice(0, 64), status: "active", securityClassification: "internal", createdAt: now, updatedAt: now };
     this.resources.set(targetId, value);
     return { resource: value };
   }
@@ -294,7 +295,7 @@ describe("DeviceService", () => {
   });
 
   it("keeps the current resource and records a conflict copy for stale If-Match", async () => {
-    const current: Resource = { id: crypto.randomUUID(), type: "file", parentId: MASTERMIND_RESOURCE_ID, name: "note.md", storagePath: "mastermind/note.md", mimeType: "text/markdown", sizeBytes: 3, sha256: "a".repeat(64), status: "active", securityClassification: "internal", createdAt: now, updatedAt: now };
+    const current: Resource = { id: crypto.randomUUID(), type: "file", parentId: MASTERMIND_RESOURCE_ID, name: "note.md", storagePath: "# mastermind/note.md", mimeType: "text/markdown", sizeBytes: 3, sha256: "a".repeat(64), status: "active", securityClassification: "internal", createdAt: now, updatedAt: now };
     files.resources.set(current.id, current);
     const created = await service.createDevice({ name: "Laptop", scopeIds: [MASTERMIND_RESOURCE_ID], rights }, now);
     const context = await service.authenticate(`Bearer ${created.token}`, now);

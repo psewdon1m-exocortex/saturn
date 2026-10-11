@@ -11,6 +11,8 @@ import {
   DROP_POINT_RESOURCE_ID,
   LABORATORY_RESOURCE_ID,
   MASTERMIND_RESOURCE_ID,
+  OUTDOOR_CONNECTIONS_RESOURCE_ID,
+  REFERENCES_RESOURCE_ID,
   ROOT_RESOURCE_ID,
   SYNC_RESOURCE_ID,
   VOLT_RESOURCE_ID,
@@ -57,12 +59,14 @@ class MemoryRepository implements FileRepository {
       updatedAt: now,
     });
     for (const [id, name] of [
-      [DROP_POINT_RESOURCE_ID, "drop point"],
-      [LABORATORY_RESOURCE_ID, "laboratory"],
-      [BACKUPS_RESOURCE_ID, "backups"],
-      [MASTERMIND_RESOURCE_ID, "mastermind"],
-      [SYNC_RESOURCE_ID, "sync"],
-      [VOLT_RESOURCE_ID, "volt"],
+      [DROP_POINT_RESOURCE_ID, "# drop point"],
+      [LABORATORY_RESOURCE_ID, "# laboratory"],
+      [BACKUPS_RESOURCE_ID, "# sync inner services"],
+      [MASTERMIND_RESOURCE_ID, "# mastermind"],
+      [SYNC_RESOURCE_ID, "# sync windows"],
+      [VOLT_RESOURCE_ID, "# volt"],
+      [REFERENCES_RESOURCE_ID, "# references"],
+      [OUTDOOR_CONNECTIONS_RESOURCE_ID, "# sync outdoor connections"],
     ] as const) {
       this.resources.set(id, {
         id,
@@ -572,9 +576,9 @@ describe("FileService upload state machine", () => {
       await service.moveResource(folder.id, { parentId: SYNC_RESOURCE_ID, name: 'after-hash', idempotencyKey: 'safety-move-during-hash' });
     } finally { release(); await completed; }
     const result = await completed;
-    expect(result.resource.storagePath).toBe('sync/after-hash/moved-during-hash.txt');
+    expect(result.resource.storagePath).toBe('# sync windows/after-hash/moved-during-hash.txt');
     expect((await collect(await storage.openRead(result.resource.storagePath))).toString()).toBe('valuable');
-    expect(await storage.exists('sync/before-hash/moved-during-hash.txt')).toBe(false);
+    expect(await storage.exists('# sync windows/before-hash/moved-during-hash.txt')).toBe(false);
   }));
 
   it("records cancellation during a storage outage and removes only temporary bytes after recovery", async () => safetyFixture(async (service, repository, storage) => {
@@ -664,7 +668,7 @@ describe("FileService upload state machine", () => {
     const upload = await pending(service, 'moved.txt', 'valuable', { parentId: folder.id });
     await service.moveResource(folder.id, { parentId: SYNC_RESOURCE_ID, name: 'after', idempotencyKey: 'safety-parent-move' });
     const completed = await service.completeUpload(upload.id);
-    expect(completed.resource.storagePath).toBe('sync/after/moved.txt'); expect(await storage.exists('sync/before/moved.txt')).toBe(false);
+    expect(completed.resource.storagePath).toBe('# sync windows/after/moved.txt'); expect(await storage.exists('# sync windows/before/moved.txt')).toBe(false);
   }));
 
   it("allows only one concurrent overwrite with the same expected version", async () => safetyFixture(async (service) => {
@@ -751,7 +755,7 @@ describe("FileService upload state machine", () => {
       await storage.close(); await fs.rm(root, { recursive: true, force: true });
     }
   });
-  it("allows ordinary root folders while canonical roots remain renameable and copyable but immovable", async () => {
+  it("allows ordinary root folders while canonical roots remain immutable", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "saturn-root-policy-"));
     const storage = new LocalStorageAdapter(root);
     const repository = new MemoryRepository();
@@ -776,29 +780,26 @@ describe("FileService upload state machine", () => {
       expect(copied.storagePath).toBe("promoted copy");
       expect((await service.trashResource(ordinary.id, { idempotencyKey: "root-trash-001" })).status).toBe("trashed");
 
-      const renamedSync = await service.moveResource(SYNC_RESOURCE_ID, {
+      await expect(service.moveResource(SYNC_RESOURCE_ID, {
         parentId: ROOT_RESOURCE_ID,
         name: "device files",
         idempotencyKey: "canonical-rename-001",
-      });
-      expect(renamedSync.storagePath).toBe("device files");
-      expect(await storage.exists("sync")).toBe(false);
+      })).rejects.toThrow(/immutable/);
       await service.initializeStorage();
-      expect(await storage.exists("device files")).toBe(true);
-      expect(await storage.exists("sync")).toBe(false);
+      expect(await storage.exists("# sync windows")).toBe(true);
 
       await expect(service.moveResource(SYNC_RESOURCE_ID, {
         parentId: promoted.id,
         idempotencyKey: "canonical-move-001",
-      })).rejects.toThrow(/can be renamed but cannot be moved/);
-      const copiedSync = await service.copyResource(SYNC_RESOURCE_ID, {
+      })).rejects.toThrow(/immutable/);
+      await expect(service.copyResource(SYNC_RESOURCE_ID, {
         parentId: ROOT_RESOURCE_ID,
         name: "sync copy",
         idempotencyKey: "canonical-copy-001",
-      });
-      expect(copiedSync.storagePath).toBe("sync copy");
+      })).rejects.toThrow(/immutable/);
       await expect(service.trashResource(SYNC_RESOURCE_ID, { idempotencyKey: "canonical-trash-001" })).rejects.toThrow(/cannot be trashed/);
       await expect(service.createFolder(ROOT_RESOURCE_ID, "sync")).rejects.toThrow(/root name is reserved/);
+      await expect(service.createFolder(ROOT_RESOURCE_ID, "# sync windows")).rejects.toThrow(/root name is reserved/);
       await expect(service.createFolder(ROOT_RESOURCE_ID, "_system")).rejects.toThrow(/root name is reserved/);
     } finally {
       await storage.close();
@@ -870,7 +871,7 @@ describe("FileService upload state machine", () => {
       await repository.setUploadState(upload.id, "verifying");
       const completed = await service.completeUpload(upload.id);
       expect(completed.resource.sha256).toBe(sha256);
-      expect(completed.resource.storagePath).toBe("sync/Documents/note.txt");
+      expect(completed.resource.storagePath).toBe("# sync windows/Documents/note.txt");
       expect((await service.completeUpload(upload.id)).resource.id).toBe(completed.resource.id);
       expect((await service.getResource(folder.id)).sizeBytes).toBe(payload.length);
       expect((await service.getResource(SYNC_RESOURCE_ID)).sizeBytes).toBe(payload.length);
@@ -886,7 +887,7 @@ describe("FileService upload state machine", () => {
         idempotencyKey: "move-test-001",
       });
       expect(moved.id).toBe(completed.resource.id);
-      expect(moved.storagePath).toBe("sync/Archive/moved.txt");
+      expect(moved.storagePath).toBe("# sync windows/Archive/moved.txt");
       expect((await service.getResource(folder.id)).sizeBytes).toBe(0);
       expect((await service.getResource(archive.id)).sizeBytes).toBe(payload.length);
       expect((await service.getResource(SYNC_RESOURCE_ID)).sizeBytes).toBe(payload.length);
@@ -1158,11 +1159,11 @@ describe("FileService upload state machine", () => {
     const repository = new MemoryRepository();
     const service = new FileService(repository, storage);
     const payload = Buffer.from("recovery-zip");
-    const storagePath = "backups/chronos/vps-1/2026/09/19/archive.zip";
+    const storagePath = "# sync inner services/chronos/vps-1/2026/09/19/archive.zip";
     try {
       await storage.initialize();
       await service.initializeStorage();
-      for (const directory of ["backups/chronos", "backups/chronos/vps-1", "backups/chronos/vps-1/2026", "backups/chronos/vps-1/2026/09", "backups/chronos/vps-1/2026/09/19"])
+      for (const directory of ["# sync inner services/chronos", "# sync inner services/chronos/vps-1", "# sync inner services/chronos/vps-1/2026", "# sync inner services/chronos/vps-1/2026/09", "# sync inner services/chronos/vps-1/2026/09/19"])
         await storage.mkdir(directory);
       await storage.write(storagePath, Readable.from(payload), { offset: 0, create: true, exclusive: true, truncate: true });
       const input = {

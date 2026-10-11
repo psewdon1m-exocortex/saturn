@@ -15,8 +15,19 @@ const rootId = "00000000-0000-7000-8000-000000000001";
 const now = "2026-10-11T12:00:00.000Z";
 const resource = (id, type, name, parentId = rootId, mimeType) => ({ id, type, name, parentId, storagePath: name, sizeBytes: type === "folder" ? 32 * 1024 ** 2 : 1024 ** 2, mimeType, status: "active", createdAt: now, updatedAt: now });
 const root = resource(rootId, "folder", "root");
-const roots = ["backups", "drop point", "laboratory", "mastermind", "sync", "volt"].map((name, i) => resource(`00000000-0000-7000-8000-${String(i + 2).padStart(12, "0")}`, "folder", name));
-const current = roots[1];
+const rootFixtures = [
+  ["00000000-0000-7000-8000-000000000002", "# drop point"],
+  ["00000000-0000-7000-8000-000000000003", "# mastermind"],
+  ["00000000-0000-7000-8000-000000000004", "# sync windows"],
+  ["00000000-0000-7000-8000-000000000005", "# volt"],
+  ["00000000-0000-7000-8000-000000000006", "# laboratory"],
+  ["00000000-0000-7000-8000-000000000007", "# sync inner services"],
+  ["00000000-0000-7000-8000-000000000008", "# references"],
+  ["00000000-0000-7000-8000-000000000009", "# sync outdoor connections"],
+];
+const roots = rootFixtures.map(([id, name]) => resource(id, "folder", name));
+const current = roots.find((item) => item.name === "# drop point");
+assert.ok(current);
 const files = [
   resource("fixture-folder", "folder", "Project materials", current.id),
   resource("fixture-image", "file", "Saturn cover.svg", current.id, "image/svg+xml"),
@@ -63,7 +74,7 @@ try {
     }
     return route.fulfill({ status: 404, json: { code: "fixture_unimplemented" } });
   });
-  const open = async (url = "/storage-new/drop%20point") => { await page.goto(origin + url); await expect(page.getByRole("heading", { name: url === "/storage-new" ? "Your storage" : "drop point", exact: true })).toBeVisible(); await expect(page.locator(".storage-new-grid[aria-busy=false]")).toBeVisible(); };
+  const open = async (url = "/storage-new/%23%20drop%20point") => { await page.goto(origin + url); await expect(page.getByRole("heading", { name: url === "/storage-new" ? "Your storage" : "# drop point", exact: true })).toBeVisible(); await expect(page.locator(".storage-new-grid[aria-busy=false]")).toBeVisible(); };
   const geometry = async label => {
     const dimensions = await page.evaluate(() => ({ viewport: innerWidth, page: document.documentElement.scrollWidth, workspace: document.querySelector(".storage-new").getBoundingClientRect().width }));
     assert.ok(dimensions.page <= dimensions.viewport, `${label}: horizontal overflow ${JSON.stringify(dimensions)}`);
@@ -76,24 +87,70 @@ try {
     await open("/storage-new"); await geometry(`root ${width}px`);
     await page.screenshot({ path: path.join(output, `root-${width}.png`), fullPage: true });
   }
-  await page.setViewportSize({ width: 1440, height: 1000 }); await open();
-  await page.getByRole("checkbox", { name: "Select README.md", exact: true }).check();
-  await expect(page.getByRole("toolbar", { name: "Selection actions" })).toBeVisible();
-  await page.screenshot({ path: path.join(output, "selected-1440.png"), fullPage: true });
-  await page.getByRole("button", { name: "Actions for README.md", exact: true }).click();
-  await expect(page.getByRole("menuitem", { name: "Rename", exact: true })).toBeVisible();
+  await page.setViewportSize({ width: 1440, height: 1000 }); await open("/storage-new");
+  await expect(page.getByRole("article")).toHaveCount(rootFixtures.length);
+  for (const [, name] of rootFixtures) await expect(page.getByRole("article", { name, exact: true })).toBeVisible();
+  checks.push({ check: "all eight canonical v3 system roots are visible", roots: rootFixtures.map(([, name]) => name), state: "PASS" });
+  await page.getByRole("article", { name: "# sync windows", exact: true }).click({ button: "right" });
+  for (const action of ["Move", "Copy to folder", "Copy", "Cut", "Delete", "Rename"]) {
+    await expect(page.getByRole("menuitem", { name: action, exact: true })).toBeDisabled();
+  }
+  await page.screenshot({ path: path.join(output, "protected-root-menu-1440.png"), fullPage: false });
   await page.keyboard.press("Escape");
+  checks.push({ check: "canonical v3 system root mutation actions are disabled", state: "PASS" });
+  await page.setViewportSize({ width: 1440, height: 1000 }); await open();
+  await page.getByRole("button", { name: "README.md", exact: true }).click();
+  await expect(page.getByRole("checkbox")).toHaveCount(0);
+  await expect(page.getByRole("toolbar", { name: "Selection actions" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Actions for README.md", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("menu")).toHaveCount(0);
+  await page.screenshot({ path: path.join(output, "selected-1440.png"), fullPage: true });
+  await page.getByRole("article", { name: "README.md", exact: true }).click({ button: "right" });
+  await expect(page.getByRole("menuitem", { name: "Rename", exact: true })).toBeVisible();
+  await page.screenshot({ path: path.join(output, "right-click-1440.png"), fullPage: false });
+  await expect(page.getByRole("menu")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("article", { name: "README.md", exact: true })).toBeFocused();
+  await page.keyboard.press("Shift+F10");
+  await expect(page.getByRole("menuitem", { name: "Versions", exact: true })).toBeEnabled();
+  await expect(page.getByRole("menuitem", { name: "Overwrite", exact: true })).toBeEnabled();
+  await expect(page.getByRole("menuitem", { name: "Move", exact: true })).toBeEnabled();
+  await page.getByRole("menuitem", { name: "Copy", exact: true }).focus();
+  await page.keyboard.press("Space");
+  await expect(page.getByRole("menu")).toHaveCount(0);
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(page.getByRole("article", { name: "README.md", exact: true })).toBeFocused();
+  await expect(page.getByRole("toolbar", { name: "Selection actions" })).toHaveCount(0);
   await page.getByRole("button", { name: "Preview README.md", exact: true }).click();
   await expect(page.getByRole("dialog", { name: "Preview README.md", exact: true })).toBeVisible();
   await page.keyboard.press("Escape");
   checks.push({ check: "selection, context menu, preview and Escape", state: "PASS" });
+  await page.setViewportSize({ width: 320, height: 480 }); await open();
+  await page.getByRole("article", { name: "README.md", exact: true }).click({ button: "right" });
+  const menu = page.getByRole("menu");
+  const bounds = await menu.boundingBox();
+  assert.ok(bounds.x >= 8 && bounds.x + bounds.width <= 312 && bounds.y >= 8 && bounds.y + bounds.height <= 472);
+  await menu.evaluate(node => { node.scrollTop = node.scrollHeight; });
+  await expect(menu).toBeVisible();
+  await page.keyboard.press("End");
+  await expect(page.getByRole("menuitem", { name: "Compress to ZIP", exact: true })).toBeFocused();
+  await page.screenshot({ path: path.join(output, "right-click-320-short.png"), fullPage: false });
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("article", { name: "README.md", exact: true })).toBeFocused();
+  await expect(menu).toHaveCount(0);
+  await page.keyboard.press("Shift+F10");
+  await expect(menu).toBeVisible();
+  await page.evaluate(() => window.scrollBy(0, -10));
+  await expect(menu).toHaveCount(0);
+  checks.push({ check: "short-screen menu bounds, own scroll, keyboard End and Escape focus", state: "PASS" });
+  await page.setViewportSize({ width: 1440, height: 1000 }); await open();
   const downloadEvent = page.waitForEvent("download");
   await page.getByRole("link", { name: "Download README.md", exact: true }).click();
   const download = await downloadEvent; assert.equal(await download.failure(), null);
   assert.equal(await fs.readFile(await download.path(), "utf8"), "Verified fixture bytes");
   checks.push({ check: "download receives fixture bytes", state: "PASS" });
   await page.getByLabel("Choose files to upload", { exact: true }).setInputFiles({ name: "important.conf", mimeType: "text/plain", buffer: Buffer.from("precious bytes") });
-  await expect(page.getByRole("checkbox", { name: "Select important.conf", exact: true })).toBeVisible();
+  await expect(page.getByRole("article", { name: "important.conf", exact: true })).toBeVisible();
   assert.equal(uploadState.parentId, current.id); assert.equal(uploadState.receivedSize, 14);
   checks.push({ check: "file chooser runs resumable upload protocol", state: "PASS" });
   uploaded = undefined;
@@ -101,14 +158,14 @@ try {
   await page.locator(".storage-new").dispatchEvent("dragenter", { dataTransfer: transfer });
   await expect(page.locator(".storage-drop-overlay")).toBeVisible();
   await page.locator(".storage-new").dispatchEvent("drop", { dataTransfer: transfer });
-  await expect(page.getByRole("checkbox", { name: "Select drop.conf", exact: true })).toBeVisible();
+  await expect(page.getByRole("article", { name: "drop.conf", exact: true })).toBeVisible();
   assert.equal(uploadState.receivedSize, 10);
   checks.push({ check: "drag and drop runs resumable upload protocol", state: "PASS" });
   await page.getByRole("searchbox", { name: "Search storage", exact: true }).fill("not-found");
   await expect(page.getByText("No matching items. Try another search.", { exact: true })).toBeVisible();
   for (const variant of ["empty", "single", "many", "error"]) {
     scenario = variant; uploaded = undefined; await open();
-    if (variant === "error") { await expect(page.getByRole("button", { name: "Try again", exact: true })).toBeVisible(); scenario = "normal"; await page.getByRole("button", { name: "Try again", exact: true }).click(); await expect(page.getByRole("checkbox", { name: "Select README.md", exact: true })).toBeVisible(); }
+    if (variant === "error") { await expect(page.getByRole("button", { name: "Try again", exact: true })).toBeVisible(); scenario = "normal"; await page.getByRole("button", { name: "Try again", exact: true }).click(); await expect(page.getByRole("article", { name: "README.md", exact: true })).toBeVisible(); }
     if (variant === "many") await expect(page.locator(".storage-new-file")).toHaveCount(120);
     await geometry(variant); await page.screenshot({ path: path.join(output, `${variant}.png`), fullPage: true });
   }

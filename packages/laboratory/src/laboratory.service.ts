@@ -43,7 +43,7 @@ function filename(value: string): string {
   return normalized;
 }
 function isVolt(resource: Resource): boolean {
-  return resource.storagePath === "volt" || resource.storagePath.startsWith("volt/");
+  return resource.storagePath === "# volt" || resource.storagePath.startsWith("# volt/");
 }
 function publicClient(value: LaboratoryClient): PublicLaboratoryClient {
   return { id: value.id, name: value.name, state: value.state,

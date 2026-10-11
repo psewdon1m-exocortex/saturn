@@ -91,7 +91,7 @@ describe("BackupIngestService", () => {
     const context = await service.authenticate(`Bearer ${redeemed.token}`);
     const payload = Buffer.from("plain-zip"); const digest = createHash("sha256").update(payload).digest("hex");
     const run = await service.createRun(context, redeemed.slug, { filename: "chronos.zip", createdAt: new Date("2026-09-08T10:00:00Z"), backupType: "full", expectedSize: payload.length, sha256: digest, sourceVersion: "1", encrypted: false, idempotencyKey: "deployment-path-test" });
-    expect(repository.runs.get(run.id)?.finalPath).toContain("backups/chronos/vps-1/2026/09/08/");
+    expect(repository.runs.get(run.id)?.finalPath).toContain("# sync inner services/chronos/vps-1/2026/09/08/");
   });
 
   it("invalidates an unredeemed setup code when its individual pipeline is revoked", async () => {
@@ -122,9 +122,11 @@ describe("BackupIngestService", () => {
     await expect(service.append(context, "service-a", run.id, 0, 1, Readable.from("x"))).rejects.toBeInstanceOf(BackupServiceError);
     await service.append(context, "service-a", run.id, 8, payload.length - 8, Readable.from(payload.subarray(8))); const completed = await service.complete(context, "service-a", run.id);
     expect(completed).toMatchObject({ state: "complete", receipt: { sha256: digest, sizeBytes: payload.length, serviceSlug: "service-a" } });
+    expect(completed.receipt?.logicalPath).toMatch(/^\/backups\/service-a\//);
+    expect(completed.receipt?.logicalPath).not.toContain("# sync inner services");
     expect(published).toHaveLength(1);
     expect(published[0]).toMatchObject({ id: run.id, state: "complete" });
-    expect(published[0]?.finalPath).toContain("backups/service-a/");
+    expect(published[0]?.finalPath).toContain("# sync inner services/service-a/");
   });
   it("keeps each helper recovery producer in its own top-level backups folder", async () => {
     for (const scope of ["updater", "neptune", "gryphon", "wyvern", "window"] as const) {
@@ -139,7 +141,7 @@ describe("BackupIngestService", () => {
       });
       await service.append(context, identity.slug, run.id, 0, payload.length, Readable.from(payload));
       await service.complete(context, identity.slug, run.id);
-      expect(repository.runs.get(run.id)?.finalPath).toMatch(new RegExp(`^backups/${scope}/recovery-host/2026/10/02/`));
+      expect(repository.runs.get(run.id)?.finalPath).toMatch(new RegExp(`^# sync inner services/${scope}/recovery-host/2026/10/02/`));
       await service.revokeService(identity.serviceId);
       await expect(service.authenticate(`Bearer ${identity.token}`)).rejects.toMatchObject({ code: "unauthorized" });
       expect(repository.runs.get(run.id)?.state).toBe("complete");

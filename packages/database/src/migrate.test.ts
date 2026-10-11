@@ -55,6 +55,7 @@ describe("migration manifest", () => {
       "0044_pluto_outdoor",
       "0045_share_thumbnail_access",
       "0046_transfer_safety",
+      "0047_storage_layout_v3",
     ]);
     for (const pair of pairs) {
       await expect(fs.readFile(pair.up, "utf8")).resolves.toMatch(/\S/);

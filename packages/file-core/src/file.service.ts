@@ -3,7 +3,7 @@ import { Readable } from "node:stream";
 import { v7 as uuidv7 } from "uuid";
 import type { AuditSink } from "@saturn/audit";
 import type { StorageAdapter } from "@saturn/storage";
-import { ensureStorageDirectory, joinStoragePath, normalizeStorageName, SATURN_BUSINESS_ROOT_DIRECTORIES, SATURN_SYSTEM_DIRECTORIES } from "@saturn/storage";
+import { ensureStorageDirectory, joinStoragePath, normalizeStorageName, SATURN_BUSINESS_ROOT_DIRECTORIES, SATURN_LAYOUT_V2_ROOT_DIRECTORIES, SATURN_SYSTEM_DIRECTORIES } from "@saturn/storage";
 import type { CopiedResourceRecord, FileRepository, UploadLimits } from "./repository.js";
 import { archivedVersionPurgeAfter } from "./retention.js";
 import { detectContentType } from "./content-type.js";
@@ -12,6 +12,8 @@ import {
   BACKUPS_RESOURCE_ID,
   LABORATORY_RESOURCE_ID,
   MASTERMIND_RESOURCE_ID,
+  OUTDOOR_CONNECTIONS_RESOURCE_ID,
+  REFERENCES_RESOURCE_ID,
   ROOT_RESOURCE_ID,
   SYNC_RESOURCE_ID,
   VOLT_RESOURCE_ID,
@@ -45,17 +47,21 @@ const CANONICAL_ROOT_RESOURCE_IDS = [
   MASTERMIND_RESOURCE_ID,
   SYNC_RESOURCE_ID,
   VOLT_RESOURCE_ID,
+  REFERENCES_RESOURCE_ID,
+  OUTDOOR_CONNECTIONS_RESOURCE_ID,
 ] as const;
 const CANONICAL_ROOT_RESOURCE_ID_SET = new Set<string>(CANONICAL_ROOT_RESOURCE_IDS);
 const CANONICAL_DEFAULT_NAME_BY_ID = new Map<string, string>([
-  [DROP_POINT_RESOURCE_ID, "drop point"],
-  [LABORATORY_RESOURCE_ID, "laboratory"],
-  [BACKUPS_RESOURCE_ID, "backups"],
-  [MASTERMIND_RESOURCE_ID, "mastermind"],
-  [SYNC_RESOURCE_ID, "sync"],
-  [VOLT_RESOURCE_ID, "volt"],
+  [DROP_POINT_RESOURCE_ID, "# drop point"],
+  [LABORATORY_RESOURCE_ID, "# laboratory"],
+  [BACKUPS_RESOURCE_ID, "# sync inner services"],
+  [MASTERMIND_RESOURCE_ID, "# mastermind"],
+  [SYNC_RESOURCE_ID, "# sync windows"],
+  [VOLT_RESOURCE_ID, "# volt"],
+  [REFERENCES_RESOURCE_ID, "# references"],
+  [OUTDOOR_CONNECTIONS_RESOURCE_ID, "# sync outdoor connections"],
 ]);
-const RESERVED_ROOT_NAMES = new Set([...SATURN_BUSINESS_ROOT_DIRECTORIES, "_system"].map((name) => name.toLocaleLowerCase()));
+const RESERVED_ROOT_NAMES = new Set([...SATURN_BUSINESS_ROOT_DIRECTORIES, ...SATURN_LAYOUT_V2_ROOT_DIRECTORIES, "_system"].map((name) => name.toLocaleLowerCase()));
 const MUTATION_LOCK_MS = 60 * 60 * 1_000;
 const UPLOAD_LOCK_MS = 6 * 60 * 60 * 1_000;
 const PURGE_DELETE_CONCURRENCY = 8;
@@ -125,7 +131,9 @@ export class FileService {
     }
     for (const id of CANONICAL_ROOT_RESOURCE_IDS) {
       const resource = await this.getResource(id);
-      if (resource.type !== "folder" || resource.parentId !== ROOT_RESOURCE_ID || resource.status !== "active" || resource.storagePath.includes("/")) {
+      const expectedName = CANONICAL_DEFAULT_NAME_BY_ID.get(id);
+      if (resource.type !== "folder" || resource.parentId !== ROOT_RESOURCE_ID || resource.status !== "active"
+        || expectedName === undefined || resource.name !== expectedName || resource.storagePath !== expectedName) {
         throw new Error(`Canonical Saturn root is invalid: ${id}`);
       }
       await ensureStorageDirectory(this.#storage, resource.storagePath);
@@ -322,7 +330,7 @@ export class FileService {
     if (!["public", "internal", "confidential", "secret"].includes(classification)) throw new Error("Security classification is invalid");
     const current = await this.getResource(resourceId);
     if (current.status !== "active") throw new Error("Resource is not active");
-    if ((current.storagePath === "volt" || current.storagePath.startsWith("volt/")) && !["confidential", "secret"].includes(classification)) {
+    if ((current.storagePath === "# volt" || current.storagePath.startsWith("# volt/")) && !["confidential", "secret"].includes(classification)) {
       throw new Error("Volt resources cannot be downgraded below confidential");
     }
     const updated = await this.#repository.setSecurityClassification(resourceId, classification);
@@ -751,9 +759,7 @@ export class FileService {
     const targetParent = await this.getResource(input.parentId);
     if (targetParent.type !== "folder" || targetParent.status !== "active") throw new Error("Move destination is not active");
     const name = normalizeStorageName(input.name ?? source.name);
-    if (CANONICAL_ROOT_RESOURCE_ID_SET.has(source.id) && targetParent.id !== ROOT_RESOURCE_ID) {
-      throw new Error("Canonical Saturn roots can be renamed but cannot be moved");
-    }
+    if (CANONICAL_ROOT_RESOURCE_ID_SET.has(source.id)) throw new Error("Canonical Saturn roots are immutable");
     if (targetParent.id === ROOT_RESOURCE_ID && source.type !== "folder") throw new Error("Only folders can be placed directly in the Saturn root");
     this.#assertRootNameAvailable(targetParent.id, name, source.id);
     const newPath = joinStoragePath(targetParent.storagePath, name);
@@ -800,6 +806,7 @@ export class FileService {
     const completed = await this.#completedMutation("copy", input.idempotencyKey, resourceId);
     if (completed !== undefined) return completed;
     if (source.id === ROOT_RESOURCE_ID || source.status !== "active") throw new Error("Resource cannot be copied");
+    if (CANONICAL_ROOT_RESOURCE_ID_SET.has(source.id)) throw new Error("Canonical Saturn roots are immutable");
     await this.#assertNotManagedBackup(source);
     const targetParent = await this.getResource(input.parentId);
     if (targetParent.type !== "folder" || targetParent.status !== "active") throw new Error("Copy destination is not active");

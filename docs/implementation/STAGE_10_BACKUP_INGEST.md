@@ -61,7 +61,7 @@ owner.
 - Size, concurrent-run, daily-ingest and stored-byte quotas are transactionally
   enforced independently per service.
 - Completed backup bytes match the declared SHA-256 and live under
-  `/backups/<service>/<YYYY>/<MM>/<DD>/...` through `StorageAdapter`.
+  `/# sync inner services/<service>/<YYYY>/<MM>/<DD>/...` through `StorageAdapter`.
 - Owner dashboard shows last success, freshness, usage, failures and last
   restore-test evidence; retention candidates are deterministic and owner/worker
   controlled, never producer controlled.
@@ -164,7 +164,7 @@ list, content-download, completed-archive delete or retention endpoint.
   freshness, usage, failures and restore status.
 - Updater, Neptune, Gryphon and Wyvern recovery use optional independent
   producer identities. A server enrolls only installed services; each identity
-  has its own setup/revoke lifecycle and derived `backups/<service>/<server>`
+  has its own setup/revoke lifecycle and derived `# sync inner services/<service>/<server>`
   boundary. Updater never chooses a neighboring storage path, and Saturn
   exposes no browser helper-recovery form.
 - `pnpm verify:stage:10` passed 14 aggregate checks on 2026-08-26: 67 tests and

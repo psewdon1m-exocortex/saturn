@@ -11,15 +11,17 @@ import {
   DROP_POINT_RESOURCE_ID,
   LABORATORY_RESOURCE_ID,
   MASTERMIND_RESOURCE_ID,
+  OUTDOOR_CONNECTIONS_RESOURCE_ID,
+  REFERENCES_RESOURCE_ID,
   ROOT_RESOURCE_ID,
   SYNC_RESOURCE_ID,
   VOLT_RESOURCE_ID,
 } from "@saturn/file-core";
 import {
   RuntimeStorageManager,
-  SATURN_BUSINESS_ROOT_DIRECTORIES,
   SATURN_SYSTEM_DIRECTORIES,
   SftpStorageAdapter,
+  migrateStorageLayout,
   normalizeStorageName,
   type StorageAdapter,
   type StorageCapacity,
@@ -31,15 +33,28 @@ const MAX_INDEX_ENTRIES = 100_000;
 const MAX_INDEX_DEPTH = 128;
 
 const ROLE_IDS = {
-  "drop point": DROP_POINT_RESOURCE_ID,
+  dropPoint: DROP_POINT_RESOURCE_ID,
   laboratory: LABORATORY_RESOURCE_ID,
-  backups: BACKUPS_RESOURCE_ID,
+  innerServices: BACKUPS_RESOURCE_ID,
   mastermind: MASTERMIND_RESOURCE_ID,
   volt: VOLT_RESOURCE_ID,
-  sync: SYNC_RESOURCE_ID,
+  windowsSync: SYNC_RESOURCE_ID,
+  outdoorConnections: OUTDOOR_CONNECTIONS_RESOURCE_ID,
+  references: REFERENCES_RESOURCE_ID,
 } as const;
 
 type RoleName = keyof typeof ROLE_IDS;
+const ROLE_NAMES: readonly RoleName[] = Object.keys(ROLE_IDS) as RoleName[];
+const DEFAULT_ROLE_NAMES: Readonly<Record<RoleName, string>> = {
+  dropPoint: "# drop point",
+  laboratory: "# laboratory",
+  innerServices: "# sync inner services",
+  mastermind: "# mastermind",
+  volt: "# volt",
+  windowsSync: "# sync windows",
+  outdoorConnections: "# sync outdoor connections",
+  references: "# references",
+};
 
 export interface StorageConnectionInput {
   readonly host: string;
@@ -169,16 +184,20 @@ function policy(storagePath: string, roleNames: Readonly<Record<RoleName, string
 }
 
 function defaultRoleNames(): Record<RoleName, string> {
-  return Object.fromEntries(SATURN_BUSINESS_ROOT_DIRECTORIES.map((name) => [name, name])) as Record<RoleName, string>;
+  return { ...DEFAULT_ROLE_NAMES };
 }
 
 function parseRoleNames(value: unknown): Record<RoleName, string> | undefined {
   if (typeof value !== "object" || value === null || !("roleNames" in value)) return undefined;
-  const source = (value as { roleNames?: unknown }).roleNames;
+  const record = value as { version?: unknown; roleNames?: unknown };
+  // v1 manifests used display names as semantic keys. Layout v3 has fixed,
+  // immutable names, so a v1 target is upgraded to the v3 defaults.
+  if (record.version === 1) return defaultRoleNames();
+  const source = record.roleNames;
   if (typeof source !== "object" || source === null) return undefined;
   const result = {} as Record<RoleName, string>;
   const unique = new Set<string>();
-  for (const role of SATURN_BUSINESS_ROOT_DIRECTORIES) {
+  for (const role of ROLE_NAMES) {
     const candidate = (source as Record<string, unknown>)[role];
     if (typeof candidate !== "string") return undefined;
     const name = normalizeStorageName(candidate);
@@ -199,7 +218,7 @@ async function readRoleNames(storage: StorageAdapter): Promise<Record<RoleName, 
 }
 
 async function writeRoleNames(storage: StorageAdapter, roleNames: Readonly<Record<RoleName, string>>, profileId: string): Promise<void> {
-  const payload = Buffer.from(`${JSON.stringify({ version: 1, profileId, roleNames })}\n`, "utf8");
+  const payload = Buffer.from(`${JSON.stringify({ version: 2, profileId, roleNames })}\n`, "utf8");
   await storage.write(PROFILE_MANIFEST, Readable.from([payload]), { offset: 0, create: true, truncate: true });
 }
 
@@ -262,9 +281,10 @@ export class StorageConnectionService {
       const rootEntries = await listAll(adapter, "");
       const directFiles = rootEntries.filter((entry) => entry.type === "file");
       if (directFiles.length > 0) throw new Error("files_are_not_allowed_in_storage_root");
+      await migrateStorageLayout(adapter, "up");
       for (const directory of SATURN_SYSTEM_DIRECTORIES) if (!(await adapter.exists(directory))) await adapter.mkdir(directory);
       const roleNames = await readRoleNames(adapter);
-      for (const role of SATURN_BUSINESS_ROOT_DIRECTORIES) {
+      for (const role of ROLE_NAMES) {
         const name = roleNames[role];
         if (!(await adapter.exists(name))) await adapter.mkdir(name);
         if ((await adapter.stat(name)).type !== "directory") throw new Error("protected_storage_root_is_not_directory");

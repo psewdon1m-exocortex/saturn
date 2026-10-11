@@ -113,13 +113,32 @@ try {
     const snapshotOutputPath = path.join(config.recovery.archiveDirectory, `pre-restore-${new Date().toISOString().replaceAll(":", "-")}.zip`);
     const mode = command === "restore-clean" ? "clean" : "replace";
     const participant = await storageModule.createStorageRecoveryParticipant(config, storage);
-    const result = await service.restore({
-      archivePath: path.resolve(archiveArgument),
-      mode,
-      configuration: { ...participant, verifyFiles: () => toolchain.verifyStorage(storage) },
-      ...(mode === "clean" ? {} : { snapshotOutputPath, snapshotInput: safeInputs }),
-    }, () => command === "restore-rollback" ? Promise.resolve() : databaseModule.migrate(config.databaseUrl, safeInputs.migrationsDirectory), action => barrierDatabase.withExclusiveMaintenance(action));
-    process.stdout.write(`${JSON.stringify({ state: "complete", ...result })}\n`);
+    const originalLayoutVersion = await storage.exists("# sync inner services") ? 3 : 2;
+    let selectedLayoutVersion = originalLayoutVersion;
+    try {
+      const result = await service.restore({
+        archivePath: path.resolve(archiveArgument),
+        mode,
+        configuration: { ...participant, verifyFiles: async () => {
+          const rows = await database.withSql(sql => sql`SELECT value FROM system_metadata WHERE key='storage_layout' LIMIT 1`);
+          const value = rows[0]?.value;
+          const version = typeof value === "object" && value !== null && "version" in value ? Number(value.version) : NaN;
+          if (version !== 2 && version !== 3) throw new Error("Restored database has an unsupported storage layout");
+          if (version !== selectedLayoutVersion) {
+            await storageModule.migrateStorageLayout(storage, version === 3 ? "up" : "down");
+            selectedLayoutVersion = version;
+          }
+          await toolchain.verifyStorage(storage);
+        } },
+        ...(mode === "clean" ? {} : { snapshotOutputPath, snapshotInput: safeInputs }),
+      }, () => command === "restore-rollback" ? Promise.resolve() : databaseModule.migrate(config.databaseUrl, safeInputs.migrationsDirectory), action => barrierDatabase.withExclusiveMaintenance(action));
+      process.stdout.write(`${JSON.stringify({ state: "complete", ...result, storageLayoutVersion: selectedLayoutVersion })}\n`);
+    } catch (error) {
+      if (selectedLayoutVersion !== originalLayoutVersion) {
+        await storageModule.migrateStorageLayout(storage, originalLayoutVersion === 3 ? "up" : "down").catch(() => undefined);
+      }
+      throw error;
+    }
   }
 } finally {
   await storage?.close().catch(() => undefined);

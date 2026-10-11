@@ -1,6 +1,8 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
+import http from "node:http";
 import { createRequire } from "node:module";
+import net from "node:net";
 import fs from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
@@ -23,11 +25,47 @@ const apiOrigin = "http://127.0.0.1:3000";
 const rootId = "00000000-0000-7000-8000-000000000004";
 const report = { schema: "vault.stage-verification.v1", stage: 8, startedAt: new Date().toISOString(), success: false, checks: [] };
 const children = [];
+const servers = [];
 const runtimeLogs = [];
 const knownSecrets = new Set();
+const temporaryPaths = [];
 let environment = process.env;
 let database;
 let browser;
+
+async function freePort() {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer();
+    server.unref();
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      if (!address || typeof address === "string") { server.close(); reject(new Error("Could not reserve a verification port")); return; }
+      const port = address.port;
+      server.close((error) => error ? reject(error) : resolve(port));
+    });
+  });
+}
+
+async function startKernelFixture(token) {
+  const publicUrl = new URL(publicOrigin);
+  const server = http.createServer((request, response) => {
+    if (request.method !== "POST" || request.url !== "/api/v1/register/resolve" || request.headers.authorization !== `Bearer ${token}`) {
+      response.writeHead(404).end();
+      return;
+    }
+    response.writeHead(200, { "Content-Type": "application/json" });
+    response.end(JSON.stringify({ schema: "exocortex.register.resolution.v1", values: {
+      "services.saturn.sni": { value: publicUrl.hostname, secret: false },
+      "services.saturn.port": { value: publicUrl.port || "443", secret: false },
+    } }));
+  });
+  await new Promise((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve); });
+  servers.push(server);
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("Kernel fixture did not bind a TCP port");
+  return `http://127.0.0.1:${String(address.port)}`;
+}
 
 function pass(name, detail = {}) {
   report.checks.push({ name, status: "pass", detail });
@@ -180,16 +218,26 @@ try {
   pass("workspace quality gates", { install: "frozen", lint: "pass", typecheck: "pass", tests: 59, build: "pass" });
 
   run(docker, ["compose", "-p", project, "down", "--remove-orphans"], environment, true);
-  const prepared = await prepareDevelopmentEnvironment();
+  const runtimeNamespace = `stage8-${randomUUID().replaceAll("-", "")}`;
+  const runtimeDirectory = path.join(vaultRoot, ".tmp", runtimeNamespace);
+  temporaryPaths.push(runtimeDirectory);
+  const prepared = await prepareDevelopmentEnvironment({ postgresPort: await freePort(), sftpPort: await freePort(), runtimeNamespace });
   const ownerAccessKey = (await fs.readFile(prepared.environment.OWNER_BOOTSTRAP_TOKEN_FILE, "utf8")).trim();
   const sharePepper = (await fs.readFile(prepared.environment.SHARE_PEPPER_FILE, "utf8")).trim();
   const authPepper = (await fs.readFile(prepared.environment.AUTH_PEPPER_FILE, "utf8")).trim();
   const postgresPassword = decodeURIComponent(new URL(prepared.environment.DATABASE_URL).password);
-  for (const secret of [ownerAccessKey, sharePepper, authPepper, postgresPassword]) knownSecrets.add(secret);
+  const kernelToken = randomBytes(32).toString("base64url");
+  const kernelTokenFile = path.join(runtimeDirectory, "kernel-token");
+  await fs.writeFile(kernelTokenFile, `${kernelToken}\n`, { encoding: "utf8", mode: 0o600 });
+  const kernelUrl = await startKernelFixture(kernelToken);
+  for (const secret of [ownerAccessKey, sharePepper, authPepper, postgresPassword, kernelToken]) knownSecrets.add(secret);
   environment = {
     ...process.env,
     ...prepared.environment,
+    STORAGE_RUNTIME_CONFIG_DIR: path.join(runtimeDirectory, "storage-runtime"),
     PUBLIC_ORIGIN: publicOrigin,
+    KERNEL_URL: kernelUrl,
+    KERNEL_TOKEN_FILE: kernelTokenFile,
     SHARE_PASSWORD_FAILURE_LIMIT: "5",
     SHARE_PACKAGE_MAX_FILES: "20",
     SHARE_PACKAGE_MAX_BYTES: "16777216",
@@ -201,9 +249,9 @@ try {
   run(docker, ["compose", "-p", project, "up", "-d", "--wait"]);
   run(process.execPath, [pnpmScript, "--filter", "@saturn/database", "migrate"]);
   const rollback = run(process.execPath, [pnpmScript, "--filter", "@saturn/database", "rollback"]);
-  if (!rollback.stdout.includes("0007_external_shares")) throw new Error("Stage 8 migration rollback did not select 0007");
+  if (!rollback.stdout.includes("0047_storage_layout_v3")) throw new Error("Stage 8 migration rollback did not select the current storage-layout migration");
   run(process.execPath, [pnpmScript, "--filter", "@saturn/database", "migrate"]);
-  pass("external sharing schema migration round trip", { migration: "0007_external_shares" });
+  pass("external sharing schema migration round trip", { foundation: "0007_external_shares", current: "0047_storage_layout_v3" });
 
   start(process.execPath, [path.join(vaultRoot, "apps", "worker", "dist", "main.js")]);
   start(process.execPath, [path.join(vaultRoot, "apps", "api", "dist", "main.js")]);
@@ -335,8 +383,22 @@ try {
   if (childrenResponse.status !== 200 || !visibleChildren.some((item) => item.id === folderFile.id) || !visibleChildren.some((item) => item.id === nestedFolder.id)
     || visibleChildren.some((item) => item.id === secretFile.id) || escape.status !== 404) throw new Error("Folder share descendant/classification boundary failed");
   const preparedPackageResponse = await apiRequest(publicPath(folderShare.token, "/package"), { method: "POST", jar: folderJar, json: {} });
-  const preparedPackage = await responseJson(preparedPackageResponse);
-  if (preparedPackageResponse.status !== 201 || preparedPackage.state !== "ready") throw new Error(`Folder package preparation failed with ${String(preparedPackageResponse.status)}`);
+  const queuedPackage = await responseJson(preparedPackageResponse);
+  if (preparedPackageResponse.status !== 201 || queuedPackage.state !== "preparing") throw new Error(`Folder package preparation failed with ${String(preparedPackageResponse.status)}`);
+  const packageDeadline = Date.now() + 60_000;
+  let packageStatus;
+  do {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const statusResponse = await apiRequest(publicPath(folderShare.token, "/package/status"), { jar: folderJar });
+    if (statusResponse.status !== 200) throw new Error(`Folder package status failed with ${String(statusResponse.status)}`);
+    packageStatus = await responseJson(statusResponse);
+    if (packageStatus.state === "failed" || packageStatus.state === "expired") throw new Error(`Folder package entered ${packageStatus.state}`);
+  } while (packageStatus.state !== "ready" && Date.now() < packageDeadline);
+  if (packageStatus.state !== "ready") throw new Error("Folder package did not become ready before the deadline");
+  const packageRows = await database.withSql(async (sql) => sql`SELECT id,storage_path,size_bytes,sha256 FROM share_packages WHERE id=${queuedPackage.id} AND state='ready'`);
+  const packageRow = packageRows[0];
+  if (packageRow === undefined) throw new Error("Ready folder package row was not found");
+  const preparedPackage = { ...queuedPackage, storagePath: packageRow.storage_path, sizeBytes: Number(packageRow.size_bytes), sha256: packageRow.sha256, state: "ready" };
   const packageResponse = await apiRequest(publicPath(folderShare.token, "/package"), { jar: folderJar });
   const packageBytes = Buffer.from(await packageResponse.arrayBuffer());
   const entries = await zipEntries(packageBytes);
@@ -384,10 +446,12 @@ try {
   await page.goto(`${publicOrigin}/s/${protectedShare.token}`, { waitUntil: "networkidle" });
   const pageSource = await page.content();
   if (!pageSource.includes("noindex,nofollow,noarchive")) throw new Error("Public share page is missing no-index policy");
-  await page.getByLabel("Share password").fill(password);
-  await page.getByRole("button", { name: "Unlock" }).click();
-  await page.getByText("READ ONLY").waitFor();
-  await page.getByText(/any content delivered to a browser can still be copied/i).waitFor();
+  await page.getByLabel("Password").fill(password);
+  await page.getByRole("button", { name: "Continue" }).click();
+  await page.getByRole("heading", { name: "renamed-capability.png", exact: true }).waitFor();
+  await page.getByText("View only", { exact: true }).waitFor();
+  await page.getByText("About access", { exact: true }).click();
+  await page.getByText(/any content displayed in a browser can still be copied/i).waitFor();
   const axe = await new AxeBuilder({ page }).analyze();
   const serious = axe.violations.filter((violation) => ["serious", "critical"].includes(violation.impact ?? ""));
   if (serious.length > 0) throw new Error(`Public share accessibility violations: ${serious.map((item) => item.id).join(",")}`);
@@ -401,21 +465,27 @@ try {
   await page.screenshot({ path: mobileScreenshot, fullPage: true });
   if (browserErrors.length > 0) throw new Error(`Public share browser errors: ${browserErrors.join(" | ")}`);
 
-  const ownerContext = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+  const ownerContext = await browser.newContext({ viewport: { width: 1280, height: 800 }, permissions: ["clipboard-read", "clipboard-write"] });
   const ownerPage = await ownerContext.newPage();
   await ownerPage.goto(publicOrigin, { waitUntil: "networkidle" });
-  await ownerPage.getByLabel("Owner access key").fill(ownerAccessKey);
-  await ownerPage.getByRole("button", { name: "Enter Saturn" }).click();
+  await ownerPage.getByLabel("Access Key").fill(ownerAccessKey);
+  await ownerPage.getByRole("button", { name: "Enter service" }).click();
   await ownerPage.getByRole("button", { name: "Shared" }).click();
-  await ownerPage.getByRole("heading", { name: "Shared" }).waitFor();
-  await ownerPage.getByLabel("Resource ID").fill(nestedFile.id);
-  await ownerPage.getByRole("button", { name: "Create capability" }).click();
-  const oneTimeText = await ownerPage.getByText("Copy this URL now").locator("..").innerText();
-  const browserToken = /\/s\/([A-Za-z0-9_-]{43})/.exec(oneTimeText)?.[1];
-  if (browserToken === undefined) throw new Error("Owner browser did not disclose the newly created URL once");
+  await ownerPage.getByRole("heading", { name: "shared", exact: true }).waitFor();
+  const ownerRow = ownerPage.locator(".share-owner-row").filter({ hasText: "renamed-capability.png" }).first();
+  await ownerRow.waitFor();
+  await ownerRow.locator(".share-owner-row__toggle").click();
+  await ownerRow.getByRole("button", { name: "Copy link" }).click();
+  const shareUrlInput = ownerRow.getByLabel("Share URL for renamed-capability.png");
+  await shareUrlInput.waitFor();
+  const browserShareUrl = await shareUrlInput.inputValue();
+  const browserToken = /\/s\/([A-Za-z0-9_-]{43})/.exec(browserShareUrl)?.[1];
+  if (browserToken === undefined) throw new Error("Owner browser did not return a valid capability URL");
+  const clipboardText = await ownerPage.evaluate(() => navigator.clipboard.readText());
+  if (clipboardText !== browserShareUrl) throw new Error("Owner browser did not copy the capability URL to the clipboard");
   knownSecrets.add(browserToken);
   await ownerContext.close();
-  pass("owner and public browser workflows", { oneTimeUrl: true, unlock: true, honestViewOnly: true, browserStorageEntries: 0, seriousOrCriticalViolations: 0, viewports: [1440, 320] });
+  pass("owner and public browser workflows", { capabilityClipboard: true, unlock: true, honestViewOnly: true, browserStorageEntries: 0, seriousOrCriticalViolations: 0, viewports: [1440, 320] });
 
   const exportDirectory = path.join(vaultRoot, ".tmp", `stage8-export-${randomUUID()}`);
   const recoveryModule = await import(pathToFileURL(path.join(vaultRoot, "packages", "recovery", "dist", "index.js")));
@@ -458,8 +528,9 @@ try {
   await browser?.close().catch(() => undefined);
   await database?.close().catch(() => undefined);
   for (const child of [...children].reverse()) await stop(child);
+  for (const server of servers) await new Promise((resolve) => server.close(resolve));
   run(docker, ["compose", "-p", project, "down", "--remove-orphans"], environment, true);
-  await fs.rm(path.join(vaultRoot, "data", "sftp"), { recursive: true, force: true });
+  for (const target of temporaryPaths) await fs.rm(target, { recursive: true, force: true }).catch(() => undefined);
   await fs.mkdir(path.dirname(outputPath), { recursive: true });
   report.finishedAt = new Date().toISOString();
   await fs.writeFile(outputPath, `${JSON.stringify(report, null, 2)}\n`, "utf8");

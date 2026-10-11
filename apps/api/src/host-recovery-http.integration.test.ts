@@ -121,7 +121,7 @@ it("stores host archives over actual HTTP, rejects missing media type without ac
     const result = await completed.json() as BackupRunRecord;
     expect(result.state).toBe("complete"); expect(result.receipt).toMatchObject({ sha256: digest, sizeBytes: body.length });
     const stored = await backups.getRunForOwner(run.id);
-    expect(stored.finalPath).toMatch(new RegExp(`^backups/${scope}/fixture-host/`));
+    expect(stored.finalPath).toMatch(new RegExp(`^# sync inner services/${scope}/fixture-host/`));
     expect(await fs.readFile(path.join(root, stored.finalPath))).toEqual(body);
     expect(await storage.exists(stored.tempPath)).toBe(false);
   }

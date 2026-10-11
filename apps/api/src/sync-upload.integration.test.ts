@@ -60,7 +60,7 @@ it.skipIf(!databaseUrl)("resumes scoped Windows uploads, rejects stale precondit
     expect((await cancel(partialPayload.idempotencyKey)).json()).toMatchObject({status:"abandoned"});
     expect((await cancel("not-a-key")).statusCode).toBe(400);
     await devices.revokeDevice(a.device.id); expect((await inject({ method: "GET", url: target, headers })).statusCode).toBe(401);
-    expect(await storage.exists("sync/Win A/config.txt")).toBe(true);
+    expect(await storage.exists("# sync windows/Win A/config.txt")).toBe(true);
   } finally {
     await app.close(); await db.close(); await storage.close(); await fs.rm(root,{recursive:true,force:true});
     await admin.withSql(async sql => { await sql`SET client_min_messages=warning`; await sql.unsafe(`DROP SCHEMA ${schema} CASCADE`); }); await admin.close();

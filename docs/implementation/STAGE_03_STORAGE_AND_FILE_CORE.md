@@ -27,7 +27,7 @@ Evidence SHA-256: `0b3bf1a2fbf81de96780aa7995bb404b1357d33e9089bc9a35b9f9164faf4
 | Upload state machine | Created → uploading → verifying → committing → active; retryable/final failure and abandoned states remain explicit |
 | Commit invariant | A resource becomes visible only after exact byte count, full SHA-256 and atomic storage rename succeed |
 | Mutation core | Create folder, list/stat, stable-ID move/rename, recursive copy and physical soft-delete into `_system/trash/YYYY/MM/<resource_id>` |
-| Root policy | Six stable-ID preinstalled roots are rename-only; ordinary root folders support create, rename, move, copy and reversible delete; direct root files and `_system` mutations are denied |
+| Root policy | Layout v3 exposes eight fixed-ID `#` system roots whose root objects are immutable; ordinary root folders support create, rename, move, copy and reversible delete; direct root files and `_system` mutations are denied |
 | Concurrency | Upload and resource-tree mutations acquire database-backed expiring locks; upload offset updates use compare-and-set |
 | Recovery hooks | Every multi-system mutation is journaled; failed database commits attempt a storage rollback and otherwise remain marked for reconciliation |
 | HTTP API | Owner-bearer-protected endpoints for resources, folders, resumable uploads, downloads, Range, move, copy and soft-delete |
