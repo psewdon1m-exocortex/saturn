@@ -5,6 +5,7 @@ import "@fontsource/space-grotesk/700.css";
 import { App } from "./app.js";
 import "./styles.css";
 import "./storage-new.css";
+import "./documentation.css";
 
 const root = document.querySelector<HTMLDivElement>("#root");
 if (root === null) throw new Error("Saturn web root is missing");

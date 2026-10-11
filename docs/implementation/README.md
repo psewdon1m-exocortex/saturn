@@ -11,6 +11,11 @@ The current physical storage contract and its migration/rollback gates are
 defined in `STORAGE_ROOT_LAYOUT_V2.md`. It supersedes legacy `gateway/drive`
 paths in earlier stage narratives; historical migration names remain unchanged.
 
+The current in-application operator guide and its content/layout acceptance are
+documented in [Embedded documentation](EMBEDDED_DOCUMENTATION.md). Its current
+instructions supersede historical UI labels and capability descriptions in
+earlier stage narratives; historical verification receipts remain unchanged.
+
 ## 1. Program objective
 
 Deliver a production-capable personal storage Gateway where every browser,

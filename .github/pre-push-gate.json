@@ -26,14 +26,19 @@
     "internal_documentation": {
       "applicable": true,
       "evidence": [
-        "apps/web/src/app.tsx"
+        "apps/web/src/app.tsx",
+        "apps/web/src/documentation-sections.tsx",
+        "apps/web/src/documentation-page.tsx",
+        "apps/web/src/documentation-page.test.tsx",
+        "scripts/verify-documentation.mjs"
       ]
     },
     "technical_documentation": {
       "applicable": true,
       "evidence": [
         "README.md",
-        "DEPLOYMENT_READINESS.md"
+        "DEPLOYMENT_READINESS.md",
+        "docs/implementation/EMBEDDED_DOCUMENTATION.md"
       ]
     },
     "security": {

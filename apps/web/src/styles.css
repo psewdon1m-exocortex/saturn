@@ -749,7 +749,14 @@ button.share-status--active:active { transform: scale(.985); }
 }
 .card-grid--settings { grid-template-columns: minmax(0, 1fr); gap: 30px; }
 .synchronization { padding-bottom: 40px; }
-.synchronization .page-title { font-size: clamp(46px, 6vw, 80px); line-height: .95; text-transform: lowercase; }
+.synchronization > .workspace__head {
+  width: 100%;
+  height: 123px;
+  min-height: 123px;
+  padding: 15px 30px 16px;
+  align-items: flex-start;
+}
+.synchronization .page-title { font-size: clamp(46px, 6vw, 80px); line-height: .95; letter-spacing: 0; text-transform: lowercase; }
 @media (max-width: 480px) {
   .synchronization .page-title { font-size: clamp(40px, 12vw, 46px); }
 }
@@ -1337,6 +1344,7 @@ button.share-browser__name:active:not(:disabled) { transform: scale(.985); trans
   .backup-schedule-controls { grid-template-columns: 1fr; gap: 18px; }
   .backup-run-action { width: 100%; height: 40px; }
   .synchronization-grid { grid-template-columns: 1fr; }
+  .synchronization > .workspace__head { height: 112px; min-height: 112px; padding: 48px 18px 14px; }
   .synchronization-card { grid-column: 1 !important; }
   .synchronization-card .universal-card__body { min-width: 0; }
   .synchronization-create { grid-template-columns: minmax(0, 1fr); }

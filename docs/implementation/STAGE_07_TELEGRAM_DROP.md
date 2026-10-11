@@ -11,7 +11,7 @@ Saturn still owns Drop codes, upload-only sessions, quotas, revocation and the d
 - Gryphon calls `POST /internal/gryphon/command` over the private service network.
 - Saturn authenticates the call with its dedicated bearer token and accepts the neutral `exocortex.telegram.command.v1` envelope.
 - Saturn automatically registers `/drop`, `/drop_status` and `/drop_revoke` in Gryphon. They map to the adapter's `drop`, `status` and `revoke` actions.
-- `/drop` immediately creates a real, one-time Drop Point code without opening an intermediate Saturn menu.
+- `/drop` immediately creates a short-lived, multi-client Drop Point admission code without opening an intermediate Saturn menu. Clients admitted to that channel share its absolute lifetime, quota and delivery queue. This is distinct from a single-use agent setup or Gryphon `/link` code.
 - The `/drop` reply includes Saturn's canonical `${PUBLIC_ORIGIN}/drop` URL next to the code. The code remains separate and is never placed in a query string or Telegram link.
 - Gryphon proves that the actor is linked to the Saturn connection. Saturn records that actor on generated Drop challenges so later revocation remains identity-scoped.
 - Saturn sends completion and brute-force notifications through Gryphon's authenticated service-scoped Unix socket.

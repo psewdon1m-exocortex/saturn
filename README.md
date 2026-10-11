@@ -4,6 +4,12 @@ The optional **Storage new** tab at `/storage-new` uses the current shared-link
 visual style for authenticated file browsing. **Storage** at `/files` retains
 its original table and operations. See [the design and verification contract](docs/implementation/STORAGE_NEW.md).
 
+The authenticated **Documentation** tab at `/documentation` contains the current
+operator guide for file operations, Drop Point, sharing, host/service pipelines,
+Neptune Windows, Pluto, storage switching, updates and recovery. It uses local
+full-text search and two independent scroll regions following the central UI
+contract. See [embedded documentation and verification](docs/implementation/EMBEDDED_DOCUMENTATION.md).
+
 ## Pluto outdoor files
 
 Synchronization includes the **Pluto · Linux files and folders** type and an **Outdoor backups · Pluto** card. Creation requires only a connection name. A 15-minute setup code enrolls the standalone Pluto TUI into `backups/pluto/<connection name>`. Sources, interval and the separate copying switch are owned by Pluto. Neptune fleet displays Pluto separately without a Neptune runtime dependency.
@@ -55,10 +61,11 @@ CLI-сценарием. После подключения переключате
 Synchronization остаётся местом для подключения и наблюдения за агентами.
 Управление во вкладке Synchronization доступно по действующей сессии владельца
 без повторного ввода Access Key; изменяющие запросы сохраняют CSRF-защиту.
-Экран содержит ровно пять рабочих карточек: создание pipeline, сводку Neptune
-fleet, host recovery-службы, service/Volt/Mastermind pipeline и Windows sync.
-Host recovery представлен четырьмя полностью независимыми pipeline для Gryphon,
-Wyvern, Updater и Neptune. На сервере создаются только фактически нужные
+Экран содержит шесть рабочих карточек: создание pipeline, сводку Neptune
+fleet, host recovery-службы, service/Volt/Mastermind pipeline, Windows sync
+и Outdoor backups · Pluto.
+Host recovery представлен пятью полностью независимыми pipeline для Gryphon,
+Wyvern, Updater, Neptune и Window. На сервере создаются только фактически нужные
 подключения; каждое имеет собственные setup code и revoke. Volt связывает архив
 с зеркалом `personal.volt`, а Mastermind — архив
 с полным файловым зеркалом `/mastermind`: в Storage видны отдельные файлы и
@@ -90,11 +97,11 @@ release can publish artifacts.
 ## Release identity
 
 Production releases are created only by tags matching
-`saturn-vMAJOR.MINOR.PATCH`. The current fix identity is `saturn-v0.2.11`; its
+`saturn-vMAJOR.MINOR.PATCH`. The current fix identity is `saturn-v0.2.12`; its
 versioned OCI repositories are `saturn-app` and `saturn-web`, and its
-installation bundle is `saturn-0.2.11.zip`. Legacy unscoped tags such as
+installation bundle is `saturn-0.2.12.zip`. Legacy unscoped tags such as
 `v0.0.1` run verification only and cannot publish a Saturn release. Publish
-the pinned `updater-v0.6.16` dependency before the Saturn tag. Existing
+the pinned `updater-v0.6.17` dependency before the Saturn tag. Existing
 releases through `saturn-v0.2.8` remain immutable.
 
 ## Production installation
@@ -102,7 +109,7 @@ releases through `saturn-v0.2.8` remain immutable.
 Each service keeps its own bootstrap and environment. For Saturn:
 
 ```sh
-curl -fsSL https://github.com/psewdon1m-exocortex/saturn/releases/download/saturn-v0.2.11/bootstrap.sh | sudo sh
+curl -fsSL https://github.com/psewdon1m-exocortex/saturn/releases/download/saturn-v0.2.12/bootstrap.sh | sudo sh
 sudoedit /etc/vault/.env.production
 sudo chmod 600 /etc/vault/.env.production
 sudo vaultctl validate
@@ -118,7 +125,7 @@ the existing configuration. This also repairs the earlier Linux file-secret
 validation failures:
 
 ```sh
-curl -fsSL https://github.com/psewdon1m-exocortex/saturn/releases/download/saturn-v0.2.11/bootstrap.sh | sudo sh -s -- --refresh
+curl -fsSL https://github.com/psewdon1m-exocortex/saturn/releases/download/saturn-v0.2.12/bootstrap.sh | sudo sh -s -- --refresh
 ```
 
 Edit only these values in `/etc/vault/.env.production`:
@@ -218,7 +225,8 @@ service-scoped `GRYPHON_SOCKET_PATH`. The installer provisions
 function is connected, Gryphon grants its paired Telegram account access to Saturn.
 If that service binding is revoked, selecting the paired bot again restores it without another code.
 Install and update the shared Gryphon instance through `sudo updater tui` on the host.
-After linking, `/drop` creates a one-time Drop Point code immediately;
+After linking, `/drop` immediately creates a short-lived multi-client Drop Point
+admission code; clients share the channel lifetime, quota and delivery queue.
 `/drop_status` and `/drop_revoke` inspect or revoke access.
 
 The current six-service deployment, trust, recovery and acceptance contract is documented in [Deployment readiness](DEPLOYMENT_READINESS.md).
@@ -226,12 +234,12 @@ The current six-service deployment, trust, recovery and acceptance contract is d
 ## Unified updates (protocol 2)
 
 See [Update protocol, saved ZIP and first migration](docs/UPDATE-PROTOCOL.md).
-The UI uses Updater **0.6.16**, an exact selected version, the standard ZIP saved
+The UI uses Updater **0.6.17**, an exact selected version, the standard ZIP saved
 on the operator PC, and durable status/progress for Saturn releases. Shared
 Updater, Neptune and Gryphon release operations use `sudo updater tui` on the
 host. No update ZIP is retained on the application host.
 
-Release builds pin the published Updater 0.6.16 installer by the SHA-256 in
+Release builds pin the published Updater 0.6.17 installer by the SHA-256 in
 `.release/updater.sha256` and verify it before extraction. This digest was
 verified against the production-signed Updater manifest and existing trust key.
 

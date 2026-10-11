@@ -6,13 +6,14 @@ and the shared-agent contracts in
 [Part 09](https://github.com/psewdon1m-exocortex/general/blob/main/PART_09_SERVICE_AGENTS_DEPLOYMENT_AND_LIFECYCLE.md) and
 [Part 10](https://github.com/psewdon1m-exocortex/general/blob/main/PART_10_SERVICE_AGENTS_UI_AND_OPERATOR_WORKFLOWS.md).
 
-Saturn 0.2.11 pins the published Updater 0.6.16 and Neptune 0.1.13 host
+Saturn 0.2.12 pins the published Updater 0.6.17 and Neptune 0.1.13 host
 artifacts. Its release qualification records the exact published Kernel 0.3.11
 machine-principal migration, resolution and revocation contract for INT-16.
 
-The 0.2.11 Storage new interface adds an optional responsive card view while
-preserving the original Storage table and all existing access boundaries. Its
-transfer lifecycle hardening retires dead one-shot WebDAV uploads after a
+The 0.2.12 embedded operator guide adds current searchable instructions and an
+obligatory browser documentation gate. It retains the 0.2.11 Storage new card
+view, original Storage table and all existing access boundaries. Transfer
+lifecycle hardening retires dead one-shot WebDAV uploads after a
 coordinated restart without deleting resumable, owner, Drop or recoverable
 payloads. Conditional retries revalidate the target identity and cannot replace
 a newer or trashed resource. Reconciliation scans are single-owner operations,
@@ -30,9 +31,15 @@ Populate actual Kernel/Volt bootstrap coordinates, service tokens, SFTP host fin
 
 ## Recovery boundaries
 
-Keep the Access Key and host-recovery passphrase separately from recovery files. Main-service recovery retains user settings and application data while preserving or requiring re-enrollment of external host trust. Host recovery is controlled through `sudo updater tui`: Updater, Neptune, Gryphon and Wyvern are optional independent pipelines with separate setup codes, producer identities and revoke lifecycles. Gateway stores each configured service under its own `backups/<service>/<server>` tree; an absent service needs no identity. Saturn exposes neither a helper-recovery browser form nor a proxy route. The files exclude executables, release trust keys, systemd units and head deployment environments. Install trusted software before restoring one downloaded service-scoped file. Each file fails explicitly at 128 MiB expanded or 10000 files; it never silently omits data or replaces neighboring service roots.
+Keep the Access Key and host-recovery passphrase separately from recovery files. Main-service recovery retains user settings and application data while preserving or requiring re-enrollment of external host trust. Host recovery is controlled through `sudo updater tui`: Updater, Neptune, Gryphon, Wyvern and Window are optional independent pipelines with separate setup codes, producer identities and revoke lifecycles. Gateway stores each configured service under its own `backups/<service>/<server>` tree; an absent service needs no identity. Saturn exposes neither a helper-recovery browser form nor a proxy route. The files exclude executables, release trust keys, systemd units and head deployment environments. Install trusted software before restoring one downloaded service-scoped file. Each file fails explicitly at 128 MiB expanded or 10000 files; it never silently omits data or replaces neighboring service roots.
 
 ## Acceptance evidence
+
+The authenticated `/documentation` operator guide follows the central bounded,
+two-scroll-owner contract and documents current file, host/agent, backup,
+restore and update behavior. Direct navigation retains owner authentication
+and private/no-store/noindex delivery. Its acceptance and coverage limits are
+recorded in [Embedded documentation](docs/implementation/EMBEDDED_DOCUMENTATION.md).
 
 The optional owner **Storage new** view has its own
 [design and compatibility contract](docs/implementation/STORAGE_NEW.md).

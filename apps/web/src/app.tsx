@@ -2,6 +2,7 @@ import { PlutoPipelineCard } from "./pluto-pipeline-card.js";
 import { displayOpaqueKey, editOpaqueKey, pasteOpaqueKey, OpaqueKeyInput } from "./opaque-key-input.js";
 import { ServiceLogsPanel } from "./ServiceLogsPanel";
 import { StorageAnalysisPanel } from "./storage-analysis-panel.js";
+import { DocumentationPage } from "./documentation-page.js";
 import { StorageNewGrid } from "./storage-new-grid.js";
 import { openAgentInitialization, confirmAgentAction, type InitializationJob } from "./agent-initialize.js";
 import { BackupPolicyPanel } from "./service-agents";
@@ -2440,19 +2441,6 @@ function PageHeader({ eyebrow, title, id }: { readonly eyebrow?: string; readonl
   return <header className="workspace__head"><div>{eyebrow === undefined ? null : <p className="eyebrow">{eyebrow}</p>}<h1 className="page-title" id={id}>{title}</h1></div></header>;
 }
 
-function DocumentationView() {
-  return <section className="workspace" aria-labelledby="documentation-title">
-    <PageHeader eyebrow="Saturn operator reference" title="Documentation" id="documentation-title" />
-    <div className="documentation-content">
-      <UniversalCard ordinal={1} title="Storage model"><p>All storage access passes through Saturn Gateway. The owner UI never receives Storage Box credentials.</p><p>Preinstalled root folders are rename-only; ordinary root folders remain fully manageable.</p></UniversalCard>
-      <UniversalCard ordinal={2} title="Access model"><p>The owner workspace uses one Access Key. Drop sessions, shared links, devices and backup producers use separate scoped capabilities.</p></UniversalCard>
-      <UniversalCard ordinal={3} title="Operations"><p>Implementation, verification and recovery runbooks are maintained in the project documentation directory on the Saturn host.</p></UniversalCard>
-      <UniversalCard ordinal={4} title="Changing storage"><p>Settings → Storage connection can validate and select an independent SFTP target from an authenticated owner session. Saturn migrates zero file bytes, rebuilds the visible catalog and revokes capabilities that belonged to the previous file set.</p><p>The previous storage remains untouched. Selecting it again requires its credential and performs another validated index rebuild.</p><p>For unseen changes on the active storage, use Analyze storage in the same card. Review the saved report, then confirm Synchronize catalog to import new files, update changed metadata and mark absent files as missing. Existing resource IDs and file bytes are preserved; affected shared links are revoked. A stale report requires another analysis.</p></UniversalCard>
-      <UniversalCard ordinal={5} title="Storage presentations"><p>Storage keeps the original table. Storage new shows the same folders and files as cards, using the current shared-link visual style. Both tabs use the same file operations and access rules; no files are migrated when you switch.</p><p>In Storage new, open a folder or preview a supported file using its visual area. Use the checkbox or name to select it, then the action toolbar or the three-dot menu. New folder, search, sorting, breadcrumbs and downloads remain available; uploading directly into root is blocked.</p></UniversalCard>
-    </div>
-  </section>;
-}
-
 function StatusRow({ label, state, detail }: { readonly label: string; readonly state: "ready" | "unavailable" | "busy"; readonly detail?: string | undefined }) {
   return <div className="status-row"><span>{label}</span><span className={`semantic-status semantic-status--${state}`}>{detail ?? (state === "ready" ? "Service Reachability" : state === "busy" ? "Busy" : "Unavailable")}<i aria-hidden="true" /></span></div>;
 }
@@ -3189,7 +3177,7 @@ function AuthenticatedApp({ health, onAnonymous, initialAccentColor }: { readonl
         <p className="sr-only" aria-live="polite">{navigationAnnouncement}</p>
         <div className="sidebar__bottom"><button type="button" aria-current={route.view === "documentation" ? "page" : undefined} onClick={() => navigate("documentation")}>Documentation</button><button type="button" onClick={() => void logout()}>Logout</button></div>
       </aside>
-      <main className="content" id="main-content">
+      <main className={`content${route.view === "documentation" ? " content--documentation" : ""}`} id="main-content">
         {route.view !== "documentation" ? null : <div className="global-actions"><button className="button button--primary" type="button" disabled={quickPending} onClick={() => quickUpload.current?.click()}>{quickPending ? "Uploading…" : "Quick upload"}</button><input ref={quickUpload} aria-label="Choose files for quick upload" className="visually-hidden-input" type="file" multiple onChange={(event) => void runQuickUpload([...event.target.files ?? []])} /></div>}
         {route.view === "dashboard" ? <DashboardView preferences={preferences} setPreferences={setPreferences} addNotice={addNotice} /> : null}
         {route.view === "files" ? <FilesView initialFolderId={ROOT_RESOURCE_ID} title="Storage" routeSegments={route.folderSegments} onPathChange={navigateFilesPath} shareCapabilities={shareCapabilities} onShareCapabilityCreated={rememberShareCapability} onShareCapabilityRevoked={forgetShareCapability} addNotice={addNotice} onUnauthorized={onAnonymous} /> : null}
@@ -3199,7 +3187,7 @@ function AuthenticatedApp({ health, onAnonymous, initialAccentColor }: { readonl
         {route.view === "synchronization" ? <SynchronizationView addNotice={addNotice} /> : null}
         {route.view === "trash" ? <TrashView retentionDays={preferences.trashRetentionDays} addNotice={addNotice} onUnauthorized={onAnonymous} /> : null}
         {route.view === "settings" ? <SettingsView preferences={preferences} setPreferences={setPreferences} addNotice={addNotice} onAnonymous={onAnonymous} /> : null}
-        {route.view === "documentation" ? <DocumentationView /> : null}
+        {route.view === "documentation" ? <DocumentationPage /> : null}
       </main>
       <NoticeStack notices={notices} dismiss={(id) => setNotices((current) => current.filter((item) => item.id !== id))} />
     </div>

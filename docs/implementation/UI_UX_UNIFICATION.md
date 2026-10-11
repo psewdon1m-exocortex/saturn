@@ -328,3 +328,21 @@ rather than simulated.
   390 and 320 px without overflow; desktop/mobile axe checks pass. Interval
   Enter/blur commits once, and Unlink confirmation and Restore opening work.
   Browser fixtures perform no live backup or restore operations.
+
+## Embedded Documentation — 2026-10-11
+
+The Documentation tab now adopts Part 01 §§5.6–5.7 and 10.7 using Kernel's
+composition as a reference. It replaces summary cards with the current 18-topic
+operator guide, local rendered-body search, grouped destinations and exactly
+two independently scrolling, accessible regions. The available height derives
+from Saturn's existing 123/112 px header and responsive content insets.
+Search clear/Escape, the 30 px reading offset, continuous current-section
+tracking and short-viewport stacking follow the shared interaction contract.
+
+The original Storage, optional Storage new, Quick upload, owner authentication
+and backup producer permissions retain their existing workflows. Current
+Drop multi-client admission, Window host recovery, Pluto sources/tokens,
+Windows one-way sync, catalog reconciliation and control-plane recovery limits
+are documented in the embedded guide and relevant technical records. See
+[Embedded documentation](EMBEDDED_DOCUMENTATION.md) for maintenance ownership,
+verification commands and coverage limits.

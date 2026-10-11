@@ -1,0 +1,102 @@
+/* Part 01 §§5.6–5.7 and 10.7. Values derive from Saturn's shared header. */
+:is(html, body, .app-shell):has(.content--documentation) { min-height: 0; }
+.content--documentation {
+  --documentation-header-height: 123px;
+  --documentation-padding-start: 28px;
+  --documentation-padding-end: 40px;
+  height: 100vh;
+  height: 100dvh;
+  min-width: 0;
+  min-height: 0;
+  padding: 0;
+  overflow: hidden;
+}
+.documentation-workspace { height: 100%; min-width: 0; min-height: 0; overflow: hidden; }
+.documentation-workspace > .workspace__head {
+  height: var(--documentation-header-height); min-height: var(--documentation-header-height);
+  padding: 15px 30px 16px; align-items: flex-start;
+}
+.documentation-workspace .page-title { letter-spacing: 0; }
+.documentation-inset { min-height: 0; min-width: 0; padding: var(--documentation-padding-start) 30px var(--documentation-padding-end); }
+.documentation-page {
+  width: 100%; max-width: 1610px; margin: 0 auto;
+  height: calc(100vh - var(--documentation-header-height) - var(--documentation-padding-start) - var(--documentation-padding-end));
+  height: calc(100dvh - var(--documentation-header-height) - var(--documentation-padding-start) - var(--documentation-padding-end));
+  min-height: 0; min-width: 0; overflow: hidden;
+  display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 30px; align-items: stretch;
+  font: 14px/22px Consolas, "Cascadia Mono", "Segoe UI Mono", monospace;
+}
+.documentation-nav, .documentation-article {
+  min-height: 0; min-width: 0; overflow-y: auto; overflow-x: hidden;
+  overscroll-behavior: contain; scrollbar-width: none;
+}
+.documentation-nav::-webkit-scrollbar, .documentation-article::-webkit-scrollbar { display: none; width: 0; height: 0; }
+.documentation-nav:focus-visible, .documentation-article:focus-visible { outline: 1px solid var(--accent); outline-offset: -4px; }
+.documentation-nav-inner { display: grid; gap: 20px; padding-bottom: 30px; }
+.documentation-nav-group { min-width: 0; display: grid; }
+.documentation-nav-group > strong { margin: 8px 0; color: var(--white-80); }
+.documentation-page .documentation-link {
+  width: 100%; min-height: 36px; padding: 7px 0; border: 0; border-bottom: 1px solid var(--line-inner);
+  border-radius: 0; background: var(--black); color: var(--white-80); text-align: left;
+  font-weight: 400; white-space: normal; overflow-wrap: anywhere; transform: none;
+}
+.documentation-page .documentation-link:is(:hover, :focus-visible, [aria-current="location"]) {
+  color: var(--accent); border-color: var(--accent); background: var(--surface-hover); transform: none;
+}
+.documentation-search {
+  min-width: 0; height: 40px; display: grid; grid-template-columns: 18px minmax(0, 1fr) 32px;
+  align-items: center; gap: 12px; padding: 0 12px; border: 1px solid var(--line-inner);
+  border-radius: 0; background: var(--black); color: var(--white-80);
+  transform-origin: center; transition: transform 160ms ease, border-color 160ms ease;
+}
+.documentation-search:hover, .documentation-search:focus-within { transform: scale(1.01); }
+.documentation-search:focus-within { border-color: var(--accent); }
+.documentation-search svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.documentation-search input { min-width: 0; width: 100%; height: auto; padding: 0; border: 0; outline: 0; background: transparent; color: var(--white); font: inherit; }
+.documentation-search input::placeholder { color: var(--white-80); opacity: 1; }
+.documentation-search input::-webkit-search-cancel-button, .documentation-search input::-webkit-search-decoration { display: none; }
+.documentation-page .documentation-search-clear {
+  width: 32px; height: 32px; min-height: 32px; padding: 0; border: 0;
+  display: grid; place-items: center; color: var(--white-80); background: transparent; transform: none;
+}
+.documentation-page .documentation-search-clear:disabled { visibility: hidden; opacity: 0; pointer-events: none; }
+.documentation-page .documentation-search-clear:is(:hover, :focus-visible):enabled { color: var(--accent); background: var(--surface-hover); outline: 1px solid var(--accent); outline-offset: -1px; transform: none; }
+.documentation-article { width: 100%; max-width: 1120px; height: 100%; padding: 24px 32px 64px; border: 1px solid var(--line-outer); background: var(--black); }
+.documentation-guide-header { padding-bottom: 30px; border-bottom: 1px solid var(--line-inner); }
+.documentation-kicker { color: var(--accent); }
+.documentation-guide-header h2 { margin: 8px 0; color: var(--accent); font: 700 36px/44px "Space Grotesk", sans-serif; }
+.documentation-page p { color: var(--white-80); line-height: 22px; overflow-wrap: anywhere; }
+.documentation-guide-header p { margin: 0; }
+.documentation-article article { padding: 30px 0; scroll-margin-top: 30px; border-bottom: 1px solid var(--line-inner); }
+.documentation-article article:last-of-type { border-bottom: 0; }
+.documentation-article article > h2 { margin: 0; color: var(--accent); font: 700 22px/1.25 Consolas, "Cascadia Mono", "Segoe UI Mono", monospace; overflow-wrap: anywhere; }
+.documentation-summary { margin: 8px 0 22px; }
+.documentation-article article > :last-child { margin-bottom: 0; }
+.documentation-page h3 { margin-top: 26px; font-size: 16px; }
+.documentation-page :is(ul, ol) { padding-inline-start: 24px; }
+.documentation-page li + li { margin-top: 8px; }
+.documentation-page code { padding: 1px 4px; border: 1px solid var(--line-inner); background: var(--surface-hover); overflow-wrap: anywhere; }
+.documentation-note { padding: 14px; border-left: 2px solid var(--accent); background: var(--surface-hover); }
+.documentation-table-scroll { min-width: 0; max-width: 100%; overflow-x: auto; overscroll-behavior-inline: contain; }
+.documentation-table { width: 100%; min-width: 640px; border-collapse: collapse; color: var(--white-80); }
+.documentation-table :is(th, td) { border: 1px solid var(--line-inner); padding: 8px; text-align: left; vertical-align: top; }
+.documentation-table th { color: var(--white); }
+.documentation-empty { margin-top: 30px; padding: 30px; border: 1px solid var(--line-inner); }
+@media (max-width: 1000px) {
+  .documentation-page { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(min(160px, 38%), 34%) minmax(0, 1fr); gap: 20px; }
+  .documentation-nav { width: 100%; }
+  .documentation-search { width: 220px; max-width: 100%; }
+}
+@media (max-width: 720px) {
+  .content.content--documentation { --documentation-header-height: 112px; --documentation-padding-start: 20px; --documentation-padding-end: 20px; padding: 0; }
+  .documentation-workspace > .workspace__head { padding: 48px 20px 14px; }
+  .documentation-workspace .page-title { font-size: clamp(28px, 6.6vw, 48px); line-height: 1.05; }
+  .documentation-inset { padding-inline: 20px; }
+  .documentation-page { grid-template-rows: minmax(min(150px, 38%), 34%) minmax(0, 1fr); gap: 16px; }
+  .documentation-article { padding: 20px 20px 48px; }
+  .documentation-guide-header h2 { font-size: 30px; line-height: 38px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .documentation-search { transition: none; }
+  .documentation-search:hover, .documentation-search:focus-within { transform: none; }
+}
