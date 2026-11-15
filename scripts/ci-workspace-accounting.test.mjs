@@ -22,6 +22,16 @@ test('missing inventories, unknown statuses and inconsistent PASS counts refuse 
   assert.throws(()=>accountVitest(result(['pending'],{numPassedTests:1}),origin),/PASS count mismatch/);
   assert.throws(()=>accountVitest(result(['passed'],{numTotalTests:8}),origin),/total mismatch/);
 });
+test('parameterized invocations with identical rendered titles retain distinct identities and statuses',()=>{
+  const input=result(['passed','pending']);for(const a of input.testResults[0].assertionResults)a.fullName='same rendered title';
+  const report=accountVitest(input,origin);
+  assert.equal(report.ordinaryAccepted,true);assert.equal(report.fullQualificationAccepted,false);
+  assert.notEqual(report.cases[0].id,report.cases[1].id);
+  assert.deepEqual(report.cases.map(x=>x.occurrence),[0,1]);
+  assert.deepEqual(report.cases.map(x=>x.status),['passed','pending']);
+  const duplicateFile=result(['passed']);duplicateFile.testResults.push(duplicateFile.testResults[0]);
+  assert.throws(()=>accountVitest(duplicateFile,origin),/Duplicate test-file collection/);
+});
 test('redaction removes credentials and private keys while preserving useful failure evidence',()=>{
   const text=redactEvidence('expected 4, got 3; password secret-value-123; Bearer abc.def; Basic YTpi; postgres://u:p@localhost/db; -----BEGIN PRIVATE KEY-----\nprivate\n-----END PRIVATE KEY-----',['secret-value-123']);
   assert(text.includes('expected 4, got 3'));for(const value of ['secret-value-123','abc.def','YTpi','u:p@','private\n'])assert(!text.includes(value));

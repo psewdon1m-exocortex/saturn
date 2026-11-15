@@ -1,0 +1,5 @@
+# Keep portable source text canonical in Git, including Windows submissions.
+* text=auto eol=lf
+
+# These are producer byte vectors. Their CRLF and SHA are contract inputs.
+scripts/fixtures/stage3-wire/*.json -text -diff

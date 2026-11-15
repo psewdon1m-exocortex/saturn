@@ -8,16 +8,21 @@ const digest=bytes=>createHash('sha256').update(bytes).digest('hex');
 const states=new Set(['passed','failed','pending','skipped','todo']);
 export function accountVitest(report,source){
   assert(report&&Array.isArray(report.testResults),'Missing Vitest result inventory');
-  const cases=[],collectionErrors=[];
+  const cases=[],collectionErrors=[],files=new Set();
   for(const file of report.testResults){
     assert(Array.isArray(file.assertionResults),'Missing assertion inventory');
     if(file.status==='failed'&&file.assertionResults.length===0)collectionErrors.push(file.name);
     const origin=source(file.name);
+    assert(!files.has(origin.file),'Duplicate test-file collection');files.add(origin.file);
+    const occurrences=new Map();
     for(const assertion of file.assertionResults){
       assert(states.has(assertion.status),'Unrecognized assertion status');
       assert(typeof assertion.fullName==='string'&&assertion.fullName.length>0,'Missing case name');
       const status=['skipped','todo'].includes(assertion.status)?'pending':assertion.status;
-      cases.push({id:digest(origin.file+'\n'+assertion.fullName),file:origin.file,name:assertion.fullName,status,sourceSha256:origin.sha256,
+      // Parameterized tests can legitimately render identical titles (e.g. -1
+      // as a number and as a string). Preserve every invocation and its status.
+      const occurrence=occurrences.get(assertion.fullName)??0;occurrences.set(assertion.fullName,occurrence+1);
+      cases.push({id:digest(origin.file+'\n'+assertion.fullName+'\n'+occurrence),file:origin.file,name:assertion.fullName,occurrence,status,sourceSha256:origin.sha256,
         ...(status==='pending'?{execution:'NOT_RUN',pass:false,inputHints:origin.inputHints,platformConditional:origin.platformConditional}:{}),
         ...(status==='failed'?{failureMessages:assertion.failureMessages??[]}:{}),
       });

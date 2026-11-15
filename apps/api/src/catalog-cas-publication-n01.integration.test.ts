@@ -172,12 +172,25 @@ it('does not bypass a rejected CAS set through per-member publication when its l
 
 it('retains both generations and every original after a partial CAS group effect without blind retry',async()=>{
  const id='n01-cas-set-partial',f=await activeFixture(id,'windows',migration),{database,files}=composition(f);
+ let releaseVerified=()=>{},verifiedTimer:ReturnType<typeof setTimeout>|undefined,completionJoin:Promise<unknown>|undefined;
  try{
   const seed=await seeded(f),bytes=Buffer.alloc(49152,188),prepared:PreparedCatalogUpload[]=[];
   for(const [n,old]of seed.old.entries())prepared.push(await files.prepareCatalogUpload(f.uploadInput('cas-'+String(n)+'.bin',bytes,previous(old)),f.proof));
   const rename=f.raw.rename.bind(f.raw);let injected=false;
   const calls=vi.spyOn(f.raw,'rename').mockImplementation(async(a,b)=>{await rename(a,b);if(!injected&&a===fixtureValue(prepared[2]).execution.targetPath){injected=true;throw Error('Injected response loss after old-version archive rename');}});
-  const outcomes=await Promise.allSettled(prepared.map(p=>files.completeSmallCatalogUpload(p,f.proof,bytes)));
+  // Inject a partial effect into one genuinely ready four-member CAS set.
+  // A slower real verified write must not change this into several sets.
+  const writeVerified=f.executor.writeVerifiedOnce.bind(f.executor),verifiedGate=new Promise<void>(resolve=>{releaseVerified=resolve;});
+  let verifiedReady=0,verifiedExpired=false;
+  verifiedTimer=setTimeout(()=>{verifiedExpired=true;releaseVerified();},5000);
+  vi.spyOn(f.executor,'writeVerifiedOnce').mockImplementation(async(...args)=>{
+   const proof=await writeVerified(...args);verifiedReady++;
+   if(verifiedReady===prepared.length){clearTimeout(verifiedTimer);releaseVerified();}
+   await verifiedGate;if(verifiedExpired)throw Error('Partial CAS fixture did not reach four real verified originals');return proof;
+  });
+  const completing=prepared.map(p=>files.completeSmallCatalogUpload(p,f.proof,bytes));
+  completionJoin=Promise.allSettled(completing);const outcomes=await Promise.allSettled(completing);
+  expect(verifiedReady).toBe(4);expect(verifiedExpired).toBe(false);
   expect(injected).toBe(true);expect(outcomes.every(x=>x.status==='rejected')).toBe(true);
   const originalRows=await state(f),unresolved=originalRows.filter(r=>r.sync_result===null);
   expect(unresolved).toHaveLength(4);expect(unresolved.every(r=>['physical_pending','reconciliation_required'].includes(String(r.upload_effect_state)))).toBe(true);
@@ -194,8 +207,9 @@ it('retains both generations and every original after a partial CAS group effect
   await expect(files.prepareCatalogUpload(f.uploadInput('new-after-unknown.bin',bytes),f.proof)).rejects.toThrow();
   expect((await state(f)).map(r=>r.id)).toEqual(originalRows.map(r=>r.id));
   await evidence(id,'result',{partialEffectAfterArchive:true,oldAndNewBytesRetained:true,originals:4,versionsUnchanged:4,noBlindRetry:true,newAdmissionBlocked:true,automaticReconciliationProved:false});
- }catch(error){await evidence(id,'assertion-failure',{message:String(error),stack:error instanceof Error?error.stack:undefined});throw error;}
+ }catch(error){await evidence(id,'assertion-failure',{message:String(error),stack:error instanceof Error?error.stack:undefined,originalRows:await state(f)});throw error;}
  finally{
+  releaseVerified();clearTimeout(verifiedTimer);await completionJoin;
   vi.restoreAllMocks();
   try{await expect(f.executor.close()).rejects.toThrow('backend_close_unconfirmed');}
   finally{await Promise.all([f.runtime.close(),f.writer.close(),f.admin.close()]);}
