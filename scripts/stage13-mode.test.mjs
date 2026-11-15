@@ -6,10 +6,25 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { test } from "node:test";
-import { parseStage13Mode, workspaceQualityCommands, runWorkspaceQuality, completedRuntimeGraph, finalizeStage13Report, reviewedHarnessFiles, verifyRuntimeDiagnosticInput } from "./stage13-mode.mjs";
+import { parseStage13Mode, workspaceQualityCommands, runWorkspaceQuality, completedRuntimeGraph, finalizeStage13Report, reviewedHarnessFiles, verifyRuntimeDiagnosticInput, productionPolicyChildEnvironment } from "./stage13-mode.mjs";
 
 const digest = (bytes) => createHash("sha256").update(bytes).digest("hex");
 const sourceRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+test("production-policy child cannot inherit workspace credentials or runtime redirection", () => {
+  const inherited = { PATH: "/host/bin", SystemRoot: "C:\\Windows", DOCKER_HOST: "own-engine", DATABASE_URL: "postgres://ci:fixture@127.0.0.1/ci", NODE_ENV: "test", STORAGE_PASSWORD: "workspace-only", OWNER_BOOTSTRAP_TOKEN: "workspace-only", VAULT_RUNTIME_ROOT: "/wrong/runtime", NODE_OPTIONS: "--require=/wrong/module" };
+  const policy = { NODE_ENV: "production", DATABASE_URL: "postgres://vault@postgres/vault", STORAGE_PASSWORD_FILE: "", VAULT_RUNTIME_ENV_FILE: "/own/policy.env" };
+  const scoped = productionPolicyChildEnvironment(inherited, policy);
+  assert.deepEqual(scoped, { PATH: "/host/bin", SystemRoot: "C:\\Windows", DOCKER_HOST: "own-engine", ...policy });
+  assert.equal(inherited.NODE_ENV, "test");
+  assert.equal(inherited.STORAGE_PASSWORD, "workspace-only");
+});
+test("production-policy isolation reaches the real child environment", () => {
+  const inherited = { ...process.env, STAGE3_CHAT_A_FIXTURE: "/workspace/fixture", VAULT_RUNTIME_ROOT: "/wrong/runtime", RELEASE_SIGNING_KEY: "workspace-only", OWNER_BOOTSTRAP_TOKEN: "workspace-only" };
+  const env = productionPolicyChildEnvironment(inherited, { NODE_ENV: "production", DATABASE_URL: "postgres://vault@postgres/vault" });
+  const child = spawnSync(process.execPath, ["-e", "const assert=require('node:assert/strict');assert.equal(process.env.NODE_ENV,'production');assert.equal(process.env.DATABASE_URL,'postgres://vault@postgres/vault');for(const key of ['STAGE3_CHAT_A_FIXTURE','VAULT_RUNTIME_ROOT','RELEASE_SIGNING_KEY','OWNER_BOOTSTRAP_TOKEN'])assert.equal(process.env[key],undefined);"], { env, encoding: "utf8", windowsHide: true });
+  assert.equal(child.status, 0, child.stderr);
+  assert.equal(child.signal, null);
+});
 async function fixture() {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "stage13-mode-control-"));
   const source = path.join(root, "source"), context = path.join(root, "context");

@@ -21,6 +21,20 @@ export function parseStage13Mode(args) {
 function assertMode(mode) {
   if (!["FULL", "RUNTIME_DIAGNOSTIC"].includes(mode)) throw new Error("Unknown Stage13 execution scope");
 }
+export function productionPolicyChildEnvironment(inherited, policy) {
+  // Workspace fixtures and production-policy probes have different credentials.
+  // Keep only host/tool transport settings before applying the explicit policy.
+  const hostKeys = new Set([
+    "PATH", "PATHEXT", "SYSTEMROOT", "WINDIR", "COMSPEC", "TEMP", "TMP", "TMPDIR",
+    "HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "PROGRAMDATA", "PROGRAMFILES",
+    "PROGRAMFILES(X86)", "PROGRAMW6432", "ALLUSERSPROFILE", "USERNAME", "USERDOMAIN",
+    "LANG", "LC_ALL", "LC_CTYPE", "TZ", "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS",
+    "DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG",
+  ]);
+  const host = Object.fromEntries(Object.entries(inherited).filter(([key, value]) =>
+    typeof value === "string" && hostKeys.has(key.toUpperCase())));
+  return { ...host, ...policy };
+}
 export function workspaceQualityCommands(pnpm, reportKey = "stage13") {
   if (!/^[a-zA-Z0-9_-]{1,100}$/.test(reportKey)) throw new Error("Unsafe workspace report key");
   return [

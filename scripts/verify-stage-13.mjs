@@ -9,7 +9,7 @@ import { createIsolation, removeIsolation, OwnedDocker, startDependencies, offli
 import { assertCertificate, installProcessTrust, proveIngressRejection } from "./stage13-trust.mjs";
 import { runCommand } from "./stage13-command.mjs";
 import { prepareDevelopmentEnvironment } from "./prepare-dev.mjs";
-import { parseStage13Mode, verifyRuntimeDiagnosticInput, runWorkspaceQuality, completedRuntimeGraph, finalizeStage13Report } from "./stage13-mode.mjs";
+import { parseStage13Mode, verifyRuntimeDiagnosticInput, runWorkspaceQuality, completedRuntimeGraph, finalizeStage13Report, productionPolicyChildEnvironment } from "./stage13-mode.mjs";
 import {collectWorkspaceAccounting,redactEvidence,summarizeWorkspaceTestFailures} from "./ci-workspace-accounting.mjs";
 const executionMode = parseStage13Mode(process.argv.slice(2));
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -255,7 +255,7 @@ try {
     const baseSecrets = { DATABASE_PASSWORD_FILE: "/run/secrets/database_password", OWNER_BOOTSTRAP_TOKEN_FILE: "/run/secrets/owner_access_key", AUTH_PEPPER_FILE: "/run/secrets/auth_pepper", DROP_PEPPER_FILE: "/run/secrets/drop_pepper", SHARE_PEPPER_FILE: "/run/secrets/share_pepper", DEVICE_PEPPER_FILE: "/run/secrets/device_pepper", BACKUP_PEPPER_FILE: "/run/secrets/backup_pepper", LABORATORY_PEPPER_FILE: "/run/secrets/laboratory_pepper", GRYPHON_SERVICE_TOKEN_FILE: "/run/secrets/gryphon_service_token", STORAGE_PRIVATE_KEY_FILE: "/run/secrets/storage_private_key", STORAGE_PASSWORD_FILE: "" };
     const policyEnvironment = { NODE_ENV: "production", PUBLIC_ORIGIN: "https://vault.stage13.test", API_HOST: "0.0.0.0", API_TRUSTED_PROXIES: "172.31.250.1", WORKER_HOST: "0.0.0.0", DATABASE_URL: "postgres://vault@postgres/vault", KERNEL_SERVICE_TOKEN: kernelServiceToken, ...baseSecrets, STORAGE_HOST: "prod.storage.stage13.test", STORAGE_PORT: "22", STORAGE_USER: "stage13-prod", STORAGE_ROOT: ".", STORAGE_HOST_FINGERPRINT: `SHA256:${"A".repeat(43)}`, STORAGE_AUTH_MODE: "private_key_file", LABORATORY_PUBLIC_ENABLED: "false", GRYPHON_ENABLED: "true", VAULT_VALIDATION_PROFILE: "verification", VAULT_DOMAIN: "vault.stage13.test", SATURN_API_BIND_ADDRESS: "127.0.0.1", SATURN_API_BIND_PORT: "3000", SATURN_WEB_BIND_ADDRESS: "127.0.0.1", SATURN_WEB_BIND_PORT: "8080", SATURN_INGRESS_SUBNET: "172.31.250.0/29", SATURN_WEB_CONTAINER_IP: "172.31.250.2", SATURN_API_CONTAINER_IP: "172.31.250.3", VAULT_DEPLOYMENT_ENVIRONMENT: "production", VAULT_STORAGE_ENVIRONMENT: "production", VAULT_SECRET_ROOT: secretRoot, VAULT_RPO_SECONDS: "21600", VAULT_RTO_SECONDS: "7200", VAULT_PUBLIC_LABORATORY_DECISION: "private", VAULT_RELEASE_VERSION: version, VAULT_APP_IMAGE: appRef, VAULT_WEB_IMAGE: webRef, UPDATER_SOCKET_DIR: path.join(stageRoot, "updater"), UPDATER_SOCKET_GID: "1001", NEPTUNE_SOCKET_DIR: path.join(stageRoot, "neptune"), NEPTUNE_SOCKET_GID: "1002", GRYPHON_SOCKET_DIR: path.join(stageRoot, "gryphon"), GRYPHON_CLIENTS_GID: "1003", GRYPHON_SERVICE_TOKEN_HOST_FILE: path.join(secretRoot, "gryphon_service_token"), NEPTUNE_CONTROL_TOKEN_HOST_FILE: path.join(secretRoot, "neptune_control_token"), NEPTUNE_EXPORT_TOKEN_HOST_FILE: path.join(secretRoot, "neptune_export_token") };
     await writeEnvironment(policyFile, policyEnvironment);
-    run(process.execPath, [path.join(root, "scripts", "validate-production.mjs"), policyFile]);
+    run(process.execPath, [path.join(root, "scripts", "validate-production.mjs"), policyFile], productionPolicyChildEnvironment(process.env, policyEnvironment));
     const deployment = await import(pathToFileURL(path.join(root, "packages", "deployment", "dist", "index.js")));
     const parsedPolicy = deployment.validateProductionDeployment(policyEnvironment, root);
     let mutableRejected = false;
@@ -276,7 +276,7 @@ try {
         throw new Error("Production config negative policy failed");
     pass("fail-closed production configuration", { https: true, keyOnly: true, fileSecrets: parsedPolicy.secretFiles, immutableImages: 2, loopbackListeners: parsedPolicy.loopbackListeners, publicBindRejected, devRuntimeMetadataRequired: false, secondCopyRuntimeGate: false, rpoSeconds: parsedPolicy.rpoSeconds, rtoSeconds: parsedPolicy.rtoSeconds, laboratoryDecision: "private" });
     await writeEnvironment(prodEnvPath, policyEnvironment);
-    const composeJson = JSON.parse(run(docker, ["compose", "--env-file", prodEnvPath, "-f", "compose.production.yaml", "config", "--format", "json"], { ...process.env, VAULT_RUNTIME_ENV_FILE: prodEnvPath }).stdout);
+    const composeJson = JSON.parse(run(docker, ["compose", "--env-file", prodEnvPath, "-f", "compose.production.yaml", "config", "--format", "json"], productionPolicyChildEnvironment(process.env, { ...policyEnvironment, VAULT_RUNTIME_ENV_FILE: prodEnvPath })).stdout);
     const services = composeJson.services;
     const allowedLoopback = (name, port) => name === "api" && port.host_ip === "127.0.0.1" && Number(port.published) === 3000 && Number(port.target) === 3000 || name === "web" && port.host_ip === "127.0.0.1" && Number(port.published) === 8080 && Number(port.target) === 8080;
     const unexpectedPorts = Object.entries(services).flatMap(([name, value]) => (value.ports ?? []).filter((port) => !allowedLoopback(name, port)));
