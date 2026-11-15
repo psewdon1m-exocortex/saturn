@@ -10,7 +10,7 @@ import { assertCertificate, installProcessTrust, proveIngressRejection } from ".
 import { runCommand } from "./stage13-command.mjs";
 import { prepareDevelopmentEnvironment } from "./prepare-dev.mjs";
 import { parseStage13Mode, verifyRuntimeDiagnosticInput, runWorkspaceQuality, completedRuntimeGraph, finalizeStage13Report } from "./stage13-mode.mjs";
-import {collectWorkspaceAccounting,redactEvidence} from "./ci-workspace-accounting.mjs";
+import {collectWorkspaceAccounting,redactEvidence,summarizeWorkspaceTestFailures} from "./ci-workspace-accounting.mjs";
 const executionMode = parseStage13Mode(process.argv.slice(2));
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 // Ordinary CI owns its SQL/SFTP/K4 inputs. Operator qualification may instead
@@ -160,9 +160,19 @@ try {
     run(docker, ["run", "--rm", "-v", mount(path.join(root, "infra", "production"), "/workspace/infra/production"), "-w", "/workspace", "python:3.13-bookworm", "python", "infra/production/dotenv-config.test.py"]);
     if (executionMode === "FULL") {
         const reportKey = project + "-workspace";
-        report.quality = runWorkspaceQuality(executionMode, pnpm, (args) => run(process.execPath, args), {
+        report.quality = runWorkspaceQuality(executionMode, pnpm, (args) => run(process.execPath, args, process.env, true), {
             reportKey,
             beforeTests: () => { if (process.env.SATURN_CI_INPUTS_MANAGED === "1") run(process.execPath,[pnpm,"--filter","@saturn/database","migrate"]); },
+            failed: (gate,result) => {
+                const secrets=[...knownSecrets,...Object.entries(process.env).filter(([key])=>/PASSWORD|TOKEN|SECRET|SIGNING|CREDENTIAL|DATABASE_URL/.test(key)).map(([,value])=>value)];
+                let tests;
+                try { if(gate==="test") tests=summarizeWorkspaceTestFailures(root,reportKey,secrets); }
+                catch { tests={status:"FAILURE_IDENTITY_CAPTURE_FAILED"}; }
+                report.qualityFailure={gate,actualExitCode:result.status,signal:result.signal??null,tests};
+                const directory=path.join(root,"artifacts","verification");nodeFs.mkdirSync(directory,{recursive:true});
+                nodeFs.writeFileSync(path.join(directory,"workspace-ci-failure.json"),JSON.stringify(report.qualityFailure,null,2)+"\n");
+                process.stderr.write("Required workspace failure: "+JSON.stringify(report.qualityFailure)+"\n");
+            },
             accounting: () => {
                 const accounting = collectWorkspaceAccounting(root,reportKey);
                 const secretValues = Object.entries(process.env).filter(([key])=>/PASSWORD|TOKEN|SECRET|SIGNING|CREDENTIAL|DATABASE_URL/.test(key)).map(([,value])=>value);

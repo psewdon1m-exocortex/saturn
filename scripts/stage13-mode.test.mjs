@@ -69,6 +69,9 @@ test("each default quality gate must really finish with numeric zero", () => {
     assert.equal(count, failed + 1);
   }
   assert.throws(() => runWorkspaceQuality("FULL", "pnpm", () => ({ status: null })), /did not complete/);
+  const recorded=[];
+  assert.throws(() => runWorkspaceQuality("FULL", "pnpm", () => ({ status: 1 }), { failed: (name,result) => recorded.push({name,exit:result.status}) }), /did not complete/);
+  assert.deepEqual(recorded,[{name:'install',exit:1}]);
 });
 test("runtime diagnostic never accepts quality and cannot return full CI green", () => {
   const quality = runWorkspaceQuality("RUNTIME_DIAGNOSTIC", "pnpm", () => { throw new Error("Diagnostic must not execute workspace quality"); });

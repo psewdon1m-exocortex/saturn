@@ -39,7 +39,10 @@ export function runWorkspaceQuality(mode, pnpm, execute, options = {}) {
   for (const command of workspaceQualityCommands(pnpm, options.reportKey)) {
     if (command.name === "test") options.beforeTests?.();
     const result = execute(command.argv);
-    if (result.status !== 0 || result.signal || result.error) throw new Error(`Required workspace ${command.name} gate did not complete successfully`);
+    if (result.status !== 0 || result.signal || result.error) {
+      options.failed?.(command.name, result);
+      throw new Error(`Required workspace ${command.name} gate did not complete successfully`);
+    }
     gates.push({ name: command.name, exitCode: result.status });
   }
   const accounting = options.accounting?.();

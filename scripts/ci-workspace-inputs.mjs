@@ -33,7 +33,9 @@ try{
   const password=randomBytes(24).toString('hex');secrets.push(password);
   const pgEnv=path.join(root,'postgres.env');fs.writeFileSync(pgEnv,'POSTGRES_USER=postgres\nPOSTGRES_PASSWORD='+password+'\nPOSTGRES_DB=postgres\n',{flag:'wx',mode:0o600});
   const pgId=owner.createRun(['-d','--name',namespace+'-postgres','--memory','512m','--cpus','1','--pids-limit','256','-p','127.0.0.1::5432','--env-file',pgEnv,'--label','exocortex.sync-performance.run='+namespace,pgImage,'postgres','-c','shared_preload_libraries=pg_stat_statements','-c','pg_stat_statements.track=all'],process.env).stdout.trim();
-  let ready=false;for(let n=0;n<120;n++){if(owner.cli(['exec',pgId,'pg_isready','-U','postgres','-d','postgres'],{allowFailure:true}).status===0){ready=true;break;}await pause(250);}assert(ready,'Own PostgreSQL did not become ready');
+  // The image's initialization server accepts only Unix-socket connections.
+  // Wait for the final TCP postmaster, after init scripts and its restart.
+  let ready=false;for(let n=0;n<120;n++){if(owner.cli(['exec',pgId,'pg_isready','-h','127.0.0.1','-U','postgres','-d','postgres'],{allowFailure:true}).status===0){ready=true;break;}await pause(250);}assert(ready,'Own PostgreSQL TCP endpoint did not become ready');
   const pg=owner.checked('container',pgId).observed,pgPort=pg.NetworkSettings.Ports['5432/tcp'];assert.equal(pgPort.length,1);assert.equal(pgPort[0].HostIp,'127.0.0.1');
   const url='postgresql://postgres:'+password+'@127.0.0.1:'+pgPort[0].HostPort+'/postgres';
   const fixtureFile=path.join(root,'postgres.private.json');
@@ -79,10 +81,17 @@ try{
   const executable='#!/bin/sh\nexec '+[process.execPath,helper,bindingFile,hash(fs.readFileSync(bindingFile))].map(shellLiteral).join(' ')+' "$@"\n';
   fs.writeFileSync(pgdump,executable,{flag:'wx',mode:0o700});environment.STAGE3_CHAT_A_PG_DUMP=pgdump;
   const pnpm=path.join(repo,'node_modules','pnpm','bin','pnpm.cjs');
-  const commands=postgresSuite?[[process.execPath,[pnpm,'--filter','@saturn/database','migrate']],[process.execPath,[pnpm,'-r','--workspace-concurrency=1','--filter','@saturn/database','--filter','@saturn/protection','--filter','@saturn/api','test','--maxWorkers=1']]]
+  // Fail fast on the actual Linux CAS timing regression; the complete original
+  // SQL suites still run afterward and remain mandatory.
+  const commands=postgresSuite?[[process.execPath,[pnpm,'--filter','@saturn/database','migrate']],[process.execPath,[pnpm,'--filter','@saturn/api','test','src/catalog-cas-publication-n01.integration.test.ts','--maxWorkers=1']],[process.execPath,[pnpm,'-r','--workspace-concurrency=1','--filter','@saturn/database','--filter','@saturn/protection','--filter','@saturn/api','test','--maxWorkers=1']]]
     :args[1]==='pnpm'?[[process.execPath,[pnpm,...args.slice(2)]]]:[[args[1],args.slice(2)]];
   for(const [exe,argv] of commands){child=command(exe,argv,environment,80*60_000);if(child.status===null||child.signal||child.error){owner.pending=true;owner.persist();throw Error('CI child did not reach a known joined outcome');}if(child.status!==0){process.stderr.write(redactEvidence((child.stdout??'').slice(-10000)+'\n'+(child.stderr??'').slice(-10000),secrets));break;}}
-}catch(error){problem=String(error.stack??error);process.stderr.write(redactEvidence(problem,secrets)+'\n');}
+}catch(error){
+  problem=String(error.stack??error);
+  const failed=owner.commands.findLast(row=>row.exitCode!==0&&typeof row.stderr==='string'&&fs.existsSync(row.stderr));
+  if(failed)problem+='\nOwned operation stderr: '+fs.readFileSync(failed.stderr,'utf8').slice(-2000);
+  problem=redactEvidence(problem,secrets);process.stderr.write(problem+'\n');
+}
 finally{
   if(k4Id&&!owner.pending){try{const item=owner.checked('container',k4Id);if(item.observed.State.Running){fs.writeFileSync(k4Stop.file,k4Stop.nonce,{flag:'wx',mode:0o644});let stopped=false;for(let n=0;n<100;n++){if(!owner.checked('container',k4Id).observed.State.Running){stopped=true;break;}await pause(100);}assert(stopped,'K4 control did not join');}assert.equal(owner.checked('container',k4Id).observed.State.ExitCode,0);}catch(error){owner.pending=true;owner.persist();problem??=String(error);}}
   closure=owner.close(!problem&&child?.status===0);

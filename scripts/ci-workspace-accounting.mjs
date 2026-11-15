@@ -46,6 +46,39 @@ export function redactEvidence(value,secrets=[]){
     .replace(/postgres(?:ql)?:\/\/[^\s"'<>]+/g,'<redacted-database-url>');
 }
 
+/** Public failure identity only. Assertion payloads, diffs and arbitrary error
+ * messages stay in the private command output; they can contain credentials. */
+export function summarizeWorkspaceTestFailures(root,reportKey,secrets=[]){
+  assert(/^[a-zA-Z0-9_-]{1,100}$/.test(reportKey),'Unsafe report key');
+  const canonical=fs.realpathSync(root),reports=[],failures=[];
+  const relativeName=name=>{
+    if(typeof name!=='string')return '<unknown-source>';
+    const relative=path.relative(canonical,path.resolve(name));
+    return relative===''||relative==='..'||relative.startsWith('..'+path.sep)||path.isAbsolute(relative)?'<outside-source-scope>':relative.replaceAll(path.sep,'/');
+  };
+  for(const parent of ['packages','apps'])for(const entry of fs.readdirSync(path.join(canonical,parent),{withFileTypes:true}).filter(x=>x.isDirectory())){
+    const directory=path.join(canonical,parent,entry.name),file=path.join(directory,'.tmp',reportKey+'.json');
+    if(!fs.existsSync(file))continue;
+    if(fs.lstatSync(file).isSymbolicLink()||fs.statSync(file).size>32*1024*1024){reports.push({package:parent+'/'+entry.name,status:'UNSAFE_OR_OVERSIZED_REPORT'});continue;}
+    let report;try{report=JSON.parse(fs.readFileSync(file,'utf8'));}catch{reports.push({package:parent+'/'+entry.name,status:'INVALID_REPORT'});continue;}
+    reports.push({package:parent+'/'+entry.name,success:report.success===true,passed:report.numPassedTests,failed:report.numFailedTests,pending:report.numPendingTests});
+    for(const testFile of report.testResults??[]){
+      const assertions=testFile.assertionResults??[],sourceFile=relativeName(testFile.name),occurrences=new Map();
+      if(testFile.status==='failed'&&assertions.length===0)failures.push({file:sourceFile,name:'<collection>',kind:'COLLECTION_FAILURE'});
+      for(const assertion of assertions){
+        const name=typeof assertion.fullName==='string'?assertion.fullName:'<unnamed-case>',occurrence=occurrences.get(name)??0;occurrences.set(name,occurrence+1);
+        if(assertion.status!=='failed')continue;
+        const message=String(assertion.failureMessages?.[0]??'').replace(/\x1b\[[0-9;]*m/g,'');
+        const basename=path.basename(testFile.name??'').replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
+        const location=basename?message.match(new RegExp(basename+':(\\d+):(\\d+)')):undefined;
+        failures.push({file:sourceFile,name,occurrence,kind:/AssertionError/.test(message)?'ASSERTION_FAILURE':/timed out/i.test(message)?'TEST_TIMEOUT':'TEST_FAILURE',
+          ...(location?{line:Number(location[1]),column:Number(location[2])}:{})});
+      }
+    }
+  }
+  return JSON.parse(redactEvidence({schema:'saturn.workspace-ci-failure.v1',status:'FAIL',reportKey,reports,failures,scope:'Case identities and source locations only; raw messages/diffs/credentials are not published.'},secrets));
+}
+
 export function collectWorkspaceAccounting(root,reportKey){
   assert(/^[a-zA-Z0-9_-]{1,100}$/.test(reportKey),'Unsafe report key');
   const canonical=fs.realpathSync(root),packages=[],cases=[],collectionErrors=[];

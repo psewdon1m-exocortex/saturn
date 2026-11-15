@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import {accountVitest,redactEvidence,requireFullStage13} from './ci-workspace-accounting.mjs';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import {accountVitest,redactEvidence,requireFullStage13,summarizeWorkspaceTestFailures} from './ci-workspace-accounting.mjs';
 
 const origin=()=>({file:'apps/api/src/contract.test.ts',sha256:'a'.repeat(64),inputHints:['OWN_FIXTURE'],platformConditional:false});
 const result=(statuses,extra={})=>({success:!statuses.includes('failed'),numTotalTests:statuses.length,numPassedTests:statuses.filter(x=>x==='passed').length,numFailedTests:statuses.filter(x=>x==='failed').length,numPendingTests:statuses.filter(x=>x==='pending').length,numTodoTests:statuses.filter(x=>x==='todo').length,testResults:[{name:'contract.test.ts',status:statuses.includes('failed')?'failed':'passed',assertionResults:statuses.map((status,n)=>({status,fullName:'case '+n}))}],...extra});
@@ -43,4 +46,17 @@ test('ordinary or diagnostic completion cannot authorize a full release',()=>{
   assert.throws(()=>requireFullStage13({...report,quality:{accounting:{fullQualificationAccepted:false}}}),/accounting/);
   assert.throws(()=>requireFullStage13({...report,executionScope:'RUNTIME_DIAGNOSTIC'}));
   assert.throws(()=>requireFullStage13({...report,closure:{status:'PENDING'}}));
+});
+test('public CI failure evidence identifies the failing case without exposing assertion payloads',()=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'saturn-safe-failure-'));
+  try{
+    fs.mkdirSync(path.join(root,'apps'));fs.mkdirSync(path.join(root,'packages/a/.tmp'),{recursive:true});
+    const report=result(['passed','failed']);report.testResults[0].name=path.join(root,'packages/a/contract.test.ts');
+    report.testResults[0].assertionResults[1].failureMessages=['AssertionError: password secret-value-123; Bearer abc.def; -----BEGIN PRIVATE KEY-----\nprivate\n-----END PRIVATE KEY-----\n at contract.test.ts:12:7'];
+    fs.writeFileSync(path.join(root,'packages/a/.tmp/proof.json'),JSON.stringify(report));
+    const summary=summarizeWorkspaceTestFailures(root,'proof',['secret-value-123']);
+    assert.equal(summary.status,'FAIL');assert.equal(summary.failures.length,1);
+    assert.deepEqual(summary.failures[0],{file:'packages/a/contract.test.ts',name:'case 1',occurrence:0,kind:'ASSERTION_FAILURE',line:12,column:7});
+    const text=JSON.stringify(summary);for(const value of ['secret-value-123','abc.def','PRIVATE KEY','password','private\\n'])assert(!text.includes(value));
+  }finally{fs.rmSync(root,{recursive:true});}
 });
