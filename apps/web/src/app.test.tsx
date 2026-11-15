@@ -1,10 +1,14 @@
+import { errorValue } from "./error-value.js";
+import { requiredValue } from "./test-value.js";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { App } from "./app.js";
 import { DROP_POINT_RESOURCE_ID, SYNC_RESOURCE_ID } from "./types.js";
+import { listUploadRecovery, saveUploadRecovery } from "./upload-recovery-store.js";
 
 const pdfJsMock = vi.hoisted(() => ({ getDocument: vi.fn() }));
 vi.mock("pdfjs-dist/legacy/build/pdf.mjs", () => ({ GlobalWorkerOptions: { workerSrc: "" }, getDocument: pdfJsMock.getDocument }));
+vi.mock("./upload-sha256.js", () => ({ uploadSourceHasher: { hash: vi.fn(async () => "a".repeat(64)) } }));
 
 HTMLDialogElement.prototype.showModal = function () {this.setAttribute("open", "");};
 HTMLDialogElement.prototype.close = function () {this.removeAttribute("open");this.dispatchEvent(new Event("close"));};
@@ -143,6 +147,39 @@ describe("startup appearance", () => {
 });
 
 describe("owner Saturn UI", () => {
+  it("pages owner storage without accumulating rows, preserves full folder downloads and resets after mutation", async () => {
+    window.history.replaceState({}, "", "/storage-new");
+    const now=new Date().toISOString(),root={id:"00000000-0000-7000-8000-000000000001",type:"folder",name:"root",storagePath:"",sizeBytes:0,status:"active",createdAt:now,updatedAt:now};
+    const first=Array.from({length:500},(_,n)=>({...root,id:"01900000-0000-7000-8000-"+String(n+100).padStart(12,"0"),parentId:root.id,name:"row-"+String(n).padStart(3,"0"),storagePath:"row-"+String(n)}));
+    const tail={...root,id:"01900000-0000-7000-8000-000000009999",parentId:root.id,name:"tail-folder",storagePath:"tail-folder"};
+    const added={...root,id:"01900000-0000-7000-8000-000000008888",parentId:root.id,name:"AAA-created",storagePath:"AAA-created"};
+    let created=false;const offsets:number[]=[];
+    vi.stubGlobal("fetch",vi.fn(async(input:RequestInfo|URL,init?:RequestInit)=>{
+      const url=requestUrl(input);
+      if(url.endsWith("/auth/session"))return json({state:"authenticated"});
+      if(url.endsWith("/auth/preferences"))return json(preferences());
+      if(url.includes("/folders/resolve?"))return json([root]);
+      if(url.includes("/children")){const offset=Number(new URL(url,"https://test.invalid").searchParams.get("offset"));offsets.push(offset);return json(offset===0?(created?[added,...first].slice(0,500):first):[tail]);}
+      if(url.endsWith("/folders")&&init?.method==="POST"){expect(jsonRequestBody(init)).toEqual({parentId:root.id,name:"AAA-created"});created=true;return json(added);}
+      if(url.includes("/resources/"))return json(root);
+      if(url.includes("/shares")||url.includes("/archives/jobs"))return json([]);
+      return json({});
+    }));
+    render(<App/>);await screen.findByRole("button",{name:"row-000"});
+    expect(document.querySelectorAll(".storage-new-file")).toHaveLength(500);expect(offsets).toEqual([0]);
+    const pages=screen.getByRole("navigation",{name:"Folder pages"});
+    fireEvent.click(within(pages).getByRole("button",{name:"Next page"}));await screen.findByRole("button",{name:"tail-folder"});
+    expect(document.querySelectorAll(".storage-new-file")).toHaveLength(1);expect(screen.queryByRole("button",{name:"row-000"})).toBeNull();
+    expect(screen.getByRole("link",{name:"Download tail-folder"}).getAttribute("href")).toContain("/folders/"+tail.id+"/archive");
+    expect(within(pages).getByRole("button",{name:"Next page"})).toHaveProperty("disabled",true);
+    fireEvent.click(within(pages).getByRole("button",{name:"Previous page"}));await screen.findByRole("button",{name:"row-000"});
+    fireEvent.click(within(pages).getByRole("button",{name:"Next page"}));await screen.findByRole("button",{name:"tail-folder"});
+    fireEvent.click(screen.getByRole("button",{name:"New folder"}));fireEvent.change(screen.getByLabelText("Folder name"),{target:{value:"AAA-created"}});
+    fireEvent.click(screen.getByRole("button",{name:"Create folder"}));await screen.findByRole("button",{name:"AAA-created"});
+    expect(document.querySelectorAll(".storage-new-file")).toHaveLength(500);expect(offsets).toEqual([0,500,0,500,0]);
+    expect(within(pages).getByRole("button",{name:"Previous page"})).toHaveProperty("disabled",true);
+  },15000);
+
   it("keeps the selected context-menu action focused across storage rerenders", async () => {
     window.history.replaceState({}, "", "/files");
     const now = new Date().toISOString();
@@ -339,7 +376,8 @@ describe("owner Saturn UI", () => {
 
   it("reattaches the original file and resumes a paused upload after refresh", async () => {
     const lastModified = 1_788_547_200_000;
-    window.sessionStorage.setItem("saturnOwnerUploadsV1", JSON.stringify([{ id: "task-1", filename: "archive.bin", expectedSize: 100, lastModified, parentId: DROP_POINT_RESOURCE_ID }]));
+    const operationId = crypto.randomUUID();
+    saveUploadRecovery({ schema: 2, channel: "owner", operationId, idempotencyKey: `web-upload-${operationId}`, id: "task-1", filename: "archive.bin", expectedSize: 100, lastModified, parentId: DROP_POINT_RESOURCE_ID, sha256: "a".repeat(64), createdAt: Date.now() });
     const actions: string[] = [];
     let completed = false;
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -380,7 +418,7 @@ describe("owner Saturn UI", () => {
     const chunk = fetchMock.mock.calls.find((call) => requestUrl(call[0]).endsWith("/uploads/task-1") && call[1]?.method === "PATCH");
     expect(new Headers(chunk?.[1]?.headers).get("Upload-Offset")).toBe("50");
     expect((chunk?.[1]?.body as Blob).size).toBe(50);
-    expect(window.sessionStorage.getItem("saturnOwnerUploadsV1")).toBeNull();
+    expect(listUploadRecovery()).toEqual([]);
   });
 
   it("renders the authenticated collection toolbar and empty recovery state", async () => {
@@ -1582,6 +1620,58 @@ describe("owner Saturn UI", () => {
 });
 
 describe("public Drop UI", () => {
+  it("opens another code gate without cancelling originals or accepting late rows from the previous channel", async () => {
+    window.history.replaceState({}, "", "/drop");
+    const operationId = crypto.randomUUID();
+    saveUploadRecovery({ schema: 2, channel: "drop", channelId: "channel-first", operationId, idempotencyKey: `drop-web-${operationId}`, filename: "original.bin", expectedSize: 1, lastModified: 1, sha256: "a".repeat(64), createdAt: 1 });
+    let finishOldSnapshot!: (value: Response) => void;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = requestUrl(input);
+      if (url.endsWith("/drop/session")) return json({ state: "upload_only", channelId: "channel-first", expiresAt: new Date(Date.now()+60_000).toISOString(), maxFiles: 20, maxBytes: 1024 });
+      if (url.endsWith("/drop/uploads")) return new Promise<Response>(resolve => { finishOldSnapshot = resolve; });
+      if (url.endsWith("/drop/redeem")) return json({ state: "upload_only", channelId: "channel-second", expiresAt: new Date(Date.now()+60_000).toISOString(), maxFiles: 20, maxBytes: 1024 });
+      if (init?.method === "DELETE" || url.endsWith("/drop/logout")) throw new Error("Switching must retain old originals and authority");
+      return json({ status: "ready" });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Enter another Drop code" }));
+    fireEvent.change(await screen.findByLabelText("Drop code"), { target: { value: "ABCD-EFGH" } });
+    fireEvent.click(screen.getByRole("button", { name: "Enter" }));
+    await screen.findByRole("button", { name: "Enter another Drop code" });
+    await act(async () => finishOldSnapshot(json([{ id: "old-row", filename: "late-first-channel.bin", state: "stored", expectedSize: 1, receivedSize: 1 }])));
+    expect(screen.queryByText("late-first-channel.bin")).toBeNull();
+    expect(window.history.state).toMatchObject({ saturnDropChannelId: "channel-second" });
+    expect(listUploadRecovery().map(record => record.operationId)).toContain(operationId);
+    expect(fetchMock.mock.calls.filter(call => call[1]?.method === "DELETE" || requestUrl(call[0]).endsWith("/drop/logout"))).toHaveLength(0);
+  });
+
+  it("bounds concurrent admissions and stops queued files without claiming an unknown create was deleted", async () => {
+    window.history.replaceState({}, "", "/drop");
+    const admissions: AbortSignal[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = requestUrl(input);
+      if (url === "/api/v1/public/reachability") return json({ status: "ready" });
+      if (url.endsWith("/drop/session")) return json({ state: "upload_only", channelId: "channel-bounded", expiresAt: new Date(Date.now() + 60_000).toISOString(), maxFiles: 20, maxBytes: 1024 });
+      if (url.endsWith("/drop/uploads") && init?.method === "POST") {
+        admissions.push(requiredValue(init.signal));
+        return new Promise<Response>((_resolve, reject) => requiredValue(init.signal).addEventListener("abort", () => reject(errorValue(requiredValue(init.signal).reason)), { once: true }));
+      }
+      if (url.endsWith("/drop/uploads")) return json([]);
+      if (init?.method === "DELETE") throw new Error("No server upload identity was received");
+      return json({});
+    }));
+    render(<App />);
+    await screen.findByRole("heading", { name: "saturn drop point" });
+    fireEvent.change(screen.getByLabelText("Choose files for Drop"), { target: { files: Array.from({ length: 6 }, (_, i) => new File(["data"], `item-${String(i)}.bin`)) } });
+    await waitFor(() => expect(admissions).toHaveLength(4));
+    fireEvent.click(screen.getByRole("button", { name: "Stop uploads" }));
+    expect(admissions.every(signal => signal.aborted)).toBe(true);
+    expect(await screen.findByText("Uploads stopped. Stored files remain available; buffered files may still reach storage. Unknown results need a server status check before retrying.")).toBeTruthy();
+    expect(admissions).toHaveLength(4);
+    expect(screen.getAllByText("unknown", { selector: ".drop-job strong" })).toHaveLength(4);
+  });
+
   it("renders the closed gate and redeems a body-only code into the opened upload-only template", async () => {
     window.history.replaceState({}, "", "/drop");
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -1829,10 +1919,10 @@ describe("public Share UI", () => {
       const url = requestUrl(input);
       if (url === "/api/v1/public/reachability") return json({ status: "ready" });
       if (url.endsWith("/package") && init?.method === "POST") return json({ state: "ready", sizeBytes: 2304 });
-      if (url.includes("/children")) return json([
+      if (url.includes("/children/page?")) return json({ items: [
         { id: "folder-1", type: "folder", name: "folder_1", sizeBytes: 2048, updatedAt: "2026-09-01T00:00:00.000Z" },
         { id: "file-1", type: "file", name: "cover.jpg", sizeBytes: 256, mimeType: "image/jpeg", updatedAt: "2026-09-01T00:00:00.000Z" },
-      ]);
+      ], nextOffset: null });
       if (url.includes("/public/shares/")) return json({ id: "share", resourceId: "folder-root", resourceType: "folder", resourceName: "archive", resourceSize: 2304, mode: "download_folder", state: "active", locked: false, downloadCount: 0, createdAt: "2026-09-01T00:00:00.000Z", updatedAt: "2026-09-01T00:00:00.000Z" });
       return json({});
     });
@@ -1861,9 +1951,9 @@ describe("public Share UI", () => {
       const url = requestUrl(input);
       if (url.endsWith("/auth/public-appearance")) return json({ accentColor: "#ff4d00" });
       if (url === "/api/v1/public/reachability") return json({ status: "ready" });
-      if (url.includes("/children")) return json([
+      if (url.includes("/children/page?")) return json({ items: [
         { id: "file-2", type: "file", name: "readme.jpg", sizeBytes: 512, mimeType: "image/jpeg", updatedAt: "2026-09-01T00:00:00.000Z" },
-      ]);
+      ], nextOffset: null });
       if (url.includes("/public/shares/")) return json({ id: "share", resourceId: "folder-root", resourceType: "folder", resourceName: "archive", resourceSize: 512, mode: "browse", state: "active", locked: false, downloadCount: 0, createdAt: "2026-09-01T00:00:00.000Z", updatedAt: "2026-09-01T00:00:00.000Z" });
       return json({});
     }));
@@ -1913,3 +2003,4 @@ describe("public Share UI", () => {
     expect(screen.getByRole("status", { name: "Service Reachability: Available" })).toBeTruthy();
   });
 });
+vi.mock("./upload-recovery-durable.js", async () => (await import("./upload-recovery-test-backend.js")).recoveryUnitBackend());

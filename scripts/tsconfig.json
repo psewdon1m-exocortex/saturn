@@ -4,5 +4,5 @@
     "noEmit": true,
     "rootDir": ".."
   },
-  "include": ["verify-stage-15.mts"]
+  "include": ["verify-stage-15.mts", "revalidate-guarded-folders.mts", "sync-lifecycle.mts"]
 }

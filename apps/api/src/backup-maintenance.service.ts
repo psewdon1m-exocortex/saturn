@@ -8,7 +8,8 @@ import { TransferMonitorService } from "./transfer-monitor.service.js";
 export class BackupMaintenanceService implements OnApplicationBootstrap, OnApplicationShutdown {
   readonly #logger = new Logger(BackupMaintenanceService.name);
   #timer?: NodeJS.Timeout;
-  #running = false;
+  #running: Promise<void> | undefined;
+  #closing = false;
 
   constructor(@Inject(BACKUP_INGEST_SERVICE) private readonly backups: BackupIngestService,
     @Inject(DATABASE) private readonly database: Database,
@@ -16,17 +17,25 @@ export class BackupMaintenanceService implements OnApplicationBootstrap, OnAppli
 
   async onApplicationBootstrap(): Promise<void> {
     await this.reconcile();
+    if (this.#closing) return;
     this.#timer = setInterval(() => void this.reconcile(), 15 * 60_000);
     this.#timer.unref();
   }
 
-  onApplicationShutdown(): void {
+  async onApplicationShutdown(): Promise<void> {
+    this.#closing = true;
     if (this.#timer !== undefined) clearInterval(this.#timer);
+    await this.#running;
   }
 
-  private async reconcile(): Promise<void> {
-    if (this.#running) return;
-    this.#running = true;
+  private reconcile(): Promise<void> {
+    if (this.#closing) return Promise.resolve();
+    this.#running ??= Promise.resolve().then(() => this.reconcileOnce()).finally(() => { this.#running = undefined; });
+    return this.#running;
+  }
+
+  private async reconcileOnce(): Promise<void> {
+    if (this.#closing) return;
     try {
       await this.database.withSharedMaintenance(async () => {
         const incomplete = await this.backups.expireIncompleteRuns(new Date(), runId => this.transfers.controlState(`backup:${runId}`) === "paused");
@@ -41,8 +50,6 @@ export class BackupMaintenanceService implements OnApplicationBootstrap, OnAppli
       });
     } catch (error) {
       this.#logger.error("Backup catalog reconciliation failed", error instanceof Error ? error.stack : String(error));
-    } finally {
-      this.#running = false;
     }
   }
 }

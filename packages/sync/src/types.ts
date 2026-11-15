@@ -70,6 +70,12 @@ export interface DeviceRepository {
 }
 
 export interface PlutoStatus {
+  readonly engine?: {
+    readonly mode:string;readonly phase:string;readonly Queued:number;readonly Captured:number;readonly Published:number;readonly Recovered:number;readonly Failed:number;
+    readonly oldestPendingMs:number;readonly gap:boolean;readonly waitReason?:string;
+    readonly http:{readonly Requests:number;readonly MetadataBytes:number;readonly DataBytes:number;readonly ResponseBytes:number};
+    readonly capture:Readonly<Record<string,number>>;readonly features?:Readonly<Record<string,boolean>>;
+  };
   readonly enabled: boolean;
   readonly intervalSeconds: number;
   readonly lastAttemptAt?: string;

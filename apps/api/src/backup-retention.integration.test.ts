@@ -1,9 +1,11 @@
+import { isolatedTestDatabase } from "../../../packages/database/src/isolated-test-database.fixture.js";
+import { recordBackupPreEffect } from "./backup-coherent-test.fixture.js";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { Readable } from "node:stream";
-import { Database, migrate } from "@saturn/database";
+import { Database } from "@saturn/database";
 import { AuditService } from "@saturn/audit";
 import { FileService, PostgresFileRepository, BACKUPS_RESOURCE_ID } from "@saturn/file-core";
 import { BackupIngestService, PostgresBackupRepository } from "@saturn/backup-ingest";
@@ -13,11 +15,9 @@ import { expect, it } from "vitest";
 const databaseUrl = process.env.PLUTO_TEST_DATABASE_URL;
 it.skipIf(!databaseUrl)("retention preserves audit identities, expires removed versions and retries a lost catalog acknowledgement", async () => {
   if (!databaseUrl) throw new Error("Database test configuration is missing");
-  const schema = `retention_${randomUUID().replaceAll("-", "")}`, admin = new Database(databaseUrl);
-  await admin.withSql(sql => sql.unsafe(`CREATE SCHEMA ${schema}`));
-  const url = new URL(databaseUrl); url.searchParams.set("options", `-c search_path=${schema}`);
-  await migrate(url.toString(), path.resolve("../../packages/database/migrations"));
-  const database = new Database(url.toString()), root = await fs.mkdtemp(path.join(os.tmpdir(), "saturn-retention-"));
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "saturn-retention-"));
+  const isolated = await isolatedTestDatabase(databaseUrl, undefined, root);
+  const database = new Database(isolated.url);
   const storage = new LocalStorageAdapter(root), repository = new PostgresFileRepository(database), audit = new AuditService(database);
   const files = new FileService(repository, storage, { auditSink: audit });
   const backups = new BackupIngestService({ repository: new PostgresBackupRepository(database), storage, audit,
@@ -42,6 +42,9 @@ it.skipIf(!databaseUrl)("retention preserves audit identities, expires removed v
     await backups.recordRestoreTest(old.id, { method: "integrity_check", outcome: "success" });
     // Simulate a process/connection failure between physical deletion and its
     // catalog acknowledgement. The next retention pass must finish safely.
+    await recordBackupPreEffect(database, isolated.url, root, "backup-retention", [old, newest].map(item => ({
+      runId: item.id, relativePath: item.resource.storage_path, bytes: item.bytes,
+    })));
     const remove = repository.removeAdoptedFile.bind(repository); let failed = false;
     repository.removeAdoptedFile = async (...args) => { if (!failed) { failed = true; throw new Error("lost catalog connection"); } return remove(...args); };
     expect(await backups.applyRetention()).toMatchObject({ candidates: 1, purged: 0, failed: 1 });
@@ -55,7 +58,6 @@ it.skipIf(!databaseUrl)("retention preserves audit identities, expires removed v
     expect(references[0]?.count).toBeGreaterThan(0);
     expect((await files.getResource(BACKUPS_RESOURCE_ID)).sizeBytes).toBe(newest.bytes.length);
   } finally {
-    await storage.close(); await database.close(); await fs.rm(root, { recursive: true, force: true });
-    await admin.withSql(sql => sql.unsafe(`DROP SCHEMA ${schema} CASCADE`)); await admin.close();
+    await storage.close(); await database.close(); if (!isolated.retained) await fs.rm(root, { recursive: true, force: true });
   }
-});
+}, process.env.SATURN_TEST_ISOLATION_EVIDENCE_DIR === undefined ? undefined : 30_000);

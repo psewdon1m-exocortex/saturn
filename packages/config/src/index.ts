@@ -4,6 +4,9 @@ import { z } from "zod";
 import { randomUUID } from "node:crypto";
 import { isIP } from "node:net";
 import { recoveryEnvironmentKeys } from "./recovery-keys.js";
+import type { StorageConfig } from "./storage-config.js";
+export { requireSftpStorage } from "./storage-config.js";
+export type { StorageConfig, SftpStorageConfig, LocalStorageConfig } from "./storage-config.js";
 export { encodeOwnerAccessKey, decodeOwnerAccessKey, readOwnerAccessKey } from "./owner-access-key.js";
 
 const booleanText = z.enum(["true", "false"]).transform((value) => value === "true");
@@ -55,12 +58,15 @@ const environmentSchema = z.object({
   KERNEL_URL: z.string().default(""),
   KERNEL_TOKEN_FILE: z.string().default(""),
   KERNEL_TIMEOUT_MS: z.coerce.number().int().min(500).max(10_000).default(3_000),
-  STORAGE_HOST: z.string().min(1),
+  STORAGE_BACKEND: z.enum(["sftp", "local"]).default("sftp"),
+  STORAGE_LOCAL_ROOT: z.string().default(""),
+  STORAGE_LOCAL_CUSTODY_FILE: z.string().default(""),
+  STORAGE_HOST: z.string().default(""),
   STORAGE_PORT: z.coerce.number().int().min(1).max(65_535).default(22),
-  STORAGE_USER: z.string().min(1),
+  STORAGE_USER: z.string().default(""),
   STORAGE_ROOT: z.string().min(1).default("."),
-  STORAGE_HOST_FINGERPRINT: z.string().regex(/^SHA256:[A-Za-z0-9+/]{43}=?$/),
-  STORAGE_AUTH_MODE: z.enum(["password_file", "private_key_file"]),
+  STORAGE_HOST_FINGERPRINT: z.string().default(""),
+  STORAGE_AUTH_MODE: z.enum(["password_file", "private_key_file"]).optional(),
   STORAGE_PASSWORD_FILE: z.string().default(""),
   STORAGE_PRIVATE_KEY_FILE: z.string().default(""),
   STORAGE_RUNTIME_CONFIG_DIR: z.string().min(1).default("data/storage-runtime"),
@@ -167,6 +173,24 @@ const environmentSchema = z.object({
   LABORATORY_TOKEN_ROTATION_GRACE_MS: z.coerce.number().int().min(0).max(7 * 24 * 60 * 60 * 1_000).default(60 * 60 * 1_000),
   LABORATORY_MAX_CONCURRENT_PUBLIC_STREAMS: z.coerce.number().int().min(1).max(10_000).default(16),
 }).superRefine((value, context) => {
+  if (value.STORAGE_BACKEND === "local") {
+    for (const field of ["STORAGE_LOCAL_ROOT", "STORAGE_LOCAL_CUSTODY_FILE"] as const) {
+      const candidate = value[field];
+      if (!path.isAbsolute(candidate) || candidate !== path.resolve(candidate) || candidate === path.parse(candidate).root || containsControlCharacter(candidate))
+        context.addIssue({ code: "custom", path: [field], message: "Local storage requires an explicit absolute dedicated path" });
+    }
+    if (value.STORAGE_HOST || value.STORAGE_USER || value.STORAGE_HOST_FINGERPRINT || value.STORAGE_AUTH_MODE || value.STORAGE_PASSWORD_FILE || value.STORAGE_PRIVATE_KEY_FILE || value.STORAGE_ROOT !== ".")
+      context.addIssue({ code: "custom", path: ["STORAGE_BACKEND"], message: "Local storage cannot include an SFTP profile" });
+    if (value.STORAGE_REQUIRE_FSYNC === false) context.addIssue({ code: "custom", path: ["STORAGE_REQUIRE_FSYNC"], message: "Local storage requires durable writes" });
+    const relative = path.relative(value.STORAGE_LOCAL_ROOT, value.STORAGE_LOCAL_CUSTODY_FILE);
+    if (!relative || !relative.startsWith(".." + path.sep) && !path.isAbsolute(relative))
+      context.addIssue({ code: "custom", path: ["STORAGE_LOCAL_CUSTODY_FILE"], message: "Local custody must be outside the writable storage root" });
+  } else {
+    if (value.STORAGE_LOCAL_ROOT || value.STORAGE_LOCAL_CUSTODY_FILE) context.addIssue({ code: "custom", path: ["STORAGE_BACKEND"], message: "Local paths require explicit local backend selection" });
+    for (const field of ["STORAGE_HOST", "STORAGE_USER", "STORAGE_AUTH_MODE"] as const)
+      if (!value[field]) context.addIssue({ code: "custom", path: [field], message: "SFTP configuration is required" });
+    if (!/^SHA256:[A-Za-z0-9+/]{43}=?$/.test(value.STORAGE_HOST_FINGERPRINT)) context.addIssue({ code: "custom", path: ["STORAGE_HOST_FINGERPRINT"], message: "SFTP host fingerprint is invalid" });
+  }
   const rootSegments = value.STORAGE_ROOT.replaceAll("\\", "/").split("/");
   if (value.STORAGE_ROOT.startsWith("/") || rootSegments.includes("..") || containsControlCharacter(value.STORAGE_ROOT)) {
     context.addIssue({
@@ -264,7 +288,7 @@ const environmentSchema = z.object({
     if (publicUrl.protocol !== "https:") {
       context.addIssue({ code: "custom", path: ["PUBLIC_ORIGIN"], message: "Production origin must use HTTPS" });
     }
-    if (value.STORAGE_AUTH_MODE !== "private_key_file") {
+    if (value.STORAGE_BACKEND === "sftp" && value.STORAGE_AUTH_MODE !== "private_key_file") {
       context.addIssue({
         code: "custom",
         path: ["STORAGE_AUTH_MODE"],
@@ -399,20 +423,7 @@ export interface SaturnConfig {
     readonly tokenRotationGraceMs: number;
     readonly maxConcurrentPublicStreams: number;
   };
-  readonly storage: {
-    readonly host: string;
-    readonly port: number;
-    readonly username: string;
-    readonly root: string;
-    readonly hostFingerprint: string;
-    readonly authMode: "password_file" | "private_key_file";
-    readonly passwordFile?: string;
-    readonly privateKeyFile?: string;
-    readonly operationTimeoutMs: number;
-    readonly healthTimeoutMs: number;
-    readonly maxConnections: number;
-    readonly requireFsync?: boolean;
-  };
+  readonly storage: StorageConfig;
   readonly storageRuntimeConfigDirectory: string;
   readonly readinessRequireStorage: boolean;
   readonly readinessTimeoutMs: number;
@@ -584,13 +595,21 @@ export function loadEnvironment(
       tokenRotationGraceMs: value.LABORATORY_TOKEN_ROTATION_GRACE_MS,
       maxConcurrentPublicStreams: value.LABORATORY_MAX_CONCURRENT_PUBLIC_STREAMS,
     },
-    storage: {
+    storage: value.STORAGE_BACKEND === "local" ? {
+      backend: "local",
+      root: value.STORAGE_LOCAL_ROOT,
+      custodyFile: value.STORAGE_LOCAL_CUSTODY_FILE,
+      operationTimeoutMs: value.STORAGE_OPERATION_TIMEOUT_MS,
+      healthTimeoutMs: value.STORAGE_HEALTH_TIMEOUT_MS,
+      maxConnections: value.STORAGE_MAX_CONNECTIONS,
+      requireFsync: true,
+    } : {
       host: value.STORAGE_HOST,
       port: value.STORAGE_PORT,
       username: value.STORAGE_USER,
       root: value.STORAGE_ROOT.replaceAll("\\", "/").replace(/^\/+|\/+$/g, ""),
       hostFingerprint: value.STORAGE_HOST_FINGERPRINT,
-      authMode: value.STORAGE_AUTH_MODE,
+      authMode: value.STORAGE_AUTH_MODE as "password_file" | "private_key_file",
       ...(passwordFile === undefined ? {} : { passwordFile }),
       ...(privateKeyFile === undefined ? {} : { privateKeyFile }),
       operationTimeoutMs: value.STORAGE_OPERATION_TIMEOUT_MS,
@@ -669,6 +688,12 @@ const recoveryFieldsWithTargetDefaults = new Set([
 /** Local credentials, executable paths, bind addresses and deployment mode stay on the target host. */
 export function recoveredConfigurationEnvironment(value: unknown, config: SaturnConfig): Record<string, string> {
   const result: Record<string, string> = {};
+  const archivedStorage = typeof value === "object" && value !== null && "storage" in value ? value.storage : undefined;
+  if (typeof archivedStorage === "object" && archivedStorage !== null) {
+    const kind = "backend" in archivedStorage ? archivedStorage.backend : "sftp";
+    if (kind !== (config.storage.backend ?? "sftp")) throw new Error("Recovery cannot change the operator-selected storage backend");
+    if (kind === "local" && (!("root" in archivedStorage) || archivedStorage.root !== config.storage.root)) throw new Error("Recovery cannot redirect the operator-pinned local root");
+  }
   const visit = (source: unknown, expected: unknown, segments: string[]): void => {
     const key = segments.join(".");
     if (typeof expected === "object" && expected !== null) {
@@ -686,7 +711,7 @@ export function recoveredConfigurationEnvironment(value: unknown, config: Saturn
     if (typeof source !== typeof expected || (typeof source === "number" && !Number.isFinite(source)) || (typeof source === "string" && source.length > 2048))
       throw new Error(`Invalid recovery configuration: ${key}`);
     if (["environment", "api.host", "api.port", "worker.host", "worker.port"].includes(key)) return;
-    const environmentKey = recoveryEnvironmentKeys[key];
+    const environmentKey = key === "storage.root" && config.storage.backend === "local" ? "STORAGE_LOCAL_ROOT" : recoveryEnvironmentKeys[key];
     if (environmentKey === undefined) throw new Error(`Unsupported recovery configuration: ${key}`);
     result[environmentKey] = String(source);
   };
@@ -695,7 +720,7 @@ export function recoveredConfigurationEnvironment(value: unknown, config: Saturn
 }
 
 export function validateRecoveredConfiguration(value: unknown, config: SaturnConfig, input: Readonly<Record<string, string | undefined>> = process.env): SaturnConfig {
-  return loadEnvironment({ ...input, ...recoveredConfigurationEnvironment(value, config) }, process.cwd(), false);
+  return loadEnvironment({ ...input, ...(config.storage.backend === "local" ? { STORAGE_BACKEND: "local", STORAGE_LOCAL_ROOT: config.storage.root, STORAGE_LOCAL_CUSTODY_FILE: config.storage.custodyFile } : {}), ...recoveredConfigurationEnvironment(value, config) }, process.cwd(), false);
 }
 
 export function writeRecoveredConfiguration(value: unknown, config: SaturnConfig): void {
@@ -794,7 +819,14 @@ export function publicConfig(config: SaturnConfig): Record<string, unknown> {
       maxConcurrentPublicStreams: config.laboratory.maxConcurrentPublicStreams,
     },
     worker: config.worker,
-    storage: {
+    storage: config.storage.backend === "local" ? {
+      backend: "local",
+      root: config.storage.root,
+      operationTimeoutMs: config.storage.operationTimeoutMs,
+      healthTimeoutMs: config.storage.healthTimeoutMs,
+      maxConnections: config.storage.maxConnections,
+      requireFsync: true,
+    } : {
       host: config.storage.host,
       port: config.storage.port,
       username: config.storage.username,

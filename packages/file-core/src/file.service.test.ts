@@ -6,6 +6,7 @@ import { Readable } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
 import { LocalStorageAdapter } from "@saturn/storage";
 import { FileService } from "./file.service.js";
+import { archivedVersionPurgeAfter } from "./retention.js";
 import {
   BACKUPS_RESOURCE_ID,
   DROP_POINT_RESOURCE_ID,
@@ -41,6 +42,7 @@ class MemoryRepository implements FileRepository {
   readonly operations = new Map<string, FileOperation>();
   readonly versions = new Map<string, FileVersion>();
   readonly locks = new Map<string, { operationId: string; expiresAt: Date }>();
+  readonly pinnedVersions = new Set<string>();
   trashRetentionDays = 30;
   uploadLimits: UploadLimits | undefined;
   purgeFailuresRemaining = 0;
@@ -247,11 +249,12 @@ class MemoryRepository implements FileRepository {
     const previous = this.versions.get(record.previousVersionId);
     if (current === undefined || existing === undefined || previous === undefined) throw new Error("Overwrite fixture missing");
     const now = new Date();
+    const purgeAfter = archivedVersionPurgeAfter(existing.retentionClass ?? "general", now);
     this.versions.set(previous.id, {
       ...previous,
       storagePath: record.previousVersionArchivePath,
       archivedAt: now,
-      ...(record.previousVersionPurgeAfter === undefined ? {} : { purgeAfter: record.previousVersionPurgeAfter }),
+      ...(purgeAfter === undefined ? {} : { purgeAfter }),
     });
     this.versions.set(record.versionId, {
       id: record.versionId,
@@ -285,9 +288,13 @@ class MemoryRepository implements FileRepository {
   async listVersions(resourceId: string, offset: number, limit: number) {
     return [...this.versions.values()].filter((item) => item.resourceId === resourceId).reverse().slice(offset, offset + limit);
   }
-  async expireVersion(resourceId: string, versionId: string) {
-    const version = this.versions.get(versionId);
-    if (version?.resourceId === resourceId && this.resources.get(resourceId)?.currentVersionId !== versionId) this.versions.set(versionId, { ...version, state: "expired" });
+  async expireVersion(resourceId: string, selected: Pick<FileVersion, "id" | "storagePath" | "sizeBytes" | "sha256">) {
+    const version = this.versions.get(selected.id), resource = this.resources.get(resourceId);
+    if (version?.resourceId !== resourceId || resource?.currentVersionId === selected.id || this.pinnedVersions.has(selected.id)
+      || version.storagePath !== selected.storagePath || version.sha256 !== selected.sha256 || version.sizeBytes !== selected.sizeBytes
+      || resource?.retentionClass === "keepass" || resource?.retentionClass === "laboratory_immutable") return false;
+    this.versions.set(selected.id, { ...version, state: "expired" });
+    return true;
   }
   async getOperation(idempotencyKey: string) {
     return [...this.operations.values()].find((item) => item.idempotencyKey === idempotencyKey);
@@ -478,11 +485,12 @@ class MemoryRepository implements FileRepository {
     const previous = this.versions.get(record.previousVersionId);
     if (existing === undefined || previous === undefined) throw new Error("Version restore fixture missing");
     const now = new Date();
+    const purgeAfter = archivedVersionPurgeAfter(existing.retentionClass ?? "general", now);
     this.versions.set(previous.id, {
       ...previous,
       storagePath: record.previousVersionArchivePath,
       archivedAt: now,
-      ...(record.previousVersionPurgeAfter === undefined ? {} : { purgeAfter: record.previousVersionPurgeAfter }),
+      ...(purgeAfter === undefined ? {} : { purgeAfter }),
     });
     this.versions.set(record.newVersionId, {
       id: record.newVersionId,
@@ -526,6 +534,184 @@ async function collect(stream: NodeJS.ReadableStream): Promise<Buffer> {
 }
 
 describe("FileService upload state machine", () => {
+  it.each(["overwrite", "membership"] as const)("refuses a copy after source %s changed before locking", async (change) => {
+    await safetyFixture(async (service, repository) => {
+      const source = await service.createFolder(SYNC_RESOURCE_ID, "source");
+      const target = await service.createFolder(SYNC_RESOURCE_ID, "destination");
+      const publish = async (name: string, bytes: Buffer, key: string) => {
+        const upload = await service.createUpload({
+          parentId: source.id, filename: name, expectedSize: bytes.length,
+          expectedSha256: createHash("sha256").update(bytes).digest("hex"), idempotencyKey: key,
+        });
+        if (bytes.length > 0) await service.appendUpload(upload.id, 0, bytes.length, Readable.from(bytes));
+        return (await service.completeUpload(upload.id)).resource;
+      };
+      const oldBytes = Buffer.from("old source content");
+      const newBytes = Buffer.from("new source content");
+      const leaf = await publish("payload.bin", oldBytes, `snapshot-${change}-original`);
+      const input = { parentId: target.id, name: "copy", idempotencyKey: `snapshot-${change}` };
+      let reached!: () => void;
+      let release!: () => void;
+      const entered = new Promise<void>((resolve) => { reached = resolve; });
+      const barrier = new Promise<void>((resolve) => { release = resolve; });
+      const acquire = repository.acquireLocks.bind(repository);
+      const spy = vi.spyOn(repository, "acquireLocks").mockImplementation(async (id, keys, expiresAt) => {
+        if (keys.includes(`resource:${source.id}`) && keys.includes(`resource:${target.id}`)) {
+          reached();
+          await barrier;
+        }
+        return acquire(id, keys, expiresAt);
+      });
+      const pending = service.copyResource(source.id, input).then(() => undefined, (error: unknown) => error);
+      try {
+        await Promise.race([entered, pending.then(() => { throw new Error("Copy finished before its lock barrier"); })]);
+        if (change === "overwrite") await publish("payload.bin", newBytes, "snapshot-overwrite-new");
+        else await publish("empty.bin", Buffer.alloc(0), "snapshot-new-empty-file");
+      } finally {
+        release();
+        spy.mockRestore();
+        await pending;
+      }
+      expect(await pending).toMatchObject({ message: "precondition_failed" });
+      await expect(service.copyResource(source.id, input)).rejects.toThrow("precondition_failed");
+      expect(await repository.getChild(target.id, input.name)).toBeUndefined();
+      const copied = await service.copyResource(source.id, { ...input, idempotencyKey: `${input.idempotencyKey}-fresh` });
+      const copiedLeaf = await repository.getChild(copied.id, "payload.bin");
+      expect(copiedLeaf).toBeDefined();
+      if (copiedLeaf === undefined) throw new Error("Copied leaf is missing");
+      const expectedBytes = change === "overwrite" ? newBytes : oldBytes;
+      expect(await collect((await service.openDownload(copiedLeaf.id)).stream)).toEqual(expectedBytes);
+      expect(copiedLeaf.sha256).toBe(createHash("sha256").update(expectedBytes).digest("hex"));
+      expect(await collect((await service.openDownload(leaf.id)).stream)).toEqual(expectedBytes);
+      if (change === "membership") expect(await repository.getChild(copied.id, "empty.bin")).toMatchObject({ sizeBytes: 0 });
+      expect(repository.locks.size).toBe(0);
+    });
+  });
+
+  it.each(["move", "copy"] as const)("preserves a competing file published while %s waits for its locks", async (operation) => {
+    await safetyFixture(async (service, repository) => {
+      const sourceParent = await service.createFolder(SYNC_RESOURCE_ID, "source");
+      const target = await service.createFolder(SYNC_RESOURCE_ID, "destination");
+      const publish = async (parentId: string, name: string, bytes: Buffer, key: string) => {
+        const upload = await service.createUpload({
+          parentId, filename: name, expectedSize: bytes.length,
+          expectedSha256: createHash("sha256").update(bytes).digest("hex"), idempotencyKey: key,
+        });
+        await service.appendUpload(upload.id, 0, bytes.length, Readable.from(bytes));
+        return (await service.completeUpload(upload.id)).resource;
+      };
+      const bytes = Buffer.from("selected source bytes");
+      const protectedBytes = Buffer.from("independent competing publication");
+      const source = await publish(sourceParent.id, "source.bin", bytes, `collision-${operation}-source`);
+      const input = { parentId: target.id, name: "chosen.bin", idempotencyKey: `collision-${operation}` };
+      const mutate = () => operation === "move"
+        ? service.moveResource(source.id, input)
+        : service.copyResource(source.id, input);
+      let reached!: () => void;
+      let release!: () => void;
+      const entered = new Promise<void>((resolve) => { reached = resolve; });
+      const barrier = new Promise<void>((resolve) => { release = resolve; });
+      const acquire = repository.acquireLocks.bind(repository);
+      const spy = vi.spyOn(repository, "acquireLocks").mockImplementation(async (id, keys, expiresAt) => {
+        if (keys.includes(`resource:${source.id}`) && keys.includes(`resource:${target.id}`)) {
+          reached();
+          await barrier;
+        }
+        return acquire(id, keys, expiresAt);
+      });
+      const pending = mutate().then(() => undefined, (error: unknown) => error);
+      let competitor: Resource;
+      try {
+        await Promise.race([entered, pending.then(() => { throw new Error("Mutation finished before its lock barrier"); })]);
+        competitor = await publish(target.id, input.name, protectedBytes, `collision-${operation}-competitor`);
+      } finally {
+        release();
+        spy.mockRestore();
+        await pending;
+      }
+      expect(await pending).toMatchObject({ message: "conflict" });
+      expect(await repository.getOperation(`mutation:${input.idempotencyKey}`)).toMatchObject({ state: "failed_final", errorCode: "conflict" });
+      await expect(mutate()).rejects.toThrow("conflict");
+      expect(await collect((await service.openDownload(source.id)).stream)).toEqual(bytes);
+      expect(await collect((await service.openDownload(competitor.id)).stream)).toEqual(protectedBytes);
+      expect((await service.getResource(competitor.id)).currentVersionId).toBe(competitor.currentVersionId);
+      expect(repository.locks.size).toBe(0);
+    });
+  });
+
+  it.each(["move", "copy"] as const)("refuses %s when its destination moved before lock acquisition", async (operation) => {
+    await safetyFixture(async (service, repository, storage) => {
+      const sourceParent = await service.createFolder(SYNC_RESOURCE_ID, "source");
+      const target = await service.createFolder(SYNC_RESOURCE_ID, "destination");
+      const newParent = await service.createFolder(SYNC_RESOURCE_ID, "new-parent");
+      const bytes = Buffer.from("original file for destination race");
+      const digest = createHash("sha256").update(bytes).digest("hex");
+      const upload = await service.createUpload({
+        parentId: sourceParent.id,
+        filename: "original.txt",
+        expectedSize: bytes.length,
+        expectedSha256: digest,
+        idempotencyKey: `destination-race-${operation}-upload`,
+      });
+      await service.appendUpload(upload.id, 0, bytes.length, Readable.from(bytes));
+      const source = (await service.completeUpload(upload.id)).resource;
+      const input = { parentId: target.id, name: "chosen.txt", idempotencyKey: `destination-race-${operation}` };
+      const mutate = () => operation === "move"
+        ? service.moveResource(source.id, input)
+        : service.copyResource(source.id, input);
+      let reached!: () => void;
+      let release!: () => void;
+      const entered = new Promise<void>((resolve) => { reached = resolve; });
+      const barrier = new Promise<void>((resolve) => { release = resolve; });
+      const acquire = repository.acquireLocks.bind(repository);
+      const spy = vi.spyOn(repository, "acquireLocks").mockImplementation(async (id, keys, expiresAt) => {
+        if (keys.includes(`resource:${source.id}`) && keys.includes(`resource:${target.id}`)) {
+          reached();
+          await barrier;
+        }
+        return acquire(id, keys, expiresAt);
+      });
+      const pending = mutate().then(
+        (resource) => ({ resource, error: undefined }),
+        (error: unknown) => ({ resource: undefined, error }),
+      );
+      try {
+        await Promise.race([entered, pending.then(() => { throw new Error("Mutation finished before its lock barrier"); })]);
+        await service.moveResource(target.id, {
+          parentId: newParent.id,
+          name: "relocated",
+          idempotencyKey: `destination-race-${operation}-relocate`,
+        });
+      } finally {
+        release();
+        spy.mockRestore();
+        await pending;
+      }
+      const result = await pending;
+      expect(result.error).toBeInstanceOf(Error);
+      expect((result.error as Error).message).toBe("precondition_failed");
+      expect(result.resource).toBeUndefined();
+      expect(await repository.getOperation(`mutation:${input.idempotencyKey}`)).toMatchObject({
+        state: "failed_final",
+        errorCode: "precondition_failed",
+      });
+      await expect(mutate()).rejects.toThrow("precondition_failed");
+      expect((await service.getResource(source.id)).storagePath).toBe(source.storagePath);
+      expect((await service.getResource(source.id)).currentVersionId).toBe(source.currentVersionId);
+      expect(await collect((await service.openDownload(source.id)).stream)).toEqual(bytes);
+      expect(await storage.exists(target.storagePath)).toBe(false);
+      expect(await repository.getChild(target.id, input.name)).toBeUndefined();
+      expect(repository.locks.size).toBe(0);
+      input.idempotencyKey += "-fresh";
+      const retried = await mutate();
+      const parent = await service.getResource(target.id);
+      expect(retried.storagePath).toBe(`${parent.storagePath}/${input.name}`);
+      expect(await collect((await service.openDownload(retried.id)).stream)).toEqual(bytes);
+      expect(await storage.exists(target.storagePath)).toBe(false);
+      expect(repository.locks.size).toBe(0);
+    });
+  });
+
   async function safetyFixture(action: (service: FileService, repository: MemoryRepository, storage: LocalStorageAdapter) => Promise<void>) {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "saturn-transfer-safety-"));
     const storage = new LocalStorageAdapter(root), repository = new MemoryRepository(), service = new FileService(repository, storage);
@@ -595,6 +781,27 @@ describe("FileService upload state machine", () => {
     expect((await collect(await storage.openRead(original.resource.storagePath))).toString()).toBe('original');
   }));
 
+  it("rolls back a storage-full chunk and accepts an exact retry without publishing partial bytes", async () => safetyFixture(async (service, _repository, storage) => {
+    const payload = Buffer.from("valuable-after-capacity-recovers");
+    const upload = await service.createUpload({
+      parentId: SYNC_RESOURCE_ID,
+      filename: "storage-full.bin",
+      expectedSize: payload.length,
+      expectedSha256: createHash("sha256").update(payload).digest("hex"),
+      idempotencyKey: "storage-full-retry",
+    });
+    vi.spyOn(storage, "write").mockRejectedValueOnce(Object.assign(new Error("No space left on device"), { code: "ENOSPC" }));
+
+    await expect(service.appendUpload(upload.id, 0, payload.length, Readable.from(payload))).rejects.toMatchObject({ code: "ENOSPC" });
+    expect(await service.getUpload(upload.id)).toMatchObject({ status: "failed_retryable", receivedSize: 0, errorCode: "chunk_write_failed" });
+    expect(await storage.exists(upload.tempPath)).toBe(false);
+    expect((await service.listChildren(SYNC_RESOURCE_ID)).some(item => item.name === "storage-full.bin")).toBe(false);
+
+    await expect(service.appendUpload(upload.id, 0, payload.length, Readable.from(payload))).resolves.toMatchObject({ receivedSize: payload.length });
+    const completed = await service.completeUpload(upload.id);
+    expect((await collect(await storage.openRead(completed.resource.storagePath))).equals(payload)).toBe(true);
+  }));
+
   it("does not revive an abandoned or committed upload when a late PATCH arrives", async () => safetyFixture(async (service, _repository, storage) => {
     const cancelled = await service.createUpload({ parentId: SYNC_RESOURCE_ID, filename: "cancelled.bin", expectedSize: 6, idempotencyKey: "late-cancelled-patch" });
     await service.abandonUpload(cancelled.id);
@@ -651,6 +858,35 @@ describe("FileService upload state machine", () => {
     const completed = await service.completeUpload(upload.id);
     expect(completed.resource.sha256).toBe(upload.expectedSha256);
     expect(Buffer.concat(await (await storage.openRead(archive)).toArray()).toString()).toBe('original');
+    expect(await service.listVersions(original.id)).toHaveLength(2);
+  }));
+
+  it.each([false, true])("preserves an overwrite for recovery when rollback fails (rename applied: %s)", async (renameApplied) => safetyFixture(async (service, _repository, storage) => {
+    const original = (await service.completeUpload((await pending(service, 'rollback-outage.txt', 'original')).id)).resource;
+    if (original.currentVersionId === undefined) throw new Error('Version missing');
+    const upload = await pending(service, 'rollback-outage.txt', 'replacement', { overwriteResourceId: original.id, expectedVersionId: original.currentVersionId });
+    const archive = `_system/versions/${original.id}/${original.currentVersionId}/rollback-outage.txt`;
+    const rename = storage.rename.bind(storage);
+    const fault = vi.spyOn(storage, 'rename').mockImplementation(async (source, destination) => {
+      if (source === upload.tempPath && destination === upload.targetPath) {
+        if (renameApplied) await rename(source, destination);
+        throw new Error('commit rename response lost');
+      }
+      if (source === archive && destination === upload.targetPath) throw new Error('rollback storage unavailable');
+      await rename(source, destination);
+    });
+    await expect(service.completeUpload(upload.id)).rejects.toThrow('commit rename response lost');
+    expect(await service.getUpload(upload.id)).toMatchObject({ status: 'committing', actualSha256: upload.expectedSha256 });
+    await expect(service.abandonUpload(upload.id)).rejects.toThrow('recovering');
+    expect((await collect(await storage.openRead(archive))).toString()).toBe('original');
+    expect((await collect(await storage.openRead(upload.tempPath))).toString()).toBe('replacement');
+    fault.mockRestore();
+    const completed = await service.completeUpload(upload.id);
+    expect(completed.upload.id).toBe(upload.id);
+    expect(completed.upload.status).toBe('active');
+    expect(completed.resource.id).toBe(original.id);
+    expect((await collect(await storage.openRead(upload.targetPath))).toString()).toBe('replacement');
+    expect((await collect(await storage.openRead(archive))).toString()).toBe('original');
     expect(await service.listVersions(original.id)).toHaveLength(2);
   }));
 
@@ -715,6 +951,65 @@ describe("FileService upload state machine", () => {
       await expect(service.limitVersions(resourceId, 0)).rejects.toThrow("Version limit is invalid");
     } finally { await storage.close(); await fs.rm(root, { recursive: true, force: true }); }
   });
+  it("retains an old public pin outside the newest ten versions until it is released", async () => safetyFixture(async (service, repository, storage) => {
+    let resource: Resource | undefined, pinnedId: string | undefined;
+    for (let index = 0; index < 13; index++) {
+      resource = (await service.completeUpload((await pending(service, "pinned-history.txt", `generation ${String(index)}`,
+        { idempotencyKey: `retention-pin-${String(index)}`, ...(resource === undefined ? {} : { overwriteResourceId: resource.id }) })).id)).resource;
+      if (index === 0) pinnedId = resource.currentVersionId;
+    }
+    if (resource === undefined || pinnedId === undefined) throw new Error("History fixture missing");
+    repository.pinnedVersions.add(pinnedId);
+    await service.limitVersions(resource.id, 10);
+    const retained = await service.listVersions(resource.id);
+    expect(retained.filter(v => v.state === "active")).toHaveLength(11);
+    expect(await collect((await service.openVersionDownload(resource.id, pinnedId)).stream)).toEqual(Buffer.from("generation 0"));
+    expect(await collect((await service.openDownload(resource.id)).stream)).toEqual(Buffer.from("generation 12"));
+    await service.limitVersions(resource.id, 10);
+    expect(await service.listVersions(resource.id)).toEqual(retained);
+    repository.pinnedVersions.delete(pinnedId);
+    await service.limitVersions(resource.id, 10);
+    expect((await service.listVersions(resource.id)).filter(v => v.state === "active")).toHaveLength(10);
+    expect(await storage.exists((await service.getVersion(resource.id, pinnedId)).storagePath)).toBe(false);
+    for (const version of retained.filter(v => v.state === "active" && v.id !== pinnedId)) {
+      expect(createHash("sha256").update(await collect((await service.openVersionDownload(resource.id, version.id)).stream)).digest("hex")).toBe(version.sha256);
+    }
+    expect(repository.locks.size).toBe(0);
+  }));
+
+  it("commits expiry before physical deletion and resumes the same archive after a storage failure", async () => safetyFixture(async (service, repository, storage) => {
+    const first = (await service.completeUpload((await pending(service, "cleanup-history.txt", "original")).id)).resource;
+    if (first.currentVersionId === undefined) throw new Error("Version missing");
+    await service.completeUpload((await pending(service, first.name, "replacement", { overwriteResourceId: first.id })).id);
+    const original = await service.getVersion(first.id, first.currentVersionId);
+    const remove = storage.delete.bind(storage);
+    const deletion = vi.spyOn(storage, "delete").mockImplementationOnce(async selected => {
+      expect(selected).toBe(original.storagePath);
+      expect((await repository.getVersion(first.id, original.id))?.state).toBe("expired");
+      throw new Error("Storage temporarily unavailable");
+    });
+    await expect(service.limitVersions(first.id, 1)).rejects.toThrow("Storage temporarily unavailable");
+    expect(await storage.exists(original.storagePath)).toBe(true);
+    expect(repository.locks.size).toBe(0);
+    deletion.mockImplementation(remove);
+    await new FileService(repository, storage).limitVersions(first.id, 1);
+    expect(await storage.exists(original.storagePath)).toBe(false);
+    expect((await service.listVersions(first.id)).filter(v => v.state === "active")).toHaveLength(1);
+    expect(await collect((await service.openDownload(first.id)).stream)).toEqual(Buffer.from("replacement"));
+    expect(repository.locks.size).toBe(0);
+  }));
+
+  it.each(["keepass", "laboratory_immutable"] as const)("does not automatically expire %s history", async retentionClass => safetyFixture(async (service, repository, storage) => {
+    const first = (await service.completeUpload((await pending(service, "immutable-history.txt", "protected original", { idempotencyKey: "retention-immutable-original" })).id)).resource;
+    const latest = (await service.completeUpload((await pending(service, first.name, "current", { overwriteResourceId: first.id })).id)).resource;
+    repository.resources.set(first.id, { ...latest, retentionClass });
+    const before = await service.listVersions(first.id);
+    await service.limitVersions(first.id, 1);
+    expect(await service.listVersions(first.id)).toEqual(before);
+    for (const version of before) expect(await storage.exists(version.storagePath)).toBe(true);
+    expect(repository.locks.size).toBe(0);
+  }));
+
   it("pins a download version while an overwrite changes both bytes and length", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "saturn-read-overwrite-"));
     const storage = new LocalStorageAdapter(root);
@@ -830,6 +1125,27 @@ describe("FileService upload state machine", () => {
       await fs.rm(root, { recursive: true, force: true });
     }
   });
+
+  it("uses indexed child lookup while preserving exact names and active-folder validation", async () => safetyFixture(async (service, repository) => {
+    const parent = await service.createFolder(ROOT_RESOURCE_ID, "Reports");
+    const target = await service.createFolder(parent.id, "Record");
+    for (let index = 0; index < 5000; index++) {
+      repository.resources.set(`lookup-sibling-${String(index)}`, { ...target, id: `lookup-sibling-${String(index)}`, name: `sibling-${String(index)}` });
+    }
+    const lookup = vi.spyOn(repository, "getChild");
+    const enumeration = vi.spyOn(repository, "listChildren").mockRejectedValue(new Error("Child lookup must not enumerate siblings"));
+    expect((await service.findChildExact(parent.id, "Record"))?.id).toBe(target.id);
+    expect(lookup).toHaveBeenCalledTimes(1);
+    expect(await service.findChildExact(parent.id, "record")).toBeUndefined();
+    expect(await service.findChildExact(parent.id, "missing")).toBeUndefined();
+    repository.resources.set(target.id, { ...target, status: "trashed" });
+    expect(await service.findChildExact(parent.id, "Record")).toBeUndefined();
+    repository.resources.set(parent.id, { ...parent, type: "file" });
+    await expect(service.findChildExact(parent.id, "Record")).rejects.toThrow("Parent folder is not active");
+    repository.resources.set(parent.id, { ...parent, status: "trashed" });
+    await expect(service.findChildExact(parent.id, "Record")).rejects.toThrow("Parent folder is not active");
+    expect(enumeration).not.toHaveBeenCalled();
+  }));
 
   it("creates a folder and commits a resumable upload only after checksum verification", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "vault-file-service-"));
@@ -1118,7 +1434,7 @@ describe("FileService upload state machine", () => {
         filename: "runtime-too-large.bin",
         expectedSize: 3,
         idempotencyKey: "upload-runtime-limit-001",
-      })).rejects.toThrow(/size/);
+      })).rejects.toThrow("payload_too_large");
       repository.uploadLimits = undefined;
       const limited = new FileService(repository, storage, { uploadMaxBytes: 2 });
       await expect(limited.createUpload({
@@ -1126,7 +1442,7 @@ describe("FileService upload state machine", () => {
         filename: "too-large.bin",
         expectedSize: 3,
         idempotencyKey: "upload-limit-001",
-      })).rejects.toThrow(/size/);
+      })).rejects.toThrow("payload_too_large");
       const empty = await service.createUpload({
         parentId: SYNC_RESOURCE_ID,
         filename: "empty.txt",

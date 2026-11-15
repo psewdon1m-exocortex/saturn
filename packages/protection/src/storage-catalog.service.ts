@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { AuditSink } from "@saturn/audit";
 import type { Database, Sql } from "@saturn/database";
 import { MASTERMIND_RESOURCE_ID, VOLT_RESOURCE_ID } from "@saturn/file-core";
-import type { RuntimeStorageManager } from "@saturn/storage";
+import type { ActiveStorageProfile, StorageAdapter } from "@saturn/storage";
 import { buildCatalogPlan, catalogStamp, scanStorageCatalog, type CatalogPlan, type CatalogResource } from "./storage-catalog.js";
 
 export class StorageCatalogError extends Error {
@@ -42,7 +42,7 @@ function mimeType(name: string): string {
 }
 
 export class StorageCatalogService {
-  constructor(private readonly database: Database, private readonly storage: RuntimeStorageManager, private readonly audit?: AuditSink) {}
+  constructor(private readonly database: Database, private readonly storage: StorageAdapter & { refresh(): Promise<void>; current(): ActiveStorageProfile }, private readonly audit?: AuditSink) {}
 
   async start() {
     await this.storage.refresh();
@@ -183,6 +183,13 @@ export class StorageCatalogService {
         || catalogStamp(current) !== plan.catalogStamp) throw new StorageCatalogError("storage_analysis_stale");
       const byPath = new Map(current.map(resource => [resource.storagePath, resource]));
       const byId = new Map(current.map(resource => [resource.id, resource]));
+      // External catalog import cannot manufacture guarded originals/feed.
+      // Refuse the entire plan before DML; a mixed plan is never half-applied.
+      const guarded=(await sql<{present:boolean}[]>`SELECT to_regclass('public.catalog_guard_roots') IS NOT NULL AS present`)[0]?.present;
+      if(guarded){
+        const roots=await sql<{storage_path:string}[]>`SELECT r.storage_path FROM catalog_guard_roots g JOIN resources r ON r.id=g.root_id`;
+        if(plan.changes.some(change=>roots.some(root=>change.storagePath===root.storage_path||change.storagePath.startsWith(root.storage_path+'/')||root.storage_path.startsWith(change.storagePath+'/'))))throw new StorageCatalogError('storage_guarded_import_unsupported');
+      }
       const affected = new Set<string>();
       const ordered = [...plan.changes].sort((a,b) => a.storagePath.split('/').length-b.storagePath.split('/').length || a.storagePath.localeCompare(b.storagePath));
       for (const change of ordered) {

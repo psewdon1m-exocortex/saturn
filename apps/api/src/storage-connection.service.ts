@@ -4,8 +4,9 @@ import path from "node:path";
 import { Readable } from "node:stream";
 import { Injectable } from "@nestjs/common";
 import type { AuditService } from "@saturn/audit";
-import type { SaturnConfig } from "@saturn/config";
+import { requireSftpStorage, type SaturnConfig, type SftpStorageConfig } from "@saturn/config";
 import type { Database } from "@saturn/database";
+import { guardRecoveryMutation } from "@saturn/recovery";
 import {
   BACKUPS_RESOURCE_ID,
   DROP_POINT_RESOURCE_ID,
@@ -66,21 +67,24 @@ export interface StorageConnectionInput {
   readonly credential: string;
 }
 
-export interface StorageConnectionStatus {
+interface StorageConnectionCommon {
   readonly profileId: string;
   readonly revision: number;
   readonly activatedAt: string;
   readonly source: "bootstrap" | "runtime";
-  readonly host: string;
-  readonly port: number;
-  readonly username: string;
   readonly root: string;
-  readonly hostFingerprint: string;
-  readonly authMode: "password_file" | "private_key_file";
   readonly credentialConfigured: true;
   readonly reachability: "ready" | "unavailable";
   readonly capacity?: StorageCapacity;
 }
+export type StorageConnectionStatus = StorageConnectionCommon & ({
+  readonly backend?: "sftp";
+  readonly host: string;
+  readonly port: number;
+  readonly username: string;
+  readonly hostFingerprint: string;
+  readonly authMode: "password_file" | "private_key_file";
+} | { readonly backend: "local"; readonly host?: never; readonly port?: never; readonly username?: never; readonly hostFingerprint?: never; readonly authMode?: never });
 
 interface IndexedEntry {
   readonly id: string;
@@ -116,6 +120,10 @@ function containsControlCharacter(value: string): boolean {
 }
 
 function publicStatus(profile: ReturnType<RuntimeStorageManager["current"]>, reachability: "ready" | "unavailable", capacity?: StorageCapacity): StorageConnectionStatus {
+  if (profile.config.backend === "local") return {
+    backend: "local", profileId: profile.profileId, revision: profile.revision, activatedAt: profile.activatedAt, source: profile.source,
+    root: profile.config.root, credentialConfigured: true, reachability, ...(capacity === undefined ? {} : { capacity }),
+  };
   return {
     profileId: profile.profileId,
     revision: profile.revision,
@@ -268,6 +276,8 @@ export class StorageConnectionService {
 
   async switch(input: StorageConnectionInput): Promise<StorageConnectionStatus & { readonly indexed: { readonly files: number; readonly directories: number; readonly bytes: number }; readonly revoked: { readonly shares: number; readonly devices: number } }> {
     const profileId = randomUUID();
+    // Preflight before credential files or candidate backend mutations; recheck under the reset transaction below.
+    await this.#database.transaction(sql => guardRecoveryMutation(sql));
     const switchId = randomUUID();
     const previous = this.#storage.current();
     const { adapter, config, credentialPath } = await this.#candidate(input, profileId);
@@ -299,6 +309,8 @@ export class StorageConnectionService {
       const revision = previous.revision + 1;
       try {
         await this.#database.withExclusiveTransaction(async (sql) => {
+          // Do not discard accepted keys/receipts even when no feed root exists.
+          await guardRecoveryMutation(sql);
           const shareRows = await sql<Array<{ count: string }>>`UPDATE shares SET state='revoked', revoked_at=now(), updated_at=now() WHERE state='active' RETURNING id`;
           const deviceRows = await sql<Array<{ count: string }>>`UPDATE devices SET state='revoked', revoked_at=now(), updated_at=now() WHERE state='active' RETURNING id`;
           revokedShares = shareRows.length;
@@ -380,7 +392,8 @@ export class StorageConnectionService {
     }
   }
 
-  async #candidate(input: StorageConnectionInput, profileId: string): Promise<{ readonly adapter: StorageAdapter; readonly config: SaturnConfig["storage"]; readonly credentialPath: string }> {
+  async #candidate(input: StorageConnectionInput, profileId: string): Promise<{ readonly adapter: StorageAdapter; readonly config: SftpStorageConfig; readonly credentialPath: string }> {
+    requireSftpStorage(this.#storage.current().config);
     const credential = input.credential;
     if (input.authMode === "password_file") {
       if (credential.length < 1 || credential.length > 4_096 || /[\r\n]/.test(credential)) throw new Error("invalid_storage_password");
@@ -391,7 +404,7 @@ export class StorageConnectionService {
     await fs.mkdir(directory, { recursive: true, mode: 0o700 });
     const credentialPath = path.join(directory, `credential-${profileId}.${input.authMode === "password_file" ? "password" : "key"}`);
     await fs.writeFile(credentialPath, input.authMode === "password_file" ? `${credential}\n` : credential, { encoding: "utf8", flag: "wx", mode: 0o600 });
-    const config: SaturnConfig["storage"] = {
+    const config: SftpStorageConfig = {
       host: input.host,
       port: input.port,
       username: input.username,

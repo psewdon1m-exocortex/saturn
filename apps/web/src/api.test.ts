@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApiError, uploadFile } from "./api.js";
+// Transport-only401MiB fixture has no bytes; full SHA is covered by source-hash tests.
+vi.mock("./upload-sha256.js", () => ({ uploadSourceHasher: { hash: vi.fn(async () => "a".repeat(64)) } }));
 
-afterEach(() => { vi.unstubAllGlobals(); window.sessionStorage.clear(); });
+afterEach(() => { vi.unstubAllGlobals(); window.sessionStorage.clear(); window.localStorage.clear(); });
 
 describe("ApiError", () => {
   it("shows the bounded server explanation to the authenticated operator", () => {
@@ -45,3 +47,4 @@ describe("ApiError", () => {
     expect(progress.at(-1)).toBe(1);
   });
 });
+vi.mock("./upload-recovery-durable.js", async () => (await import("./upload-recovery-test-backend.js")).recoveryUnitBackend());

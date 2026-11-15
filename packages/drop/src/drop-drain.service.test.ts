@@ -145,4 +145,81 @@ describe("DropDrainService", () => {
     expect(appendCalls).toBe(51);
     expect(stored).toBe(true);
   });
+
+  it("keeps buffered bytes when remote storage is full and drains the same upload after recovery", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "saturn-drop-drain-full-"));
+    const payload = Buffer.from("buffered-until-remote-capacity-recovers");
+    const sha256 = createHash("sha256").update(payload).digest("hex");
+    let item: DropUpload = {
+      id: "019cbb75-6352-7000-8000-000000000021",
+      sessionId: "019cbb75-6352-7000-8000-000000000022",
+      channelId: "019cbb75-6352-7000-8000-000000000023",
+      clientKeyHash: "client-key",
+      filename: "capacity-retry.bin",
+      expectedSize: payload.length,
+      receivedSize: payload.length,
+      actualSha256: sha256,
+      state: "buffered",
+      localPath: "019cbb75-6352-7000-8000-000000000021.part",
+      createdAt: new Date(),
+    };
+    const buffer = new DropBufferStore({ root, maxBytes: 1024 * 1024, minFreeBytes: 0, warningRatio: 0.7, criticalRatio: 0.85, refusalRatio: 0.95 });
+    let claimed = false;
+    let storageFull = true;
+    let stored = false;
+    let retries = 0;
+    let received = Buffer.alloc(0);
+    const repository = {
+      getDropUpload: async () => item,
+      claimBufferedUpload: async () => {
+        if (claimed || item.state !== "buffered") return undefined;
+        claimed = true;
+        item = { ...item, state: "transferring" };
+        return item;
+      },
+      retryUpload: async (_id: string, code: string) => {
+        expect(code).toBe("transfer_append_failed");
+        retries += 1;
+        claimed = false;
+        item = { ...item, state: "buffered", failureCode: code };
+        return item;
+      },
+      markUploadVerifying: async (_id: string, uploadId: string) => { item = { ...item, state: "verifying", uploadId }; return item; },
+      markUploadStored: async (_id: string, resourceId: string) => { stored = true; item = { ...item, state: "stored", resourceId }; return item; },
+      markUploadFailed: async () => { item = { ...item, state: "failed" }; return item; },
+    } as unknown as DropRepository;
+    const files = {
+      createUpload: async () => ({ id: "capacity-core-upload" }),
+      getUpload: async () => ({ receivedSize: received.length, expectedSize: payload.length, expiresAt: new Date(Date.now() + 60_000), status: received.length === 0 ? "created" : "uploading" }),
+      appendUpload: async (_id: string, offset: number, _length: number, source: Readable) => {
+        if (storageFull) { storageFull = false; throw Object.assign(new Error("No space left on device"), { code: "ENOSPC" }); }
+        expect(offset).toBe(received.length);
+        const chunks: Buffer[] = [];
+        for await (const chunk of source) chunks.push(Buffer.from(chunk as Uint8Array));
+        received = Buffer.concat([received, ...chunks]);
+        return { receivedSize: received.length };
+      },
+      completeUpload: async () => ({
+        resource: { id: "capacity-resource", name: item.filename, sizeBytes: payload.length, sha256 },
+        upload: { receivedSize: payload.length, expectedSize: payload.length, expiresAt: new Date(Date.now() + 60_000), status: "active" },
+      }),
+    } as unknown as DropFileGateway;
+    try {
+      await buffer.create(item.localPath ?? "");
+      await buffer.append(item.localPath ?? "", 0, payload.length, Readable.from(payload));
+      const drain = new DropDrainService({ repository, buffer, files, workers: 1, chunkBytes: 8 });
+
+      expect(await drain.drain()).toBe(1);
+      expect(retries).toBe(1);
+      expect(stored).toBe(false);
+      await expect(fs.stat(path.join(root, item.localPath ?? ""))).resolves.toMatchObject({ size: payload.length });
+
+      expect(await drain.drain()).toBe(1);
+      expect(stored).toBe(true);
+      expect(received.equals(payload)).toBe(true);
+      await expect(fs.stat(path.join(root, item.localPath ?? ""))).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
 });

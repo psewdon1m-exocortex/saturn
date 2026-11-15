@@ -23,21 +23,33 @@ import {
 import { buildWorker } from "./worker.js";
 import { PostgresShareRepository, ShareService } from "@saturn/shares";
 import { DropBufferStore, DropDrainService, PostgresDropRepository } from "@saturn/drop";
-import { FileService, PostgresFileRepository } from "@saturn/file-core";
+import { GuardedRuntime } from "../../../packages/sync/src/guarded-runtime.js";
+import { backendOwnerProcessReporter } from "../../../packages/recovery/src/backend-owner-ipc.js";
 import { ArchiveJobRunner, PostgresArchiveJobRepository } from "@saturn/archive";
 
 const config = loadEnvironment();
 const database = new Database(config.databaseUrl, { max: 5, maintenanceBarrier: true });
-const storage = new RuntimeStorageManager(config.storage, config.storageRuntimeConfigDirectory);
-await storage.initialize();
+const storageRuntime = new RuntimeStorageManager(config.storage, config.storageRuntimeConfigDirectory);
+await storageRuntime.initialize();
 const audit = new AuditService(database);
-const storageCatalog = new StorageCatalogService(database, storage, audit);
+const ownerReporter = backendOwnerProcessReporter();
+const guarded = await GuardedRuntime.create({ database, storage: storageRuntime,
+  ...(ownerReporter === undefined ? {} : { onBackendOwner: ownerReporter }),
+  ...(process.env.SATURN_GUARDED_RUNTIME_MANIFEST === undefined ? {} : { manifestFile: process.env.SATURN_GUARDED_RUNTIME_MANIFEST }),
+  files: { ...config.limits, auditSink: audit },
+  device: { pepper: (await fs.readFile(config.device.pepperFile, "utf8")).replace(/[\r\n]+$/, ""), options: {
+    enabled: config.device.enabled, publicOrigin: config.publicOrigin, uploadChunkMaxBytes: config.limits.uploadChunkMaxBytes,
+    propfindMaxItems: config.device.propfindMaxItems, deleteMaxItems: config.device.deleteMaxItems, deleteWindowMs: config.device.deleteWindowMs,
+  } },
+});
+const storage = guarded.legacyStorage;
+const storageCatalog = new StorageCatalogService(database, guarded.catalogStorage, audit);
 const reconciliation = new ReconciliationService(
   new PostgresReconciliationRepository(database),
   storage,
   audit,
 );
-const integrityScrub = new IntegrityScrubService(database, storage);
+const integrityScrub = new IntegrityScrubService(database, storage,guarded.scrubOptions);
 const purge = new PurgeService(
   new PostgresPurgeRepository(database),
   storage,
@@ -71,7 +83,7 @@ const recovery = new SaturnBackupService({
 });
 const shareRepository = new PostgresShareRepository(database);
 const dropRepository = new PostgresDropRepository(database);
-const fileService = new FileService(new PostgresFileRepository(database), storage, { ...config.limits, auditSink: audit });
+const fileService = guarded.legacyFiles;
 const shares = new ShareService({ repository: shareRepository, files: fileService, storage, audit,
   pepper: (await fs.readFile(config.share.pepperFile, "utf8")).replace(/[\r\n]+$/, ""), options: { ...config.share, publicOrigin: config.publicOrigin } });
 const dropBuffer = new DropBufferStore({
@@ -97,8 +109,9 @@ const archiveRunner = new ArchiveJobRunner(
   audit,
 );
 const runtime = buildWorker(config, database, new AdapterStorageHealthProbe(storage), {
+  ready: async () => guarded.assertReady(),
   storageCatalog: async () => storageCatalog.runNext(),
-  reconcile: async () => { await reconciliation.run("metadata"); },
+  reconcile: async (signal) => { await reconciliation.run("metadata", signal === undefined ? {} : { signal }); },
   scrub: async () => { await integrityScrub.run(); },
   purge: async () => { await purge.run(); },
   backup: async () => {
@@ -106,7 +119,7 @@ const runtime = buildWorker(config, database, new AdapterStorageHealthProbe(stor
     const outputPath = path.join(config.recovery.archiveDirectory, `saturn-${new Date().toISOString().replaceAll(":", "-")}.zip`);
     const created = await recovery.createBackup({
       outputPath,
-      publicConfiguration: publicConfig({ ...config, storage: storage.current().config }),
+      publicConfiguration: publicConfig({ ...config, storage: storageRuntime.current().config }),
       deploymentManifestPath: process.env.VAULT_RUNTIME_ROOT === undefined ? path.resolve("compose.yaml") : path.join(process.env.VAULT_RUNTIME_ROOT, "recovery/compose.yaml"),
       migrationsDirectory: process.env.VAULT_RUNTIME_ROOT === undefined ? path.resolve("packages/database/migrations") : path.join(process.env.VAULT_RUNTIME_ROOT, "recovery/migrations"),
       kind: "scheduled",
@@ -114,17 +127,13 @@ const runtime = buildWorker(config, database, new AdapterStorageHealthProbe(stor
     try { await recovery.publishToStorage(created); }
     finally { await fs.rm(outputPath, { force: true }); }
   },
-  maintain: async () => {
-    const expired = await shareRepository.claimExpiredPackages(new Date(), 100);
-    for (const item of expired) {
-      if (await storage.exists(item.storagePath).catch(() => false)) await storage.delete(item.storagePath).catch(() => undefined);
-      await shareRepository.markPackageExpired(item.id);
-    }
-  },
+  maintain: async () => { await shares.cleanupExpiredPackages(); },
+  retention: async () => guarded.maintainRetention(),
+  snapshots: async () => guarded.maintainSnapshots(),
   drain: async () => { await fileService.cleanupAbandonedUploads(); await fileService.recoverInterruptedUploads(); return dropDrain.drain(); },
   archive: async () => archiveRunner.runNext(),
   sharePackage: async () => shares.runNextPackage(),
-  close: async () => { await storage.close(); },
+  close: async () => { await guarded.close(); },
 });
 await database.reconcileInactiveFileLocks();
 await runtime.startHeartbeat();

@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import { recoveryConfigurationPath, validateRecoveredConfiguration, writeRecoveredConfiguration, type SaturnConfig } from "@saturn/config";
 import { SftpStorageAdapter } from "./sftp-storage.adapter.js";
+import { LocalCustodyStorageAdapter } from "./local-custody.js";
 import type { RuntimeStorageManager } from "./runtime-storage.manager.js";
 
 /** Same participant for owner UI and CLI. Credential material never enters the ZIP. */
@@ -21,9 +22,10 @@ export async function createStorageRecoveryParticipant(config: SaturnConfig, sto
         STORAGE_PASSWORD_FILE: previousStorage.config.passwordFile,
         STORAGE_PRIVATE_KEY_FILE: previousStorage.config.privateKeyFile,
       });
-      const probe = new SftpStorageAdapter(recovered.storage);
+      if (previousStorage.config.backend === "local" && JSON.stringify(previousStorage.config) !== JSON.stringify(recovered.storage)) throw new Error("Local storage recovery requires the same operator-pinned configuration");
+      const probe = recovered.storage.backend === "local" ? new LocalCustodyStorageAdapter(recovered.storage) : new SftpStorageAdapter(recovered.storage);
       try { await probe.stat(""); }
-      catch { throw new Error("Archived storage is unavailable with the target host credentials; connect the archived storage before restoring."); }
+      catch { throw new Error("Archived storage is unavailable with the target host credentials or custody; qualify the archived storage before restoring."); }
       finally { await probe.close(); }
       publicState = value;
     },

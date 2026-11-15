@@ -63,6 +63,55 @@ class MemoryRepository implements ReconciliationRepository {
   async listIssues(runId: string, limit: number) { return this.issues.filter((item) => item.runId === runId).slice(0, limit); }
 }
 
+describe("ReconciliationService shutdown boundaries", () => {
+  it("finishes the current file but cancels before the next file and records the same partial run", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "vault-reconcile-close-"));
+    let enter!: () => void, release!: () => void;
+    const entered = new Promise<void>(resolve => { enter = resolve; });
+    const held = new Promise<void>(resolve => { release = resolve; });
+    const inspected: string[] = [];
+    class HeldStorage extends LocalStorageAdapter {
+      override async exists(storagePath: string) {
+        inspected.push(storagePath);
+        if (storagePath === "first.bin") { enter(); await held; }
+        return super.exists(storagePath);
+      }
+    }
+    const storage = new HeldStorage(root), repository = new MemoryRepository(), stop = new AbortController(), reason = new Error("shutdown requested");
+    repository.managedRootPaths.splice(0);
+    try {
+      await storage.initialize();
+      for (const [id, name] of [["01", "first.bin"], ["02", "second.bin"]] as const) {
+        await storage.write(name, Readable.from("abc"), { offset: 0, create: true, exclusive: true });
+        repository.files.push({ id, storagePath: name, sizeBytes: 3, status: "active" });
+      }
+      const operation = new ReconciliationService(repository, storage).run("metadata", { signal: stop.signal });
+      const outcome = operation.then(() => ({ error: undefined }), (error: unknown) => ({ error }));
+      await entered;
+      stop.abort(reason);
+      let finished = false;void outcome.then(() => { finished = true; });
+      await Promise.resolve();expect(finished).toBe(false);
+      release();expect((await outcome).error).toBe(reason);
+      expect(inspected).toEqual(["first.bin"]);
+      expect(repository.runs).toHaveLength(1);
+      expect(repository.runs[0]).toMatchObject({ state: "failed", errorCode: "reconciliation_cancelled", scannedResources: 1, issueCount: 0 });
+      expect(repository.files.every(file => file.status === "active")).toBe(true);
+      expect(await fs.readFile(path.join(root, "first.bin"), "utf8")).toBe("abc");
+      expect(await fs.readFile(path.join(root, "second.bin"), "utf8")).toBe("abc");
+    } finally { release();await fs.rm(root, { recursive: true, force: true }); }
+  });
+
+  it("does not allocate a new run for an already cancelled invocation", async () => {
+    const repository = new MemoryRepository(), stop = new AbortController(), reason = new Error("already closing");stop.abort(reason);
+    repository.managedRootPaths.splice(0);
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "vault-reconcile-preclosed-")), storage = new LocalStorageAdapter(root);
+    try {
+      await expect(new ReconciliationService(repository, storage).run("metadata", { signal: stop.signal })).rejects.toBe(reason);
+      expect(repository.runs).toHaveLength(0);
+    } finally { await fs.rm(root, { recursive: true, force: true }); }
+  });
+});
+
 describe("ReconciliationService", () => {
   it("classifies missing, size, checksum, orphan and interrupted states without deleting unknown bytes", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "vault-reconcile-"));

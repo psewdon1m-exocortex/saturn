@@ -1,16 +1,17 @@
 import type { EventEmitter } from "node:events";
+import type { ConnectConfig } from "ssh2";
 import type { SaturnConfig } from "@saturn/config";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { callSftp, SftpConnectionPool } from "./sftp-pool.js";
 
-const fixture = vi.hoisted(() => ({ clients: [] as Array<EventEmitter & { channel: EventEmitter }>, failures: [] as string[] }));
+const fixture = vi.hoisted(() => ({ clients: [] as Array<EventEmitter & { channel: EventEmitter }>, failures: [] as string[], configurations: [] as ConnectConfig[] }));
 vi.mock("node:fs/promises", () => ({ default: { readFile: async () => "fixture-password" } }));
 vi.mock("ssh2", async () => {
   const { EventEmitter: Emitter } = await import("node:events");
   return { Client: class extends Emitter {
     readonly channel = Object.assign(new Emitter(),{stat() { /* Lost RPC callback. */ }});
     constructor() { super(); fixture.clients.push(this); }
-    connect() { const failure=fixture.failures.shift(); queueMicrotask(() => failure ? this.emit("error",Object.assign(new Error(failure),{code:failure})) : this.emit("ready")); return this; }
+    connect(configuration: ConnectConfig) { fixture.configurations.push(configuration); const failure=fixture.failures.shift(); queueMicrotask(() => failure ? this.emit("error",Object.assign(new Error(failure),{code:failure})) : this.emit("ready")); return this; }
     setNoDelay() { return this; }
     sftp(callback: (error: undefined, channel: EventEmitter) => void) { callback(undefined, this.channel); }
     end() { queueMicrotask(() => { this.emit("end"); this.emit("close"); }); return this; }
@@ -23,8 +24,30 @@ const config: SaturnConfig["storage"] = {
   hostFingerprint: "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", authMode: "password_file",
   passwordFile: "/fixture/unused", operationTimeoutMs: 1000, healthTimeoutMs: 1000, maxConnections: 1,
 };
-beforeEach(() => { fixture.clients.length = 0; fixture.failures.length = 0; });
+beforeEach(() => { fixture.clients.length = 0; fixture.failures.length = 0; fixture.configurations.length = 0; });
 describe("SFTP idle connection recovery", () => {
+  it.each([1000, 60000, 120000])("keeps the original RPC alive for its %s ms budget without extending that deadline", async operationTimeoutMs => {
+    const pool = new SftpConnectionPool({ ...config, operationTimeoutMs });
+    try {
+      const lease = await pool.acquire();
+      const connection = fixture.configurations[0];
+      expect(connection).toBeDefined();
+      expect((connection?.keepaliveInterval ?? 0) * (connection?.keepaliveCountMax ?? 0)).toBeGreaterThan(operationTimeoutMs);
+      // The callback is still bounded even if the transport remains alive.
+      await expect(callSftp(lease.sftp, "stat", 10, "/pending-original")).rejects.toThrow("timed out after 10 ms");
+      await lease.release(true);
+    } finally { await pool.close(); }
+  });
+  it("keeps handling transport errors after a failed handshake is destroyed", async () => {
+    fixture.failures.push("AUTHENTICATION_FAILED");
+    const pool = new SftpConnectionPool(config);
+    try {
+      await expect(pool.acquire()).rejects.toThrow("AUTHENTICATION_FAILED");
+      const client = fixture.clients[0];if(!client)throw new Error("Expected failed-handshake client");
+      expect(() => client.emit("error", new Error("Connection lost before handshake"))).not.toThrow();
+      expect(() => client.emit("error", new Error("socket cleanup error"))).not.toThrow();
+    } finally { await pool.close(); }
+  });
   it("interrupts metadata RPC immediately on channel loss without a callback",async()=>{
     const pool=new SftpConnectionPool(config);
     try {

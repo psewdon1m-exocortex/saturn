@@ -1,6 +1,8 @@
+import { requireTestValue } from "../../contracts/src/test-support.js";
 import { createHash } from "node:crypto";
 import { Readable } from "node:stream";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import type { DropBufferStore } from "./buffer-store.js";
 import { DropService } from "./drop.service.js";
 import { GryphonCommandService, type GryphonCommandEnvelope } from "./gryphon.service.js";
 import type { DropRepository, DropSession, DropUpload, TelegramIdentity } from "./types.js";
@@ -60,12 +62,15 @@ class MemoryRepository implements DropRepository {
     for (const value of this.drops.values()) if (value.state === "active" && value.identity?.userId === identity.userId && value.identity.chatId === identity.chatId) { value.state = "revoked"; challenges += 1; }
     return Promise.resolve({ sessions, challenges });
   }
-  reserveUpload(input: { readonly id: string; readonly sessionId: string; readonly channelId: string; readonly clientKeyHash: string; readonly filename: string; readonly expectedSize: number; readonly expectedSha256?: string; readonly now: Date }): Promise<{ readonly value: DropUpload; readonly created: boolean }> {
+  reserveUpload(input: { readonly id: string; readonly sessionId: string; readonly channelId: string; readonly clientKeyHash: string; readonly filename: string; readonly expectedSize: number; readonly expectedSha256?: string; readonly now: Date; readonly globalMaxBytes?: number; readonly refuseNewReservation?: boolean }): Promise<{ readonly value: DropUpload; readonly created: boolean }> {
     const session = this.sessionById.get(input.sessionId);
     const challenge = [...this.drops.values()].find((value) => value.id === input.channelId);
     if (session === undefined || session.channelId !== input.channelId || session.state !== "active" || challenge === undefined) return Promise.reject(new Error("not active"));
     const existing = [...this.uploads.values()].find((value) => value.channelId === input.channelId && value.clientKeyHash === input.clientKeyHash);
     if (existing !== undefined) return Promise.resolve({ value: existing, created: false });
+    if (input.refuseNewReservation) return Promise.reject(new Error("buffer quota exhausted"));
+    const globalReserved = [...this.uploads.values()].filter((value) => value.localPath !== undefined || value.state === "reserved").reduce((sum, value) => sum + value.expectedSize, 0);
+    if (input.globalMaxBytes !== undefined && globalReserved + input.expectedSize > input.globalMaxBytes) return Promise.reject(new Error("global quota exhausted"));
     if (challenge.reservedFiles + 1 > challenge.maxFiles || challenge.reservedBytes + input.expectedSize > challenge.maxBytes) return Promise.reject(new Error("quota exhausted"));
     challenge.reservedFiles += 1; challenge.reservedBytes += input.expectedSize;
     for (const item of this.sessions.values()) if (item.channelId === input.channelId) Object.assign(item, { reservedFiles: challenge.reservedFiles, reservedBytes: challenge.reservedBytes });
@@ -78,7 +83,7 @@ class MemoryRepository implements DropRepository {
   }
   releaseUploadReservation(channelId: string, id: string): Promise<void> {
     const value = this.uploads.get(id); const challenge = [...this.drops.values()].find((item) => item.id === channelId);
-    if (value !== undefined && value.channelId === channelId && value.uploadId === undefined && challenge !== undefined) {
+    if (value !== undefined && value.channelId === channelId && value.state === "reserved" && value.uploadId === undefined && challenge !== undefined) {
       this.uploads.delete(id); challenge.reservedFiles -= 1; challenge.reservedBytes -= value.expectedSize;
       for (const item of this.sessions.values()) if (item.channelId === channelId) Object.assign(item, { reservedFiles: challenge.reservedFiles, reservedBytes: challenge.reservedBytes });
     }
@@ -89,6 +94,24 @@ class MemoryRepository implements DropRepository {
   completeDropUpload(channelId: string, id: string, resourceId: string, completedAt: Date): Promise<DropUpload> {
     const value = this.uploads.get(id); if (value === undefined || value.channelId !== channelId) return Promise.reject(new Error("missing"));
     const next = { ...value, resourceId, state: "completed" as const, completedAt }; this.uploads.set(id, next); return Promise.resolve(next);
+  }
+  initializeBufferedUpload(channelId: string, id: string, localPath: string, continuationUntil: Date, now: Date): Promise<DropUpload> {
+    const value = this.uploads.get(id); if (value === undefined || value.channelId !== channelId) return Promise.reject(new Error("missing"));
+    const next: DropUpload = { ...value, localPath, continuationUntil, state: "uploading", updatedAt: now }; this.uploads.set(id, next); return Promise.resolve(next);
+  }
+  bufferReservedBytes(): Promise<number> {
+    return Promise.resolve([...this.uploads.values()].filter((value) => value.localPath !== undefined || value.state === "reserved").reduce((sum, value) => sum + value.expectedSize, 0));
+  }
+  cancelDropUpload(channelId: string, id: string, now: Date): Promise<DropUpload> {
+    const value = this.uploads.get(id); const challenge = [...this.drops.values()].find((item) => item.id === channelId);
+    if (value === undefined || challenge === undefined || value.channelId !== channelId || !["reserved", "uploading", "buffered", "failed"].includes(value.state)) return Promise.reject(new Error("cannot cancel"));
+    challenge.reservedFiles -= 1; challenge.reservedBytes -= value.expectedSize;
+    for (const item of this.sessions.values()) if (item.channelId === channelId) Object.assign(item, { reservedFiles: challenge.reservedFiles, reservedBytes: challenge.reservedBytes });
+    const next: DropUpload = { ...value, state: "cancelled", updatedAt: now }; this.uploads.set(id, next); return Promise.resolve(next);
+  }
+  releaseBuffer(id: string): Promise<void> {
+    const value = this.uploads.get(id); if (value !== undefined) { const { localPath, ...released } = value; void localPath; this.uploads.set(id, released); }
+    return Promise.resolve();
   }
 }
 
@@ -112,6 +135,25 @@ function fixture(options: { maxFiles?: number; maxBytes?: number; failureLimit?:
   const repository = new MemoryRepository(); const files = new MemoryFiles();
   const service = new DropService({ repository, files, pepper: "drop-pepper-that-is-at-least-thirty-two-characters", options: { publicOrigin: "https://vault.test", codeTtlMs: 1_800_000, sessionTtlMs: 1_800_000, maxFiles: options.maxFiles ?? 20, maxBytes: options.maxBytes ?? 1024, failureLimit: options.failureLimit ?? 5, globalFailureLimit: 100, failureWindowMs: 900_000, failureDelayMs: 0 } });
   return { repository, files, service };
+}
+
+function bufferedFixture(maxBytes = 100) {
+  const repository = new MemoryRepository(); const files = new MemoryFiles(); const staged = new Set<string>();
+  files.bufferMaxBytes = maxBytes; files.maximumFileBytes = maxBytes;
+  const buffer = {
+    initialize: () => Promise.resolve(),
+    reservationLimitBytes: () => Promise.resolve(Math.floor(maxBytes * 0.92)),
+    relativePath: (id: string) => `${id}.part`,
+    create: (name: string) => { staged.add(name); return Promise.resolve(); },
+    createReserved: (name: string) => buffer.create(name),
+    delete: (name: string) => { staged.delete(name); return Promise.resolve(); },
+    capacity: async (reservedBytes: number, additionalBytes = 0) => ({
+      state: (reservedBytes + additionalBytes) / maxBytes >= 0.92 ? "refusing" as const : "available" as const,
+      reservedBytes, maxBytes, freeBytes: maxBytes, ratio: (reservedBytes + additionalBytes) / maxBytes,
+    }),
+  } as unknown as DropBufferStore;
+  const service = new DropService({ repository, files, buffer, pepper: "drop-pepper-that-is-at-least-thirty-two-characters", options: { publicOrigin: "https://vault.test", codeTtlMs: 1_800_000, sessionTtlMs: 1_800_000, maxFiles: 20, maxBytes: 1_000, failureLimit: 5, globalFailureLimit: 100, failureWindowMs: 900_000, failureDelayMs: 0 } });
+  return { repository, files, service, staged, buffer };
 }
 
 async function boundDrop(service: DropService, identity = { userId: "12345", chatId: "12345" }) {
@@ -246,7 +288,7 @@ describe("DropService", () => {
   });
 
   it("enforces the shared runtime maximum file size before reserving a Drop upload", async () => {
-    const { service, files } = fixture();
+    const { service, files, repository } = fixture();
     files.maximumFileBytes = 2;
     const challenge = await service.issueDropCode();
     const created = await service.redeem(challenge.code, "192.0.2.40", "browser");
@@ -254,7 +296,84 @@ describe("DropService", () => {
       filename: "too-large.bin",
       expectedSize: 3,
       idempotencyKey: "drop-runtime-limit-001",
-    })).rejects.toThrow(/size/);
+    })).rejects.toMatchObject({ code: "payload_too_large" });
+    expect(repository.uploads.size).toBe(0);
+  });
+
+  it("replays an admitted upload under buffer pressure without reserving or creating it again", async () => {
+    const { service, repository, staged } = bufferedFixture();
+    const challenge = await service.issueDropCode();
+    const { session } = await service.redeem(challenge.code, "192.0.2.40", "browser");
+    const request = { filename: "kept.bin", expectedSize: 60, idempotencyKey: "same-admission-after-lost-reply" };
+    const first = await service.createUpload(session, request);
+    await expect(service.createUpload(session, request)).resolves.toMatchObject({ id: first.id, state: "uploading" });
+    expect(repository.uploads.size).toBe(1);
+    expect(await repository.bufferReservedBytes()).toBe(60);
+    expect(staged.size).toBe(1);
+    await expect(service.createUpload(session, { ...request, filename: "new.bin", idempotencyKey: "different-admission-under-pressure" })).rejects.toMatchObject({ code: "quota_exhausted" });
+    expect(await repository.bufferReservedBytes()).toBe(60);
+  });
+
+  it("retains the original reservation after a committed core create loses its reply", async () => {
+    const {service,repository,files}=fixture();const challenge=await service.issueDropCode(),{session}=await service.redeem(challenge.code,"192.0.2.40","browser");
+    const create=files.createUpload.bind(files);let first=true;
+    vi.spyOn(files,"createUpload").mockImplementation(async input=>{const result=await create(input);if(first){first=false;throw Error("core create reply lost after commit");}return result;});
+    const request={filename:"retained.bin",expectedSize:6,idempotencyKey:"core-create-lost-commit"};
+    await expect(service.createUpload(session,request)).rejects.toThrow("after commit");
+    const retained=[...repository.uploads.values()][0];expect(retained?.state).toBe("reserved");expect(files.uploads.size).toBe(1);
+    const result=await service.createUpload(session,request);expect(result.id).toBe(requireTestValue(retained).id);expect(files.uploads.size).toBe(1);expect(session.reservedFiles).toBe(1);expect(session.reservedBytes).toBe(6);
+  });
+
+  it("does not delete a buffer when initialization committed but its reply was lost", async () => {
+    const {service,repository,staged}=bufferedFixture();const challenge=await service.issueDropCode(),{session}=await service.redeem(challenge.code,"192.0.2.40","browser");
+    const initialize=repository.initializeBufferedUpload.bind(repository);let first=true;
+    vi.spyOn(repository,"initializeBufferedUpload").mockImplementation(async(...args)=>{const result=await initialize(...args);if(first){first=false;throw Error("buffer metadata reply lost after commit");}return result;});
+    const request={filename:"retained.bin",expectedSize:6,idempotencyKey:"buffer-init-lost-commit"};
+    await expect(service.createUpload(session,request)).rejects.toThrow("after commit");
+    const retained=[...repository.uploads.values()][0];expect(retained?.state).toBe("uploading");expect(staged.size).toBe(1);
+    expect((await service.createUpload(session,request)).id).toBe(requireTestValue(retained).id);expect(staged.has(requireTestValue(requireTestValue(retained).localPath))).toBe(true);expect(session.reservedBytes).toBe(6);
+  });
+
+  it("resumes the same reserved ID if creating the initial buffer failed", async () => {
+    const {service,repository,staged,buffer}=bufferedFixture(),challenge=await service.issueDropCode(),{session}=await service.redeem(challenge.code,"192.0.2.40","browser");
+    vi.spyOn(buffer,"create").mockRejectedValueOnce(Error("initial disk error"));
+    const request={filename:"retained.bin",expectedSize:6,idempotencyKey:"buffer-create-retry-original"};
+    await expect(service.createUpload(session,request)).rejects.toThrow("disk error");const retained=[...repository.uploads.values()][0];expect(retained?.state).toBe("reserved");expect(staged.size).toBe(0);
+    expect((await service.createUpload(session,request)).id).toBe(requireTestValue(retained).id);expect(staged.size).toBe(1);expect(session.reservedFiles).toBe(1);
+  });
+
+  it("joins concurrent initialization of the same original before accepting append/cancel work", async () => {
+    const {service,repository,buffer}=bufferedFixture(),challenge=await service.issueDropCode(),{session}=await service.redeem(challenge.code,"192.0.2.40","browser");
+    let release!:()=>void;const gate=new Promise<void>(resolve=>{release=resolve;}),create=buffer.createReserved.bind(buffer);
+    const prepared=vi.spyOn(buffer,"createReserved").mockImplementationOnce(async name=>{await gate;await create(name);});
+    const request={filename:"retained.bin",expectedSize:6,idempotencyKey:"concurrent-same-buffer-original"},first=service.createUpload(session,request),second=service.createUpload(session,request);
+    await vi.waitFor(()=>expect(prepared).toHaveBeenCalledOnce());expect(repository.uploads.size).toBe(1);release();
+    const [a,b]=await Promise.all([first,second]);expect(a.id).toBe(b.id);expect(prepared).toHaveBeenCalledOnce();expect(session.reservedFiles).toBe(1);
+  });
+
+  it("serializes concurrent buffer pressure and immediately reuses capacity after a clean cancellation", async () => {
+    const { service, repository, staged } = bufferedFixture();
+    const challenge = await service.issueDropCode();
+    const first = await service.redeem(challenge.code, "192.0.2.40", "browser-one");
+    const peer = await service.redeem(challenge.code, "192.0.2.41", "browser-two");
+    const outcomes = await Promise.allSettled([
+      service.createUpload(first.session, { filename: "first.bin", expectedSize: 60, idempotencyKey: "buffer-pressure-first" }),
+      service.createUpload(peer.session, { filename: "second.bin", expectedSize: 60, idempotencyKey: "buffer-pressure-second" }),
+    ]);
+    const accepted = outcomes.find((value): value is PromiseFulfilledResult<Awaited<ReturnType<DropService["createUpload"]>>> => value.status === "fulfilled");
+    expect(accepted).toBeDefined();
+    if (accepted === undefined) throw new Error("One concurrent reservation should have succeeded");
+    const acceptedSession = outcomes[0].status === "fulfilled" ? first.session : peer.session;
+    expect(outcomes.filter((value) => value.status === "rejected")).toHaveLength(1);
+    expect(await repository.bufferReservedBytes()).toBe(60);
+    expect(staged.size).toBe(1);
+
+    await service.cancelUpload(acceptedSession, accepted.value.id);
+    expect(await repository.bufferReservedBytes()).toBe(0);
+    expect(staged.size).toBe(0);
+    await expect(service.createUpload(peer.session, { filename: "after-cancel.bin", expectedSize: 60, idempotencyKey: "buffer-pressure-after-cancel" }))
+      .resolves.toMatchObject({ state: "uploading", expectedSize: 60 });
+    expect(await repository.bufferReservedBytes()).toBe(60);
   });
 
   it("applies the configured brute-force boundary without retaining submitted codes", async () => {

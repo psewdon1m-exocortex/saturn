@@ -1,7 +1,7 @@
 import type { AuditSink } from "@saturn/audit";
 import type { Database } from "@saturn/database";
 import type { StorageAdapter } from "@saturn/storage";
-import { PostgresFileRepository } from "@saturn/file-core";
+import { PostgresFileRepository, VERSION_RETENTION } from "@saturn/file-core";
 import { v7 as uuidv7 } from "uuid";
 
 export interface PurgeCandidate {
@@ -17,6 +17,9 @@ export interface PurgeRepository {
   withCandidate?(candidate: PurgeCandidate, now: Date, action: () => Promise<void>): Promise<boolean>;
 }
 
+const automaticVersionPolicies = Object.entries(VERSION_RETENTION).flatMap(([retentionClass, policy]) =>
+  policy.automaticPurge ? [{ retention_class: retentionClass, minimum_age_ms: policy.minimumAgeMs, maximum_count: policy.maximumCount }] : []);
+
 export class PostgresPurgeRepository implements PurgeRepository {
   readonly #database: Database;
 
@@ -24,11 +27,16 @@ export class PostgresPurgeRepository implements PurgeRepository {
     this.#database = database;
   }
 
-  listCandidates(now: Date, limit: number): Promise<readonly PurgeCandidate[]> {
+  // Caller time is retained for interface compatibility with non-PG repositories.
+  // Production age decisions use the DB clock in both discovery and admission.
+  listCandidates(_now: Date, limit: number): Promise<readonly PurgeCandidate[]> {
     return this.#database.withSql(async (sql) => {
       const rows = await sql<{ kind: "version" | "trash"; id: string; resource_id: string; storage_path: string }[]>`
-        WITH ranked_versions AS (
-          SELECT version.id, version.resource_id, version.storage_path, version.purge_after,
+        WITH retention_policy AS (
+          SELECT * FROM jsonb_to_recordset(${sql.json(automaticVersionPolicies)})
+            AS policy(retention_class text, minimum_age_ms bigint, maximum_count integer)
+        ), ranked_versions AS (
+          SELECT version.id, version.resource_id, version.storage_path, version.purge_after, version.archived_at, version.created_at,
             resource.current_version_id, resource.retention_class,
             row_number() OVER (
               PARTITION BY version.resource_id ORDER BY version.created_at DESC, version.id DESC
@@ -38,10 +46,14 @@ export class PostgresPurgeRepository implements PurgeRepository {
           WHERE version.state = 'active'
         ), candidates AS (
           SELECT 'version'::text AS kind, id, resource_id, storage_path
-          FROM ranked_versions
-          WHERE id <> current_version_id AND purge_after IS NOT NULL AND purge_after <= ${now}
-            AND retention_class IN ('general', 'mastermind_markdown', 'mastermind_attachment')
-            AND position > CASE WHEN retention_class = 'mastermind_markdown' THEN 100 ELSE 10 END
+          FROM ranked_versions JOIN retention_policy USING (retention_class)
+          WHERE id <> current_version_id
+            AND purge_after IS NOT NULL AND archived_at IS NOT NULL
+            AND isfinite(purge_after) AND isfinite(archived_at) AND isfinite(created_at)
+            AND archived_at >= created_at
+            AND purge_after <= statement_timestamp()
+            AND archived_at + minimum_age_ms * interval '1 millisecond' <= statement_timestamp()
+            AND position > maximum_count
             AND NOT EXISTS (
               SELECT 1 FROM laboratory_assets AS asset
               WHERE asset.pinned_version_id = ranked_versions.id
@@ -50,7 +62,8 @@ export class PostgresPurgeRepository implements PurgeRepository {
           UNION ALL
           SELECT 'trash'::text AS kind, id, id AS resource_id, storage_path
           FROM resources
-          WHERE status = 'trashed' AND trashed_from_parent_id IS NOT NULL AND purge_after <= ${now}
+          WHERE status = 'trashed' AND trashed_from_parent_id IS NOT NULL
+            AND isfinite(purge_after) AND purge_after <= statement_timestamp()
             AND retention_class <> 'keepass'
           UNION
           SELECT payload->>'kind' AS kind, (payload->>'candidateId')::uuid AS id,
@@ -59,7 +72,7 @@ export class PostgresPurgeRepository implements PurgeRepository {
           WHERE operation_type = 'purge' AND state = 'storage_committing'
             AND idempotency_key LIKE 'scheduled-purge:%'
         )
-        SELECT DISTINCT * FROM candidates ORDER BY kind, id LIMIT ${limit}
+        SELECT DISTINCT * FROM candidates WHERE cardinality(public.catalog_guard_scope(resource_id,false))=0 ORDER BY kind, id LIMIT ${limit}
       `;
       return rows.map((row) => ({
         kind: row.kind,
@@ -70,7 +83,9 @@ export class PostgresPurgeRepository implements PurgeRepository {
     });
   }
 
-  async withCandidate(candidate: PurgeCandidate, now: Date, action: () => Promise<void>): Promise<boolean> {
+  async withCandidate(candidate: PurgeCandidate, _now: Date, action: () => Promise<void>): Promise<boolean> {
+    const guarded=(await this.#database.withSql(sql=>sql<{guarded:boolean}[]>`SELECT cardinality(public.catalog_guard_scope(${candidate.resourceId}::uuid,false))>0 AS guarded`))[0]?.guarded;
+    if(guarded)return false; // Guarded retained originals require the guarded lifecycle, never age-only legacy purge.
     const files = new PostgresFileRepository(this.#database);
     const lockId = uuidv7();
     const tree = candidate.kind === "trash" ? await files.listTree(candidate.storagePath) : [];
@@ -84,16 +99,26 @@ export class PostgresPurgeRepository implements PurgeRepository {
         if (candidate.kind === "trash") {
           const rows = await sql`SELECT id FROM resources WHERE id = ${candidate.id}
             AND storage_path = ${candidate.storagePath} AND status = 'trashed'
-            AND trashed_from_parent_id IS NOT NULL AND purge_after <= ${now} AND retention_class <> 'keepass'`;
+            AND trashed_from_parent_id IS NOT NULL AND isfinite(purge_after)
+            AND purge_after <= statement_timestamp() AND retention_class <> 'keepass'`;
           return rows.length > 0;
         }
-        const rows = await sql`SELECT version.id FROM file_versions AS version JOIN resources AS resource ON resource.id = version.resource_id
+        const rows = await sql`WITH retention_policy AS (
+            SELECT * FROM jsonb_to_recordset(${sql.json(automaticVersionPolicies)})
+              AS policy(retention_class text, minimum_age_ms bigint, maximum_count integer)
+          )
+          SELECT version.id FROM file_versions AS version JOIN resources AS resource ON resource.id = version.resource_id
+            JOIN retention_policy ON retention_policy.retention_class = resource.retention_class
           WHERE version.id = ${candidate.id} AND version.resource_id = ${candidate.resourceId}
             AND version.storage_path = ${candidate.storagePath} AND version.state = 'active'
-            AND version.id <> resource.current_version_id AND version.purge_after <= ${now}
-            AND resource.retention_class IN ('general', 'mastermind_markdown', 'mastermind_attachment')
+            AND version.id <> resource.current_version_id
+            AND version.purge_after IS NOT NULL AND version.archived_at IS NOT NULL
+            AND isfinite(version.purge_after) AND isfinite(version.archived_at) AND isfinite(version.created_at)
+            AND version.archived_at >= version.created_at
+            AND version.purge_after <= statement_timestamp()
+            AND version.archived_at + retention_policy.minimum_age_ms * interval '1 millisecond' <= statement_timestamp()
             AND (SELECT count(*) FROM file_versions AS newer WHERE newer.resource_id = version.resource_id AND newer.state = 'active'
-              AND (newer.created_at, newer.id) > (version.created_at, version.id)) >= CASE WHEN resource.retention_class = 'mastermind_markdown' THEN 100 ELSE 10 END
+              AND (newer.created_at, newer.id) > (version.created_at, version.id)) >= retention_policy.maximum_count
             AND NOT EXISTS (SELECT 1 FROM laboratory_assets WHERE pinned_version_id = version.id AND mode = 'public_immutable' AND state = 'active')`;
         return rows.length > 0;
       });

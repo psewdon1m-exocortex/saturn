@@ -43,7 +43,7 @@ function status(error: unknown): number {
   if (!(error instanceof DeviceServiceError)) return 500;
   return error.code === "unauthorized" ? 401 : error.code === "forbidden" ? 403 : error.code === "not_found" ? 404
     : error.code === "precondition_required" ? 428 : error.code === "precondition_failed" ? 412
-      : error.code === "rate_limited" ? 429 : error.code === "limit" ? 507 : error.code === "invalid_body" ? 400 : 409;
+      : error.code === "rate_limited" ? 429 : error.code === "payload_too_large" ? 413 : error.code === "limit" ? 507 : error.code === "invalid_body" ? 400 : 409;
 }
 
 function destinationPath(request: FastifyRequest, raw: string | undefined, config: SaturnConfig): string {

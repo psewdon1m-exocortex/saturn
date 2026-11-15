@@ -1,10 +1,15 @@
 import { argon2, createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { Readable, Transform } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import type { AuditSink } from "@saturn/audit";
 import type { Resource, SecurityClassification } from "@saturn/file-core";
 import { ensureStorageDirectory } from "@saturn/storage";
 import { v7 as uuidv7 } from "uuid";
 import { ZipFile } from "yazl";
+import { performance } from "node:perf_hooks";
+import { PackageCustodyCapacityError, type PackageWriterClaim } from "./package-lifecycle.js";
+import { createLeasedPackageStream } from "./package-read-lease.js";
+import { packageArchiveReservation, PackageByteReservation } from "./package-reservation.js";
 import type {
   PublicShare,
   ShareFileGateway,
@@ -15,6 +20,8 @@ import type {
   ShareRepository,
   ShareSession,
   ShareStorageGateway,
+  ShareDownloadRange,
+  ShareRangeSelection,
 } from "./types.js";
 
 const classificationRank: Readonly<Record<SecurityClassification, number>> = {
@@ -99,7 +106,19 @@ async function streamHash(source: Readable): Promise<{ readonly bytes: number; r
   return { bytes, sha256: hash.digest("hex") };
 }
 
+async function waitForPhysicalClose(closed: Promise<void> | undefined, deadline: number): Promise<void> {
+  if (!closed) throw new Error("Package backend read closure is unsupported");
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([closed, new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => reject(new Error("Package physical read closure timed out")), Math.max(1, deadline - performance.now()));
+      timer.unref();
+    })]);
+  } finally { if (timer !== undefined) clearTimeout(timer); }
+}
+
 export class ShareService {
+  #nextPackageCleanupAt = 0;
   readonly #repository: ShareRepository;
   readonly #files: ShareFileGateway;
   readonly #storage: ShareStorageGateway;
@@ -269,16 +288,26 @@ export class ShareService {
   }
 
   async listChildren(token: string, parentId: string | undefined, input: { readonly sourceIp: string; readonly userAgent: string; readonly sessionToken?: string }, now = new Date()) {
+    return (await this.#listChildren(token, parentId, input, undefined, now)).items;
+  }
+
+  async listChildrenPage(token: string, parentId: string | undefined, input: { readonly sourceIp: string; readonly userAgent: string; readonly sessionToken?: string }, page: { readonly offset: number; readonly limit: number }, now = new Date()) {
+    if (!Number.isSafeInteger(page.offset) || page.offset < 0 || !Number.isSafeInteger(page.limit) || page.limit < 1 || page.limit > 500) throw new Error("Share listing page is invalid");
+    return this.#listChildren(token, parentId, input, page, now);
+  }
+
+  async #listChildren(token: string, parentId: string | undefined, input: { readonly sourceIp: string; readonly userAgent: string; readonly sessionToken?: string }, page: { readonly offset: number; readonly limit: number } | undefined, now: Date) {
     const access = await this.#authorize(token, input, now, false);
     if (access.locked || !["browse", "download_folder"].includes(access.share.mode)) throw new ShareServiceError(access.locked ? "locked" : "invalid_mode");
     const selectedParent = parentId ?? access.share.resourceId;
-    if (!(await this.#repository.isDescendant(access.share.resourceId, selectedParent))) throw new ShareServiceError("not_found");
+    if (!(await this.#repository.isDescendant(access.share.resourceId, selectedParent, access.share.classificationCeiling))) throw new ShareServiceError("not_found");
     const parent = await this.#files.getResource(selectedParent);
-    if (parent.type !== "folder" || parent.status !== "active") throw new ShareServiceError("not_found");
-    const children = await this.#allChildren(parent.id);
+    if (parent.type !== "folder" || parent.status !== "active" || classificationRank[parent.securityClassification ?? "internal"] > classificationRank[access.share.classificationCeiling]) throw new ShareServiceError("not_found");
+    // Retain the legacy endpoint contract; the current browser opts into the bounded page endpoint.
+    const children = page === undefined ? await this.#allChildren(parent.id, Number.MAX_SAFE_INTEGER) : await this.#files.listChildren(parent.id, page.offset, page.limit);
     const visible = children.filter((child) => child.status === "active" && classificationRank[child.securityClassification ?? "internal"] <= classificationRank[access.share.classificationCeiling]);
     await this.#access(access.share.id, input.sourceIp, "browse", "success", 200, now);
-    return visible.map((child) => ({
+    return { nextOffset: page !== undefined && children.length === page.limit ? page.offset + children.length : null, items: visible.map((child) => ({
       id: child.id,
       parentId: child.parentId,
       type: child.type,
@@ -287,7 +316,7 @@ export class ShareService {
       mimeType: child.mimeType,
       ...(child.sha256 === undefined ? {} : { sha256: child.sha256 }),
       updatedAt: child.updatedAt,
-    }));
+    })) };
   }
 
   async childMetadata(token: string, resourceId: string, input: { readonly sourceIp: string; readonly userAgent: string; readonly sessionToken?: string }, now = new Date()) {
@@ -296,14 +325,15 @@ export class ShareService {
     return { share: access.share, resource, session: access.newSession };
   }
 
-  async openChildContent(token: string, resourceId: string, range: { readonly offset: number; readonly length?: number }, input: { readonly sourceIp: string; readonly userAgent: string; readonly sessionToken?: string }, now = new Date()) {
+  async openChildContent(token: string, resourceId: string, range: ShareRangeSelection, input: { readonly sourceIp: string; readonly userAgent: string; readonly sessionToken?: string; readonly transferId?: string }, now = new Date()) {
     const access = await this.#authorize(token, input, now, false);
     if (access.share.mode !== "download_folder") throw new ShareServiceError("invalid_mode");
     const resource = await this.#sharedChild(access.share, resourceId);
-    await this.#repository.claimDownload(access.share.id, access.session.id, now).catch(() => { throw new ShareServiceError("denied"); });
-    const opened = await this.#files.openDownload(resource.id, range.offset, range.length);
-    await this.#access(access.share.id, input.sourceIp, "content", "success", range.length === undefined && range.offset === 0 ? 200 : 206, now, range);
-    return { share: access.share, resource: opened.resource, stream: this.#guardStream(access.share.id, opened.stream), session: access.session };
+    const opened = await this.#openContentResource(access.share, resource, range);
+    await this.#repository.claimDownload(access.share.id, access.session.id, now, input.transferId === undefined ? undefined : { id: input.transferId, resourceId, kind: "content" })
+      .catch(() => { opened.stream.destroy(); throw new ShareServiceError("denied"); });
+    await this.#access(access.share.id, input.sourceIp, "content", "success", opened.range.length === undefined && opened.range.offset === 0 ? 200 : 206, now, opened.range);
+    return { share: access.share, resource: opened.resource, stream: this.#guardStream(access.share.id, opened.stream, async () => { await this.#sharedChild(access.share, resourceId); }, access.session.id), session: access.session };
   }
 
   async thumbnailSource(token: string, resourceId: string, input: { readonly sourceIp: string; readonly userAgent: string; readonly sessionToken?: string }, now = new Date()) {
@@ -317,7 +347,8 @@ export class ShareService {
     await this.#access(access.share.id, input.sourceIp, "thumbnail", "success", 200, now);
     return {
       resource,
-      open: async () => this.#guardStream(access.share.id, (await this.#files.openDownload(resource.id)).stream),
+      open: async () => this.#guardStream(access.share.id, (await this.#openContentResource(access.share, resource, { offset: 0 })).stream,
+        access.share.resourceType === "folder" ? async () => { await this.#sharedChild(access.share, resource.id); } : undefined, access.session.id),
       ...(access.newSession === undefined ? {} : { session: access.newSession }),
     };
   }
@@ -330,12 +361,13 @@ export class ShareService {
     return access;
   }
 
-  async openContent(token: string, range: { readonly offset: number; readonly length?: number }, input: { readonly sourceIp: string; readonly userAgent: string; readonly sessionToken?: string }, now = new Date()) {
+  async openContent(token: string, range: ShareRangeSelection, input: { readonly sourceIp: string; readonly userAgent: string; readonly sessionToken?: string; readonly transferId?: string }, now = new Date()) {
     const access = await this.contentMetadata(token, input, now);
-    await this.#repository.claimDownload(access.share.id, access.session.id, now).catch(() => { throw new ShareServiceError("denied"); });
-    const opened = await this.#files.openDownload(access.resource.id, range.offset, range.length);
-    await this.#access(access.share.id, input.sourceIp, "content", "success", range.length === undefined && range.offset === 0 ? 200 : 206, now, range);
-    return { share: access.share, resource: opened.resource, stream: this.#guardStream(access.share.id, opened.stream), session: access.session };
+    const opened = await this.#openContentResource(access.share, access.resource, range);
+    if (access.share.mode !== "view") await this.#repository.claimDownload(access.share.id, access.session.id, now, input.transferId === undefined ? undefined : { id: input.transferId, resourceId: access.resource.id, kind: "content" })
+      .catch(() => { opened.stream.destroy(); throw new ShareServiceError("denied"); });
+    await this.#access(access.share.id, input.sourceIp, "content", "success", opened.range.length === undefined && opened.range.offset === 0 ? 200 : 206, now, opened.range);
+    return { share: access.share, resource: opened.resource, stream: this.#guardStream(access.share.id, opened.stream, undefined, access.session.id), session: access.session };
   }
 
   async preparePackage(token: string, input: { readonly sourceIp: string; readonly userAgent: string; readonly sessionToken?: string }, now = new Date()): Promise<SharePackage> {
@@ -359,6 +391,10 @@ export class ShareService {
   }
 
   async runNextPackage(): Promise<boolean> {
+    if (Date.now() >= this.#nextPackageCleanupAt) {
+      await this.cleanupExpiredPackages(new Date(), 10);
+      this.#nextPackageCleanupAt = Date.now() + 60_000;
+    }
     const item = await this.#repository.claimPendingPackage?.(new Date());
     if (item === undefined) return false;
     const share = await this.#repository.getShareById(item.shareId);
@@ -367,65 +403,201 @@ export class ShareService {
       const root = await this.#files.getResource(share.resourceId);
       await this.#buildPackage(share, root, item, new Date());
     } catch (error) {
-      await this.#repository.setPackageFailed(item.id, error instanceof ShareServiceError ? error.code : "package_failed");
+      await this.#repository.setPackageFailed(item.id, error instanceof ShareServiceError || error instanceof PackageCustodyCapacityError ? error.code : "package_failed", item.generationId);
     }
     return true;
   }
 
   async #buildPackage(share: ShareRecord, resource: Resource, value: SharePackage, now: Date): Promise<SharePackage> {
     const access = { share, resource };
-    const { id, storagePath } = value;
+    const { id } = value;
+    let storagePath = value.storagePath;
+    const lifecycle = this.#repository.packageLifecycle;
+    let claim: PackageWriterClaim | undefined, writeStarted = false, writeSucceeded = false, verificationStarted = false, verificationClosed = false;
+    const writerCustodyClosed = () => (!writeStarted || writeSucceeded) && (!verificationStarted || verificationClosed);
+    const deadline = Date.now() + this.#options.packageMaxDurationMs;
+    const monotonicDeadline = performance.now() + this.#options.packageMaxDurationMs;
+    let zipOutput: Readable | undefined, limiter: Transform | undefined, timer: ReturnType<typeof setTimeout> | undefined;
+    let writing: Promise<number> | undefined, flowing: Promise<void> | undefined;
+    const members = new Set<Readable>();
     try {
       const entries = await this.#packageEntries(access.share, access.resource, now);
       const sourceFingerprint = this.#entryFingerprint(entries);
+      const reservedBytes = packageArchiveReservation(entries), byteReservation = new PackageByteReservation(reservedBytes);
+      if (lifecycle) { claim = await lifecycle.begin(id, reservedBytes, Math.min(3_600_000, this.#options.packageMaxDurationMs + 5_000)); storagePath = claim.storagePath; }
       const directory = `_system/packages/${access.share.id}`;
       await ensureStorageDirectory(this.#storage, "_system/packages");
       await ensureStorageDirectory(this.#storage, directory);
-      if (await this.#storage.exists(storagePath)) await this.#storage.delete(storagePath);
+      if (!lifecycle && await this.#storage.exists(storagePath)) await this.#storage.delete(storagePath);
+      if (Date.now() >= deadline) throw new ShareServiceError("package_limit");
       const zip = new ZipFile();
+      // yazl exposes a Node PassThrough; its declarations use the older ReadableStream interface.
+      const output = zip.outputStream as Readable;
+      zipOutput = output;
+      zip.on("error", (error: Error) => output.destroy(error));
+      const files = entries.filter(entry => entry.resource.type === "file");
+      const pending = new Map<(typeof files)[number], Promise<Readable | undefined>>();
+      let next = 0;
+      const prepare = () => {
+        // A later physical reader must not wait idle while a large member progresses.
+        while (!output.destroyed && pending.size < 1 && next < files.length) {
+          const entry = files[next++];
+          if (entry === undefined) throw new ShareServiceError("package_unavailable");
+          pending.set(entry, this.#files.openDownload(entry.resource.id, current => {
+            if (current.status !== "active" || current.type !== "file" || current.parentId !== entry.resource.parentId || current.storagePath !== entry.resource.storagePath
+              || this.#entryFingerprint([{ resource: current, path: entry.path }]) !== this.#entryFingerprint([entry])) throw new ShareServiceError("package_unavailable");
+            return { offset: 0 };
+          }).then(opened => {
+            if (output.destroyed) { opened.stream.destroy(); return undefined; }
+            members.add(opened.stream);
+            opened.stream.once("error", error => output.destroy(error));
+            opened.stream.once("close", () => {
+              members.delete(opened.stream);
+              if (!opened.stream.readableEnded && !output.destroyed) output.destroy(new Error("Package source closed before completion"));
+            });
+            return opened.stream;
+          }).catch((error: unknown) => { output.destroy(error instanceof Error ? error : new Error("Package source open failed")); return undefined; }));
+        }
+      };
+      output.once("close", () => { for (const member of members) member.destroy(); });
       for (const entry of entries) {
         if (entry.resource.type === "folder") zip.addEmptyDirectory(entry.path, { mtime: entry.resource.updatedAt, mode: 0o700 });
         else zip.addReadStreamLazy(entry.path, { size: entry.resource.sizeBytes, mtime: entry.resource.updatedAt, mode: 0o600 }, (callback) => {
           void (async () => {
-            try { callback(null, (await this.#files.openDownload(entry.resource.id)).stream); }
+            try {
+              prepare();
+              const source = await pending.get(entry);
+              if (source === undefined || output.destroyed) { source?.destroy(); throw new ShareServiceError("package_unavailable"); }
+              const hash = createHash("sha256"); let bytes = 0;
+              const member = new Transform({
+                transform(chunk: Buffer, _encoding, done) {
+                  bytes += chunk.length; hash.update(chunk);
+                  if (bytes > entry.resource.sizeBytes) done(new Error("Package source size changed")); else done(null, chunk);
+                },
+                flush(done) {
+                  if (bytes !== entry.resource.sizeBytes || entry.resource.sha256 !== undefined && hash.digest("hex") !== entry.resource.sha256) done(new Error("Package source content changed")); else done();
+                },
+              });
+              members.add(member);
+              source.once("error", error => member.destroy(error));
+              member.once("error", error => output.destroy(error));
+              member.once("end", () => { pending.delete(entry); });
+              member.once("close", () => { members.delete(member); source.destroy(); });
+              callback(null, source.pipe(member));
+            }
             catch (error) { callback(error, Readable.from([])); }
           })();
         });
       }
-      const deadline = Date.now() + this.#options.packageMaxDurationMs;
-      const limiter = new Transform({
-        transform(chunk, _encoding, callback) {
-          if (Date.now() > deadline) callback(new Error("Share package duration exceeded"));
-          else callback(null, chunk);
+      let revalidateBytes = 0;
+      limiter = new Transform({
+        transform: (chunk: Buffer, _encoding, callback) => {
+          try { byteReservation.accept(chunk.length); } catch (error) { callback(error as Error); return; }
+          if (Date.now() > deadline || performance.now() >= monotonicDeadline) callback(new Error("Share package duration exceeded"));
+          else {
+            revalidateBytes += chunk.length;
+            if (revalidateBytes < this.#options.streamRevalidateBytes) { callback(null, chunk); return; }
+            revalidateBytes = 0;
+            void this.#repository.validateActive(share.id, new Date()).then(active => {
+              if (active) callback(null, chunk); else callback(new ShareServiceError("denied"));
+            }).catch(callback);
+          }
         },
       });
-      const source = Readable.from(zip.outputStream).pipe(limiter);
-      const writing = this.#storage.write(storagePath, source, { offset: 0, create: true, exclusive: true, truncate: true });
+      const destination = limiter;
+      timer = setTimeout(() => {
+        const error = new Error("Share package duration exceeded");
+        destination.destroy(error); output.destroy(error);
+        for (const member of members) member.destroy(error);
+      }, Math.max(1, monotonicDeadline - performance.now()));
+      timer.unref();
+      flowing = pipeline(output, destination);
+      writeStarted = true;
+      writing = this.#storage.write(storagePath, destination, { offset: 0, create: true, exclusive: true, truncate: true }).then(bytes => { writeSucceeded = true; return bytes; });
       zip.end();
-      await writing;
+      await Promise.all([writing, flowing]);
       const stat = await this.#storage.stat(storagePath);
-      const digest = await streamHash(await this.#storage.openRead(storagePath));
+      verificationStarted = true;
+      const verification = await this.#storage.openRead(storagePath);
+      const physicalClosed = (verification as Readable & { readonly storageClosed?: Promise<void> }).storageClosed;
+      void physicalClosed?.then(() => { verificationClosed = true; }, () => undefined);
+      if (Date.now() >= deadline) { verification.destroy(); throw new ShareServiceError("package_limit"); }
+      members.add(verification);
+      const digest = await streamHash(verification);
+      if (lifecycle) await waitForPhysicalClose(physicalClosed, monotonicDeadline);
+      members.delete(verification);
       if (digest.bytes !== stat.size) throw new Error("Share package size verification failed");
-      if (this.#entryFingerprint(await this.#packageEntries(access.share, access.resource, new Date())) !== sourceFingerprint) throw new ShareServiceError("package_unavailable");
+      if (this.#entryFingerprint(await this.#packageEntries(access.share, access.resource, new Date(deadline - this.#options.packageMaxDurationMs))) !== sourceFingerprint) throw new ShareServiceError("package_unavailable");
+      if (Date.now() >= deadline || performance.now() >= monotonicDeadline) throw new ShareServiceError("package_limit");
+      if (!(await this.#repository.validateActive(share.id, new Date()))) throw new ShareServiceError("denied");
+      if (lifecycle && claim) {
+        await lifecycle.confirmWriterClosed(claim);
+        if (!await lifecycle.publish(claim, { fileCount: entries.filter(entry => entry.resource.type === "file").length, sizeBytes: stat.size, sha256: digest.sha256, sourceFingerprint })) throw new ShareServiceError("package_unavailable");
+        const ready = await this.#repository.getCurrentPackage(share.id);
+        if (!ready || ready.id !== id || ready.generationId !== claim.id || ready.state !== "ready") throw new ShareServiceError("package_unavailable");
+        return ready;
+      }
       const ready = await this.#repository.setPackageReady(id, { fileCount: entries.filter((entry) => entry.resource.type === "file").length, sizeBytes: stat.size, sha256: digest.sha256, readyAt: new Date(), sourceFingerprint });
       return ready;
     } catch (error) {
-      await this.#storage.delete(storagePath).catch(() => undefined);
-      await this.#repository.setPackageFailed(id, error instanceof ShareServiceError ? error.code : "package_failed").catch(() => undefined);
+      limiter?.destroy(); zipOutput?.destroy();
+      for (const member of members) member.destroy();
+      await Promise.allSettled([writing, flowing]);
+      if (lifecycle) {
+        if (claim) {
+          // The build's readback handle shares this generation's custody too.
+          if (writerCustodyClosed()) await lifecycle.confirmWriterClosed(claim).catch(() => undefined);
+          await lifecycle.fail(claim, error instanceof ShareServiceError ? error.code : "package_failed").catch(() => undefined);
+        }
+      } else {
+        await this.#storage.delete(storagePath).catch(() => undefined);
+        await this.#repository.setPackageFailed(id, error instanceof ShareServiceError ? error.code : "package_failed").catch(() => undefined);
+      }
       throw error;
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+      limiter?.destroy(); zipOutput?.destroy();
+      for (const member of members) member.destroy();
     }
   }
 
-  async openPackage(token: string, range: { readonly offset: number; readonly length?: number }, input: { readonly sourceIp: string; readonly userAgent: string; readonly sessionToken?: string }, now = new Date()) {
+  async openPackage(token: string, range: { readonly offset: number; readonly length?: number; readonly packageId?: string }, input: { readonly sourceIp: string; readonly userAgent: string; readonly sessionToken?: string; readonly transferId?: string }, now = new Date()) {
     const access = await this.#authorize(token, input, now, false);
     if (access.locked || access.share.mode !== "download_folder") throw new ShareServiceError(access.locked ? "locked" : "invalid_mode");
     const value = await this.#repository.getCurrentPackage(access.share.id);
     if (value === undefined || value.state !== "ready" || value.expiresAt <= now) throw new ShareServiceError("package_unavailable");
+    if (range.packageId !== undefined && range.packageId !== value.id) throw new ShareServiceError("package_unavailable");
     await this.#validatePackage(access.share, access.resource, value);
-    await this.#repository.claimDownload(access.share.id, access.session.id, now).catch(() => { throw new ShareServiceError("denied"); });
-    const stream = await this.#storage.openRead(value.storagePath, { offset: range.offset, ...(range.length === undefined ? {} : { length: range.length }) });
-    await this.#access(access.share.id, input.sourceIp, "package_content", "success", range.length === undefined && range.offset === 0 ? 200 : 206, now, range);
-    return { share: access.share, package: value, stream: this.#guardStream(access.share.id, stream, () => this.#validatePackage(access.share, access.resource, value)), session: access.session };
+    const lifecycle = this.#repository.packageLifecycle, startedAt = performance.now(), durationMs = 30_000;
+    const generationId = value.generationId;
+    if (lifecycle && !generationId) throw new ShareServiceError("package_unavailable");
+    const readerId = lifecycle && generationId ? await lifecycle.acquireReader(value.id, generationId, durationMs) : undefined;
+    let source: Readable | undefined, guarded: Readable | undefined;
+    try {
+      source = await this.#storage.openRead(value.storagePath, { offset: range.offset, ...(range.length === undefined ? {} : { length: range.length }) });
+      const raw = source;
+      // A wrapper's close event is not a physical handle acknowledgement.
+      // Optional during adapter rollout: unsupported/uncertain reads retain custody.
+      const physicalClosed = (raw as Readable & { readonly storageClosed?: Promise<void> }).storageClosed;
+      void physicalClosed?.catch(() => undefined);
+      guarded = this.#guardStream(access.share.id, raw, () => this.#validatePackage(access.share, access.resource, value), access.session.id);
+      if (lifecycle && readerId && generationId) guarded = createLeasedPackageStream(guarded, { startedAt, durationMs,
+        renew: () => lifecycle.renewReader(readerId, generationId, durationMs),
+        release: async () => {
+          if (!physicalClosed) return;
+          await physicalClosed;
+          await lifecycle.releaseReader(readerId, generationId);
+        },
+      });
+      await this.#repository.claimDownload(access.share.id, access.session.id, now, input.transferId === undefined ? undefined : { id: input.transferId, resourceId: access.resource.id, kind: "package" }).catch(() => { throw new ShareServiceError("denied"); });
+      await this.#access(access.share.id, input.sourceIp, "package_content", "success", range.length === undefined && range.offset === 0 ? 200 : 206, now, range);
+      return { share: access.share, package: value, stream: guarded, session: access.session };
+    } catch (error) {
+      guarded?.destroy(); source?.destroy();
+      // A successful open is released by the source-close path above. Failed
+      // opens are retained conservatively: no remote-handle closure was proved.
+      throw error;
+    }
   }
 
   async packageMetadata(token: string, input: { readonly sourceIp: string; readonly userAgent: string; readonly sessionToken?: string }, now = new Date()) {
@@ -439,11 +611,26 @@ export class ShareService {
   }
 
   async cleanupExpiredPackages(now = new Date(), limit = 100): Promise<number> {
+    await this.#repository.cleanupExpiredDownloadClaims?.(now, 1000);
+    const lifecycle = this.#repository.packageLifecycle;
+    if (lifecycle) {
+      let cleaned = 0;
+      for (const claim of await lifecycle.claimCleanup(limit)) {
+        // Failure leaves the exact durable token/path for a later bounded retry.
+        try {
+          if (await this.#storage.exists(claim.storagePath)) await this.#storage.delete(claim.storagePath);
+          if (await lifecycle.completeCleanup(claim)) cleaned += 1;
+        } catch { /* Durable custody remains; continue the other claimed objects. */ }
+      }
+      return cleaned;
+    }
     const values = await this.#repository.claimExpiredPackages(now, limit);
     let cleaned = 0;
     for (const value of values) {
-      if (await this.#storage.exists(value.storagePath).catch(() => false)) await this.#storage.delete(value.storagePath).catch(() => undefined);
+      // Backend failure retains the durable row so the next bounded cleanup can retry.
+      if (await this.#storage.exists(value.storagePath)) await this.#storage.delete(value.storagePath);
       await this.#repository.markPackageExpired(value.id);
+      await this.#repository.deleteExpiredPackage?.(value.id);
       cleaned += 1;
     }
     return cleaned;
@@ -508,11 +695,26 @@ export class ShareService {
     }
   }
 
-  async #allChildren(parentId: string): Promise<readonly Resource[]> {
+  async #openContentResource(share: ShareRecord, expected: Resource, selection: ShareRangeSelection) {
+    let range: ShareDownloadRange | undefined;
+    const opened = await this.#files.openDownload(expected.id, current => {
+      if (current.status !== "active" || current.type !== "file"
+        || current.parentId !== expected.parentId || current.storagePath !== expected.storagePath
+        || classificationRank[current.securityClassification ?? "internal"] > classificationRank[share.classificationCeiling]
+        || share.mode === "view" && !inlineTypes.has(current.mimeType ?? "application/octet-stream")) throw new ShareServiceError("not_found");
+      range = typeof selection === "function" ? selection(current) : selection;
+      return range;
+    });
+    if (range === undefined) { opened.stream.destroy(); throw new Error("Download gateway did not validate the representation"); }
+    return { ...opened, range };
+  }
+
+  async #allChildren(parentId: string, maximum: number): Promise<readonly Resource[]> {
     const values: Resource[] = [];
     for (let offset = 0; ; offset += 500) {
       const page = await this.#files.listChildren(parentId, offset, 500);
       values.push(...page);
+      if (values.length > maximum) throw new ShareServiceError("package_limit");
       if (page.length < 500) break;
     }
     return values;
@@ -520,7 +722,7 @@ export class ShareService {
 
   async #sharedChild(share: ShareRecord, resourceId: string): Promise<Resource> {
     if (share.resourceType !== "folder" || !["browse", "download_folder"].includes(share.mode)) throw new ShareServiceError("invalid_mode");
-    if (!(await this.#repository.isDescendant(share.resourceId, resourceId)) || resourceId === share.resourceId) throw new ShareServiceError("not_found");
+    if (!(await this.#repository.isDescendant(share.resourceId, resourceId, share.classificationCeiling)) || resourceId === share.resourceId) throw new ShareServiceError("not_found");
     const resource = await this.#files.getResource(resourceId).catch(() => undefined);
     if (resource === undefined || resource.type !== "file" || resource.status !== "active"
       || classificationRank[resource.securityClassification ?? "internal"] > classificationRank[share.classificationCeiling]) throw new ShareServiceError("not_found");
@@ -531,12 +733,19 @@ export class ShareService {
     const entries: Array<{ readonly resource: Resource; readonly path: string }> = [];
     let fileCount = 0;
     let totalBytes = 0;
+    if (this.#repository.readPackageTree !== undefined) {
+      const snapshot = await this.#repository.readPackageTree(root.id, share.classificationCeiling, this.#options.packageMaxFiles);
+      for (const entry of snapshot) if (entry.resource.type === "file") { fileCount++; totalBytes += entry.resource.sizeBytes; }
+      if (Date.now() - startedAt.getTime() > this.#options.packageMaxDurationMs || fileCount > this.#options.packageMaxFiles || totalBytes > this.#options.packageMaxBytes) throw new ShareServiceError("package_limit");
+      return snapshot;
+    }
     const visit = async (folder: Resource, prefix: string): Promise<void> => {
       if (Date.now() - startedAt.getTime() > this.#options.packageMaxDurationMs) throw new ShareServiceError("package_limit");
-      for (const child of await this.#allChildren(folder.id)) {
+      for (const child of await this.#allChildren(folder.id, this.#options.packageMaxFiles - entries.length)) {
         if (child.status !== "active" || classificationRank[child.securityClassification ?? "internal"] > classificationRank[share.classificationCeiling]) continue;
         const childPath = prefix ? `${prefix}/${child.name}` : child.name;
         entries.push({ resource: child, path: child.type === "folder" ? `${childPath}/` : childPath });
+        if (entries.length > this.#options.packageMaxFiles) throw new ShareServiceError("package_limit");
         if (child.type === "folder") await visit(child, childPath);
         else {
           fileCount += 1;
@@ -561,23 +770,25 @@ export class ShareService {
     }
   }
 
-  #guardStream(shareId: string, source: Readable, validate?: () => Promise<void>): Readable {
+  #guardStream(shareId: string, source: Readable, validate?: () => Promise<void>, sessionId?: string): Readable {
     let bytes = 0;
-    let checking = false;
+    let pending: Buffer | undefined;
     const threshold = this.#options.streamRevalidateBytes;
+    const check = async () => {
+      if (!(await this.#repository.validateActive(shareId, new Date(), sessionId))) throw new Error("Share or session was revoked during streaming");
+      await validate?.();
+    };
     const guard = new Transform({
       transform: (chunk: Buffer, _encoding, callback) => {
         bytes += chunk.length;
-        if (bytes < threshold || checking) { callback(null, chunk); return; }
+        const previous = pending;
+        pending = chunk;
+        if (bytes < threshold) { callback(null, previous); return; }
         bytes = 0;
-        checking = true;
-        void this.#repository.validateActive(shareId, new Date()).then(async (active) => {
-          if (active) await validate?.();
-          checking = false;
-          if (!active) callback(new Error("Share was revoked during streaming"));
-          else callback(null, chunk);
-        }).catch(callback);
+        void check().then(() => callback(null, previous)).catch(callback);
       },
+      // Keep one bounded source chunk until the final authority check, including files below the threshold.
+      flush: callback => { void check().then(() => { const last = pending; pending = undefined; callback(null, last); }).catch(callback); },
     });
     source.once("error", (error) => guard.destroy(error));
     // The public controller may still be recording access before attaching HTTP.

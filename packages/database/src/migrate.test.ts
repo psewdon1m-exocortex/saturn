@@ -8,7 +8,8 @@ describe("migration manifest", () => {
   it("has a rollback pair for every ordered migration", async () => {
     const directory = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../migrations");
     const pairs = await listMigrationPairs(directory);
-    expect(pairs.map((pair) => pair.name)).toEqual([
+    const names=pairs.map(pair=>pair.name);
+    expect(names.slice(0,47)).toEqual([
       "0001_foundation",
       "0002_file_core",
       "0003_protection_audit",
@@ -57,6 +58,15 @@ describe("migration manifest", () => {
       "0046_transfer_safety",
       "0047_storage_layout_v3",
     ]);
+    // Later additive migrations do not change the historical ordered prefix.
+    // Gaps may be reserved by parallel work; reused numbers or orphan pairs may not.
+    expect(new Set(names).size).toBe(names.length);
+    const numbers=names.map(name=>Number(name.slice(0,4)));
+    expect(new Set(numbers).size).toBe(numbers.length);
+    expect(numbers.every((number,index)=>index===0||number>(numbers[index-1]??0))).toBe(true);
+    for(const name of names)expect(name).toMatch(/^\d{4}_[a-z0-9_-]+$/);
+    const sqlFiles=(await fs.readdir(directory)).filter(file=>/^\d+_[a-z0-9_-]+\.(up|down)\.sql$/i.test(file)).sort();
+    expect(sqlFiles).toEqual(names.flatMap(name=>[name+".up.sql",name+".down.sql"]).sort());
     for (const pair of pairs) {
       await expect(fs.readFile(pair.up, "utf8")).resolves.toMatch(/\S/);
       await expect(fs.readFile(pair.down, "utf8")).resolves.toMatch(/\S/);

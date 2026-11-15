@@ -1,6 +1,13 @@
-import type { Sql, TransactionSql } from "postgres";
+import type { TransactionSql } from "postgres";
 import type { Database } from "@saturn/database";
+import { assertBrowserNamespaceCatalogPermit } from "./browser-upload-namespace-context.js";
 import type { FileOperation, FileVersion, Resource, ResourceStatus, ResourceType, RetentionClass, SecurityClassification, UploadSession, UploadStatus } from "./models.js";
+import { ROOT_RESOURCE_ID } from "./models.js";
+import { VERSION_RETENTION } from "./retention.js";
+import { SYNC_METADATA_MAX_ANCESTOR_HOPS, validSyncMetadataIds, type ScopedSyncMetadata, type ScopedSyncMetadataRequest } from "./sync-metadata.js";
+import { uploadIntentHash, uploadPublicationIntentSchema, uploadPublicationReceiptSchema, type UploadPublicationIntent } from "./upload-publication.js";
+import type { UploadPublicationAuthorization } from "./upload-publication.js";
+import type { CatalogCommitCoordinator, CatalogCommitContext, CatalogCommitSql, PreparedCatalogUpload } from "./catalog-commit.js";
 import type {
   AdoptExistingFileRecord,
   CommitOverwriteRecord,
@@ -78,6 +85,9 @@ interface UploadRow {
   expires_at: Date;
   created_at: Date;
   updated_at: Date;
+  upload_intent?: unknown;
+  upload_intent_hash?: string | null;
+  upload_receipt?: unknown;
 }
 
 function resource(row: ResourceRow): Resource {
@@ -131,6 +141,18 @@ function version(row: VersionRow): FileVersion {
 }
 
 function upload(row: UploadRow): UploadSession {
+  const intent = row.upload_intent == null ? undefined : uploadPublicationIntentSchema.parse(row.upload_intent);
+  const receipt = row.upload_receipt == null ? undefined : uploadPublicationReceiptSchema.parse(row.upload_receipt);
+  if (intent !== undefined && (row.upload_intent_hash !== uploadIntentHash(intent)
+    || intent.idempotencyKey !== row.idempotency_key || intent.parentId !== row.parent_id || intent.name !== row.filename
+    || intent.sizeBytes !== row.expected_size || intent.sha256 !== row.expected_sha256
+    || intent.deviceId !== row.audit_actor_id || row.audit_actor_type !== "device_token"
+    || intent.targetId !== row.overwrite_resource_id || intent.expectedVersionId !== row.expected_version_id || intent.requireAbsent !== row.require_absent
+    || (receipt !== undefined && (receipt.uploadId !== row.id || receipt.intentHash !== row.upload_intent_hash || receipt.rootId !== intent.rootId
+      || receipt.parentId !== intent.parentId || receipt.name !== intent.name || receipt.sha256 !== intent.sha256 || receipt.sizeBytes !== intent.sizeBytes
+      || receipt.resourceId !== row.resource_id || row.status !== "active" || row.actual_sha256 !== receipt.sha256)))) {
+    throw new Error("Stored upload publication identity is inconsistent");
+  }
   return {
     id: row.id,
     idempotencyKey: row.idempotency_key,
@@ -152,25 +174,30 @@ function upload(row: UploadRow): UploadSession {
     expiresAt: row.expires_at,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    ...(intent === undefined ? {} : { publicationIntent: intent, intentHash: uploadIntentHash(intent) }),
+    ...(receipt === undefined ? {} : { publicationReceipt: receipt }),
   };
 }
 
 export class PostgresFileRepository implements FileRepository {
   readonly #database: Database;
+  readonly #catalogCommit: CatalogCommitCoordinator | undefined;
 
-  constructor(database: Database) {
+  constructor(database: Database, options: { readonly catalogCommitCoordinator?: CatalogCommitCoordinator } = {}) {
     this.#database = database;
+    this.#catalogCommit = options.catalogCommitCoordinator;
   }
 
-  #resourceQuery(sql: Sql | TransactionSql, id: string): Promise<Resource | undefined> {
+  #resourceQuery(sql: CatalogCommitSql, id: string): Promise<Resource | undefined> {
     return Promise.resolve(sql<ResourceRow[]>`
       SELECT * FROM resources WHERE id = ${id} LIMIT 1
     `).then((rows) => rows[0] === undefined ? undefined : resource(rows[0]));
   }
 
-  #uploadQuery(sql: Sql | TransactionSql, id: string): Promise<UploadSession | undefined> {
+  #uploadQuery(sql: CatalogCommitSql, id: string): Promise<UploadSession | undefined> {
     return Promise.resolve(sql<UploadRow[]>`
-      SELECT * FROM upload_sessions WHERE id = ${id} LIMIT 1
+      SELECT u.*,j.upload_intent,j.upload_intent_hash,j.upload_receipt FROM upload_sessions u
+      LEFT JOIN operation_journal j ON j.id=u.id AND j.upload_id=u.id WHERE u.id = ${id} LIMIT 1
     `).then((rows) => rows[0] === undefined ? undefined : upload(rows[0]));
   }
 
@@ -183,6 +210,58 @@ export class PostgresFileRepository implements FileRepository {
 
   getResource(id: string): Promise<Resource | undefined> {
     return this.#database.withSql((sql) => this.#resourceQuery(sql, id));
+  }
+
+  readScopedSyncMetadata(request: ScopedSyncMetadataRequest): Promise<ScopedSyncMetadata> {
+    if (!validSyncMetadataIds(request.nodeIds) || !validSyncMetadataIds([request.rootId, request.rootParentId])) {
+      throw new Error("Sync metadata IDs are invalid");
+    }
+    return this.#database.withSql(async sql => {
+      // One MVCC statement proves every active folder ancestor. Inaccessible
+      // origins simply have no root witness. No storage/ACL/backend reads.
+      const rows = await sql<{
+        id: string; parent_id: string | null; name: string | null; type: "file" | "folder";
+        size_bytes: string; sha256: string | null; updated_at: Date;
+      }[]>`
+        WITH RECURSIVE allowed_root AS (
+          SELECT id FROM resources WHERE id = ${request.rootId}::uuid
+            AND parent_id = ${request.rootParentId}::uuid AND type = 'folder' AND status = 'active'
+        ), requested AS (
+          SELECT DISTINCT unnest(${sql.array([...new Set(request.nodeIds)], 2950)}::uuid[]) AS id
+          UNION SELECT id FROM allowed_root
+        ), ancestry(origin_id, id, parent_id, depth, visited) AS (
+          SELECT r.id, r.id, r.parent_id, 0, ARRAY[r.id]
+          FROM requested i JOIN resources r ON r.id = i.id
+          WHERE r.status = 'active' AND EXISTS (SELECT 1 FROM allowed_root)
+          UNION ALL
+          SELECT a.origin_id, p.id, p.parent_id, a.depth + 1, a.visited || p.id
+          FROM ancestry a
+          JOIN LATERAL (
+            SELECT id, parent_id FROM resources WHERE id = a.parent_id
+              AND status = 'active' AND type = 'folder' LIMIT 1
+          ) p ON true
+          WHERE a.id <> ${request.rootId}::uuid AND a.depth < ${SYNC_METADATA_MAX_ANCESTOR_HOPS}
+            AND NOT p.id = ANY(a.visited)
+        ), scoped AS (
+          SELECT DISTINCT origin_id FROM ancestry WHERE id = ${request.rootId}::uuid
+        )
+        SELECT r.id, CASE WHEN r.id = ${request.rootId}::uuid THEN NULL ELSE r.parent_id END AS parent_id,
+          CASE WHEN octet_length(r.name) <= 1020 THEN r.name ELSE NULL END AS name,
+          r.type, r.size_bytes::text, r.sha256, r.updated_at
+        FROM scoped s JOIN resources r ON r.id = s.origin_id
+      `;
+      // Corrupt/unsupported oversized names must fail the whole read, never
+      // masquerade as absence or allocate an unbounded metadata response.
+      if (rows.some(row => row.name === null)) throw new Error("limit");
+      return {
+        rootActive: rows.some(row => row.id === request.rootId.toLowerCase()),
+        nodes: rows.map(row => ({ nodeId: row.id, parentId: row.parent_id, name: row.name as string, type: row.type,
+          sizeBytes: row.size_bytes, sha256: row.type === "file" ? row.sha256 : null,
+          legacyETag: row.type === "file" && row.sha256 !== null
+            ? `"sha256-${row.sha256}"` : `"resource-${row.id}-${String(row.updated_at.getTime())}"`,
+        })),
+      };
+    });
   }
 
   getChild(parentId: string, name: string): Promise<Resource | undefined> {
@@ -269,7 +348,8 @@ export class PostgresFileRepository implements FileRepository {
   }
 
   createFolder(record: { readonly id: string; readonly parentId: string; readonly name: string; readonly storagePath: string }): Promise<Resource> {
-    return this.#database.transaction(async (sql) => {
+    return this.#accountingTransaction(async (sql) => {
+      await assertBrowserNamespaceCatalogPermit(sql);
       const rows = await sql<ResourceRow[]>`
         INSERT INTO resources (id, type, parent_id, name, storage_path, status)
         VALUES (${record.id}, 'folder', ${record.parentId}, ${record.name}, ${record.storagePath}, 'active')
@@ -301,7 +381,8 @@ export class PostgresFileRepository implements FileRepository {
 
   getUploadByIdempotencyKey(key: string): Promise<UploadSession | undefined> {
     return this.#database.withSql(async (sql) => {
-      const rows = await sql<UploadRow[]>`SELECT * FROM upload_sessions WHERE idempotency_key = ${key} LIMIT 1`;
+      const rows = await sql<UploadRow[]>`SELECT u.*,j.upload_intent,j.upload_intent_hash,j.upload_receipt FROM upload_sessions u
+        LEFT JOIN operation_journal j ON j.id=u.id AND j.upload_id=u.id WHERE u.idempotency_key = ${key} LIMIT 1`;
       return rows[0] === undefined ? undefined : upload(rows[0]);
     });
   }
@@ -317,6 +398,10 @@ export class PostgresFileRepository implements FileRepository {
           AND NOT EXISTS(SELECT 1 FROM drop_uploads d WHERE u.audit_actor_type='drop_worker' AND u.parent_id='00000000-0000-7000-8000-000000000002' AND d.local_path IS NOT NULL AND d.received_size=d.expected_size
             AND d.state IN ('buffered','transferring','verifying') AND (d.upload_id=u.id OR u.idempotency_key='drop-drain:'||d.id::text))
           AND NOT EXISTS(SELECT 1 FROM operation_journal j WHERE j.upload_id=u.id AND j.error_code IN ('verification_interrupted','reconciliation_required'))))
+        -- Catalog uploads retain their own fixed lifecycle and recovery authority.
+        -- Ignore the field on schemas before 0054, without treating a stored JSON null as SQL NULL.
+        AND NOT EXISTS(SELECT 1 FROM operation_journal j WHERE j.upload_id=u.id
+          AND j IS DISTINCT FROM jsonb_populate_record(j, '{"upload_execution":null}'::jsonb))
         AND NOT EXISTS(SELECT 1 FROM operation_locks l WHERE l.lock_key='upload:'||u.id::text AND l.expires_at>now())
       ORDER BY u.updated_at LIMIT ${limit}
     `).map(upload));
@@ -342,6 +427,8 @@ export class PostgresFileRepository implements FileRepository {
     return this.#database.withSql(async sql => (await sql<UploadRow[]>`
       SELECT u.* FROM upload_sessions u WHERE u.updated_at < now()-interval '2 minutes'
         AND (u.status IN ('committing','verifying') OR (u.status='failed_retryable' AND EXISTS(SELECT 1 FROM operation_journal j WHERE j.upload_id=u.id AND j.error_code='verification_interrupted')))
+        AND NOT EXISTS(SELECT 1 FROM operation_journal j WHERE j.upload_id=u.id
+          AND j IS DISTINCT FROM jsonb_populate_record(j, '{"upload_execution":null}'::jsonb))
         AND u.received_size=u.expected_size ORDER BY u.updated_at LIMIT ${limit}
     `).map(upload));
   }
@@ -361,13 +448,30 @@ export class PostgresFileRepository implements FileRepository {
         ) RETURNING *
       `;
       await sql`
-        INSERT INTO operation_journal (id, operation_type, state, idempotency_key, upload_id, payload)
+        INSERT INTO operation_journal (id, operation_type, state, idempotency_key, upload_id, payload,upload_intent,upload_intent_hash)
         VALUES (${record.id}, 'upload', 'created', ${`upload:${record.idempotencyKey}`}, ${record.id},
-          ${sql.json({ tempPath: record.tempPath, targetPath: record.targetPath })})
+          ${sql.json({ tempPath: record.tempPath, targetPath: record.targetPath })},
+          ${record.publicationIntent === undefined ? null : sql.json({...record.publicationIntent})},
+          ${record.publicationIntent === undefined ? null : uploadIntentHash(record.publicationIntent)})
       `;
       const row = rows[0];
       if (row === undefined) throw new Error("Upload insert returned no row");
-      return upload(row);
+      const created = await this.#uploadQuery(sql,record.id);
+      if(created === undefined)throw new Error("Upload creation did not return state");
+      return created;
+    }).catch(async (error:unknown) => {
+      if(typeof error !== "object" || error === null || !("code" in error) || error.code !== "23505")throw error;
+      const existing = await this.getUploadByIdempotencyKey(record.idempotencyKey);
+      if(existing === undefined || existing.parentId !== record.parentId || existing.filename !== record.filename
+        || existing.expectedSize !== record.expectedSize || existing.expectedSha256 !== record.expectedSha256
+        || (existing.overwriteResourceId ?? null) !== (record.overwriteResourceId ?? null)
+        || (existing.expectedVersionId ?? null) !== (record.expectedVersionId ?? null)
+        || (existing.requireAbsent ?? false) !== (record.requireAbsent ?? false)
+        || existing.auditActorType !== (record.auditActorType ?? "owner_bootstrap") || existing.auditActorId !== (record.auditActorId ?? "owner")
+        || (record.publicationIntent === undefined ? existing.publicationIntent !== undefined : existing.intentHash !== uploadIntentHash(record.publicationIntent))) {
+        throw new Error("Idempotency key was already used for different upload publication intent",{cause:error});
+      }
+      return existing;
     });
   }
 
@@ -414,8 +518,109 @@ export class PostgresFileRepository implements FileRepository {
     });
   }
 
+  async prepareUploadCatalog(id: string, backendIdentity: string | undefined, authorization?: UploadPublicationAuthorization): Promise<PreparedCatalogUpload | undefined> {
+    if (this.#catalogCommit !== undefined) return this.#catalogCommit.prepareUpload(id,backendIdentity ?? "",authorization);
+    // An old/unqualified composition must not silently publish a previously
+    // bound operation. Reject before verification/final backend publication.
+    const bound = await this.#database.withSql(sql => sql`SELECT id FROM operation_journal WHERE id=${id} AND sync_root_id IS NOT NULL`);
+    if (bound.length !== 0) throw new Error("Bound upload requires its catalog commit coordinator");
+    return undefined;
+  }
+
+  async #lockUploadPublication(sql: CatalogCommitSql, record: CommitUploadRecord, qualified = false): Promise<{intent?:UploadPublicationIntent;replay?:CompleteUploadRecordResult}> {
+    const candidate=await this.#uploadQuery(sql,record.uploadId);
+    if (!qualified) {
+      const bound = await sql`SELECT id FROM operation_journal WHERE id=${record.uploadId} AND sync_root_id IS NOT NULL`;
+      if (bound.length !== 0 || (candidate?.publicationIntent !== undefined && this.#catalogCommit?.isRootAdmitted(candidate.publicationIntent.rootId))) throw new Error("Bound upload requires prepared catalog evidence");
+    }
+    if(candidate?.publicationIntent !== undefined && !qualified)await sql.unsafe("SET LOCAL lock_timeout='2s'; SET LOCAL statement_timeout='10s'");
+    await sql`SELECT id FROM upload_sessions WHERE id=${record.uploadId} FOR UPDATE`;
+    await sql`SELECT id FROM operation_journal WHERE id=${record.uploadId} AND upload_id=${record.uploadId} FOR UPDATE`;
+    const selected = await this.#uploadQuery(sql,record.uploadId);
+    if(selected === undefined)throw new Error("Upload session not found");
+    const intent = selected.publicationIntent;
+    if(intent !== undefined && (intent.parentId !== record.parentId || intent.name !== record.filename
+      || intent.sizeBytes !== String(record.sizeBytes) || intent.sha256 !== record.sha256
+      || (intent.targetId !== null && intent.targetId !== record.resourceId))) {
+      throw new Error("Upload commit differs from sealed publication intent");
+    }
+    if(selected.status === "active" && selected.resourceId !== undefined) {
+      const current = await this.#resourceQuery(sql,selected.resourceId);
+      if(current === undefined)throw new Error("Published upload resource is unavailable");
+      return {replay:{upload:selected,resource:current,
+        ...(selected.publicationReceipt === undefined ? {} : {publicationReceipt:selected.publicationReceipt})}};
+    }
+    if(intent !== undefined) {
+      // Lock only SQL identity rows during the metadata commit. Credential
+      // rotation is checked for HTTP calls; workers have no persisted token.
+      const credential=record.publicationAuthorization;
+      if(credential !== undefined && (credential.deviceId !== intent.deviceId || credential.rootId !== intent.rootId)) {
+        throw new Error("Upload publication authorization changed");
+      }
+      await sql`SELECT id FROM devices WHERE id=${intent.deviceId} FOR SHARE`;
+      const chain=await sql<{id:string}[]>`WITH RECURSIVE ancestors AS (
+        SELECT id,parent_id,ARRAY[id] AS visited,0 AS hops FROM resources WHERE id=${intent.parentId}
+        UNION ALL SELECT r.id,r.parent_id,a.visited||r.id,a.hops+1 FROM resources r JOIN ancestors a ON r.id=a.parent_id
+          WHERE a.id<>${intent.rootId} AND a.hops<128 AND NOT r.id=ANY(a.visited)
+      ) SELECT id FROM ancestors ORDER BY id`;
+      const ids=chain.map(row=>row.id);
+      // Size accounting writes these folders later in this same transaction.
+      // Taking SHARE then upgrading would deadlock two independent parents.
+      // Acquire the write-compatible mode in a fixed UUID order immediately;
+      // it serializes only the short SQL commit, never the backend verification.
+      await sql`SELECT id FROM resources WHERE id=ANY(${ids}::uuid[]) ORDER BY id FOR NO KEY UPDATE`;
+      // A row may have changed while lock acquisition waited. Rewalk and require
+      // the exact locked chain, all active folders and a real assigned root.
+      const authorized = await sql<{allowed:boolean}[]>`WITH RECURSIVE ancestors AS (
+        SELECT id,parent_id,type,status,ARRAY[id] AS visited,0 AS hops FROM resources WHERE id=${intent.parentId}
+        UNION ALL SELECT r.id,r.parent_id,r.type,r.status,a.visited||r.id,a.hops+1 FROM resources r JOIN ancestors a ON r.id=a.parent_id
+          WHERE a.id<>${intent.rootId} AND a.hops<128 AND NOT r.id=ANY(a.visited)
+      ) SELECT EXISTS(SELECT 1 FROM devices d JOIN resources r ON r.id=d.sync_root_id
+        WHERE d.id=${intent.deviceId} AND d.state='active' AND d.device_kind='windows_sync' AND d.can_write
+          AND d.sync_root_id=${intent.rootId} AND d.scope_ids=ARRAY[${intent.rootId}::uuid]
+          AND (${credential?.tokenHash ?? null}::text IS NULL OR d.token_hash=${credential?.tokenHash ?? null})
+          AND (d.expires_at IS NULL OR d.expires_at>now()) AND r.type='folder' AND r.status='active'
+          AND r.parent_id=${"00000000-0000-7000-8000-000000000004"})
+        AND (SELECT array_agg(id ORDER BY id) FROM ancestors)=${ids}::uuid[]
+        AND EXISTS(SELECT 1 FROM ancestors WHERE id=${intent.rootId})
+        AND NOT EXISTS(SELECT 1 FROM ancestors WHERE status<>'active' OR type<>'folder') AS allowed`;
+      if(!authorized[0]?.allowed)throw new Error("Upload publication authorization changed");
+      if(intent.targetId !== null) {
+        const target = await sql<{current_version_id:string;parent_id:string;name:string;status:string}[]>`
+          SELECT current_version_id,parent_id,name,status FROM resources WHERE id=${intent.targetId} FOR NO KEY UPDATE`;
+        const previous=target[0];
+        if(previous === undefined || previous.current_version_id !== intent.expectedVersionId || previous.parent_id !== intent.parentId
+          || previous.name !== intent.name || previous.status !== "active")throw new Error("Upload publication precondition changed");
+      }
+    }
+    return intent === undefined ? {} : {intent};
+  }
+
+  async #recordUploadPublication(sql: CatalogCommitSql, record: CommitUploadRecord, intent: UploadPublicationIntent|undefined): Promise<void> {
+    if(intent === undefined)return;
+    const version = (await sql<{created_at:Date}[]>`SELECT created_at FROM file_versions WHERE id=${record.versionId} AND resource_id=${record.resourceId}`)[0];
+    if(version === undefined)throw new Error("Published upload version is unavailable");
+    const receipt = uploadPublicationReceiptSchema.parse({schema:"saturn.upload-publication.v1",uploadId:record.uploadId,
+      operationId:record.uploadId,intentHash:uploadIntentHash(intent),rootId:intent.rootId,resourceId:record.resourceId,
+      versionId:record.versionId,parentId:record.parentId,name:record.filename,sizeBytes:String(record.sizeBytes),sha256:record.sha256,
+      etag:`"sha256-${record.sha256}"`,publishedAt:version.created_at.toISOString()});
+    const rows = await sql`UPDATE operation_journal SET upload_receipt=${sql.json({...receipt})},upload_published_version_id=${record.versionId}
+      WHERE id=${record.uploadId} AND upload_intent_hash=${receipt.intentHash} AND upload_receipt IS NULL RETURNING id`;
+    if(rows.length !== 1)throw new Error("Upload receipt could not be atomically published");
+  }
+
   commitUpload(record: CommitUploadRecord): Promise<CompleteUploadRecordResult> {
-    return this.#database.transaction(async (sql) => {
+    record = structuredClone(record);
+    if (record.catalogEvidence !== undefined) {
+      if (this.#catalogCommit === undefined) throw new Error("Catalog upload coordinator is unavailable");
+      return this.#catalogCommit.commitUpload(record,(sql,context) => this.#commitUpload(sql,record,context));
+    }
+    return this.#accountingTransaction(sql => this.#commitUpload(sql,record));
+  }
+
+  async #commitUpload(sql: CatalogCommitSql, record: CommitUploadRecord, context?: CatalogCommitContext): Promise<CompleteUploadRecordResult> {
+      const publication = await this.#lockUploadPublication(sql,record,context !== undefined);
+      if(publication.replay !== undefined)return publication.replay;
       await sql`
         INSERT INTO resources (
           id, type, parent_id, name, storage_path, mime_type, size_bytes, sha256, status
@@ -430,7 +635,7 @@ export class PostgresFileRepository implements FileRepository {
           ${record.sizeBytes}, ${record.mimeType}, 'initial')
       `;
       await sql`UPDATE resources SET current_version_id = ${record.versionId}, updated_at = now() WHERE id = ${record.resourceId}`;
-      await this.#adjustAncestorSizes(sql, record.parentId, record.sizeBytes);
+      await this.#adjustAncestorSizes(sql, record.parentId, record.sizeBytes,context?.accountingAncestorIds);
       const uploadRows = await sql<UploadRow[]>`
         UPDATE upload_sessions
         SET status = 'active', resource_id = ${record.resourceId}, actual_sha256 = ${record.sha256}, updated_at = now()
@@ -444,12 +649,15 @@ export class PostgresFileRepository implements FileRepository {
       `;
       const committedResource = await this.#resourceQuery(sql, record.resourceId);
       if (uploadRows[0] === undefined || committedResource === undefined) throw new Error("Upload commit did not return state");
-      return { upload: upload(uploadRows[0]), resource: committedResource };
-    });
+      await this.#recordUploadPublication(sql,record,publication.intent);
+      const completedUpload = await this.#uploadQuery(sql,record.uploadId);
+      if(completedUpload === undefined)throw new Error("Upload publication did not return state");
+      return { upload: completedUpload, resource: committedResource,
+        ...(completedUpload.publicationReceipt === undefined ? {} : {publicationReceipt:completedUpload.publicationReceipt}) };
   }
 
   adoptExistingFile(record: AdoptExistingFileRecord): Promise<Resource> {
-    return this.#database.transaction(async (sql) => {
+    return this.#accountingTransaction(async (sql) => {
       const existingRows = await sql<ResourceRow[]>`SELECT * FROM resources WHERE storage_path = ${record.storagePath} LIMIT 1 FOR UPDATE`;
       const existing = existingRows[0];
       if (existing !== undefined) {
@@ -481,7 +689,7 @@ export class PostgresFileRepository implements FileRepository {
   }
 
   removeAdoptedFile(storagePath: string, expectedSha256: string): Promise<Resource | undefined> {
-    return this.#database.transaction(async (sql) => {
+    return this.#accountingTransaction(async (sql) => {
       const rows = await sql<ResourceRow[]>`SELECT * FROM resources WHERE storage_path = ${storagePath} LIMIT 1 FOR UPDATE`;
       const selected = rows[0];
       if (selected === undefined) return undefined;
@@ -499,15 +707,20 @@ export class PostgresFileRepository implements FileRepository {
   }
 
   commitOverwrite(record: CommitOverwriteRecord): Promise<CompleteUploadRecordResult> {
-    return this.#database.transaction(async (sql) => {
+    record = structuredClone(record);
+    if (record.catalogEvidence !== undefined) {
+      if (this.#catalogCommit === undefined) throw new Error("Catalog upload coordinator is unavailable");
+      return this.#catalogCommit.commitUpload(record,(sql,context) => this.#commitOverwrite(sql,record,context));
+    }
+    return this.#accountingTransaction(sql => this.#commitOverwrite(sql,record));
+  }
+
+  async #commitOverwrite(sql: CatalogCommitSql, record: CommitOverwriteRecord, context?: CatalogCommitContext): Promise<CompleteUploadRecordResult> {
+      const publication = await this.#lockUploadPublication(sql,record,context !== undefined);
+      if(publication.replay !== undefined)return publication.replay;
       const existing = await this.#resourceQuery(sql, record.resourceId);
       if (existing === undefined || existing.parentId === undefined || existing.type !== "file") throw new Error("Overwrite resource was not found");
-      await sql`
-        UPDATE file_versions
-        SET storage_path = ${record.previousVersionArchivePath}, archived_at = now(),
-          purge_after = ${record.previousVersionPurgeAfter ?? null}
-        WHERE id = ${record.previousVersionId} AND resource_id = ${record.resourceId}
-      `;
+      await this.#archivePreviousVersion(sql, record, existing.retentionClass ?? "general");
       await sql`
         INSERT INTO file_versions (id, resource_id, storage_path, sha256, size_bytes, mime_type, reason)
         VALUES (${record.versionId}, ${record.resourceId}, ${record.storagePath}, ${record.sha256},
@@ -533,9 +746,12 @@ export class PostgresFileRepository implements FileRepository {
       const resourceRow = resourceRows[0];
       const uploadRow = uploadRows[0];
       if (resourceRow === undefined || uploadRow === undefined) throw new Error("Overwrite commit did not return state");
-      await this.#adjustAncestorSizes(sql, existing.parentId, record.sizeBytes - existing.sizeBytes);
-      return { resource: resource(resourceRow), upload: upload(uploadRow) };
-    });
+      await this.#adjustAncestorSizes(sql, existing.parentId, record.sizeBytes - existing.sizeBytes,context?.accountingAncestorIds);
+      await this.#recordUploadPublication(sql,record,publication.intent);
+      const completedUpload = await this.#uploadQuery(sql,record.uploadId);
+      if(completedUpload === undefined)throw new Error("Upload publication did not return state");
+      return { resource: resource(resourceRow), upload: completedUpload,
+        ...(completedUpload.publicationReceipt === undefined ? {} : {publicationReceipt:completedUpload.publicationReceipt}) };
   }
 
   getVersion(resourceId: string, versionId: string): Promise<FileVersion | undefined> {
@@ -566,9 +782,22 @@ export class PostgresFileRepository implements FileRepository {
     });
   }
 
-  expireVersion(resourceId: string, versionId: string): Promise<void> {
-    return this.#database.withSql(async sql => {
-      await sql`UPDATE file_versions SET state='expired' WHERE resource_id=${resourceId} AND id=${versionId} AND id <> (SELECT current_version_id FROM resources WHERE id=${resourceId})`;
+  expireVersion(resourceId: string, selected: Pick<FileVersion, "id" | "storagePath" | "sizeBytes" | "sha256">): Promise<boolean> {
+    return this.#database.transaction(async sql => {
+      const resources = await sql<ResourceRow[]>`SELECT * FROM resources WHERE id=${resourceId} FOR UPDATE`;
+      const current = resources[0];
+      if (current === undefined || current.type !== "file" || current.status !== "active"
+        || current.current_version_id === selected.id || !VERSION_RETENTION[current.retention_class].automaticPurge) return false;
+      // The pin trigger takes FOR SHARE on this same row. Check pins in a new
+      // statement after obtaining the lock, including any pin that just committed.
+      const rows = await sql<VersionRow[]>`SELECT * FROM file_versions WHERE resource_id=${resourceId} AND id=${selected.id} FOR UPDATE`;
+      const candidate = rows[0];
+      if (candidate === undefined || candidate.storage_path !== selected.storagePath || candidate.sha256 !== selected.sha256
+        || Number(candidate.size_bytes) !== selected.sizeBytes || !["active", "expired"].includes(candidate.state)) return false;
+      const pins = await sql<{ pinned: boolean }[]>`SELECT EXISTS(SELECT 1 FROM laboratory_assets WHERE pinned_version_id=${selected.id}) AS pinned`;
+      if (pins[0]?.pinned !== false) return false;
+      await sql`UPDATE file_versions SET state='expired' WHERE resource_id=${resourceId} AND id=${selected.id} AND state='active'`;
+      return true;
     });
   }
 
@@ -645,7 +874,7 @@ export class PostgresFileRepository implements FileRepository {
     readonly oldPath: string;
     readonly newPath: string;
   }): Promise<Resource> {
-    return this.#database.transaction(async (sql) => {
+    return this.#accountingTransaction(async (sql) => {
       const original = await this.#resourceQuery(sql, record.resourceId);
       if (original === undefined || original.parentId === undefined) throw new Error("Moved resource was not found");
       await this.#rewriteCurrentVersionPaths(sql, record.oldPath, record.newPath);
@@ -672,7 +901,7 @@ export class PostgresFileRepository implements FileRepository {
     readonly rootResourceId: string;
     readonly resources: readonly CopiedResourceRecord[];
   }): Promise<Resource> {
-    return this.#database.transaction(async (sql) => {
+    return this.#accountingTransaction(async (sql) => {
       for (const item of record.resources) {
         await sql`
           INSERT INTO resources (id, type, parent_id, name, storage_path, mime_type, size_bytes, sha256, status)
@@ -711,7 +940,7 @@ export class PostgresFileRepository implements FileRepository {
     readonly trashPath: string;
     readonly purgeAfter: Date;
   }): Promise<Resource> {
-    return this.#database.transaction(async (sql) => {
+    return this.#accountingTransaction(async (sql) => {
       const original = await this.#resourceQuery(sql, record.resourceId);
       if (original === undefined || original.parentId === undefined) throw new Error("Trash resource was not found");
       await this.#rewriteCurrentVersionPaths(sql, record.oldPath, record.trashPath);
@@ -741,7 +970,7 @@ export class PostgresFileRepository implements FileRepository {
     readonly parentId: string;
     readonly name: string;
   }): Promise<Resource> {
-    return this.#database.transaction(async (sql) => {
+    return this.#accountingTransaction(async (sql) => {
       const original = await this.#resourceQuery(sql, record.resourceId);
       if (original === undefined) throw new Error("Restore resource was not found");
       await this.#rewriteCurrentVersionPaths(sql, record.oldPath, record.restoredPath);
@@ -764,7 +993,7 @@ export class PostgresFileRepository implements FileRepository {
   }
 
   purgeTrashTree(record: { readonly operationId: string; readonly resourceId: string }): Promise<Resource> {
-    return this.#database.transaction(async (sql) => {
+    return this.#accountingTransaction(async (sql) => {
       const existing = await this.#resourceQuery(sql, record.resourceId);
       if (existing === undefined || existing.status !== "trashed" || existing.trashedFromParentId === undefined) {
         throw new Error("Trash resource was not found");
@@ -791,14 +1020,10 @@ export class PostgresFileRepository implements FileRepository {
   }
 
   commitVersionRestore(record: CommitVersionRestoreRecord): Promise<Resource> {
-    return this.#database.transaction(async (sql) => {
+    return this.#accountingTransaction(async (sql) => {
       const existing = await this.#resourceQuery(sql, record.resourceId);
       if (existing === undefined || existing.parentId === undefined || existing.type !== "file") throw new Error("Version-restored resource was not found");
-      await sql`
-        UPDATE file_versions SET storage_path = ${record.previousVersionArchivePath},
-          archived_at = now(), purge_after = ${record.previousVersionPurgeAfter ?? null}
-        WHERE id = ${record.previousVersionId} AND resource_id = ${record.resourceId}
-      `;
+      await this.#archivePreviousVersion(sql, record, existing.retentionClass ?? "general");
       await sql`
         INSERT INTO file_versions (id, resource_id, storage_path, sha256, size_bytes, mime_type, reason)
         VALUES (${record.newVersionId}, ${record.resourceId}, ${record.storagePath}, ${record.sha256},
@@ -815,6 +1040,25 @@ export class PostgresFileRepository implements FileRepository {
       if (row === undefined) throw new Error("Version-restored resource was not found");
       return resource(row);
     });
+  }
+
+  async #archivePreviousVersion(
+    sql: CatalogCommitSql,
+    record: Pick<CommitOverwriteRecord, "resourceId" | "previousVersionId" | "previousVersionArchivePath">,
+    retentionClass: RetentionClass,
+  ): Promise<void> {
+    const policy = VERSION_RETENTION[retentionClass];
+    const minimumAgeMs = policy.automaticPurge ? policy.minimumAgeMs : null;
+    // One DB instant after publication locks anchors both fields. An app clock
+    // offset must never shorten the archived version's minimum retention age.
+    await sql`
+      WITH archive_clock AS MATERIALIZED (SELECT clock_timestamp() AS archived_at)
+      UPDATE file_versions AS previous
+      SET storage_path = ${record.previousVersionArchivePath}, archived_at = archive_clock.archived_at,
+        purge_after = archive_clock.archived_at + ${minimumAgeMs}::bigint * interval '1 millisecond'
+      FROM archive_clock
+      WHERE previous.id = ${record.previousVersionId} AND previous.resource_id = ${record.resourceId}
+    `;
   }
 
   async #rewriteCurrentVersionPaths(sql: TransactionSql, oldPath: string, newPath: string): Promise<void> {
@@ -843,21 +1087,55 @@ export class PostgresFileRepository implements FileRepository {
     `;
   }
 
-  async #adjustAncestorSizes(sql: TransactionSql, folderId: string, deltaBytes: number): Promise<void> {
-    await sql`
+  #accountingTransaction<T>(action: (sql: TransactionSql) => Promise<T>): Promise<T> {
+    return this.#database.transaction(async sql => {
+      // All ordinary topology/accounting writers pin the canonical common
+      // ancestor BEFORE reading membership or modifying any descendant row.
+      // Otherwise a move could change a discovered chain while its locks wait,
+      // or hold a child row while the publisher holding its parent waits on it.
+      // This is the root row every such transaction already increments, not a
+      // new physical/network admission limit. No filesystem I/O runs here.
+      // Qualified CJ commits use their existing clock/ancestor lock protocol.
+      await sql`SELECT id FROM resources WHERE id=${ROOT_RESOURCE_ID} FOR NO KEY UPDATE`;
+      return action(sql);
+    });
+  }
+
+  async #adjustAncestorSizes(sql: CatalogCommitSql, folderId: string, deltaBytes: number, lockedAncestorIds?: readonly string[]): Promise<void> {
+    if (lockedAncestorIds !== undefined) {
+      if (!lockedAncestorIds.includes(folderId) || lockedAncestorIds.length > 131) throw new Error("Catalog accounting ancestor witness is invalid");
+      await sql`UPDATE resources SET size_bytes=size_bytes+${deltaBytes},updated_at=now() WHERE id=ANY(${lockedAncestorIds}::uuid[])`;
+      return;
+    }
+    const ids = await this.#lockAccountingAncestors(sql, [folderId]);
+    await sql`UPDATE resources SET size_bytes=size_bytes+${deltaBytes},updated_at=now() WHERE id=ANY(${ids}::uuid[])`;
+  }
+
+  async #lockAccountingAncestors(sql: CatalogCommitSql, folderIds: readonly string[]): Promise<string[]> {
+    // Discover membership separately from locking/updating the target rows.
+    // Recursive UPDATE membership can be re-evaluated by EPQ after a wait;
+    // its executor order also differs between branch shapes. Neither is a
+    // suitable lock order for concurrent ancestor accounting.
+    const chain = await sql<{id: string; cycle: boolean}[]>`
       WITH RECURSIVE ancestors AS (
-        SELECT id, parent_id
+        SELECT id, parent_id, ARRAY[id] AS visited, false AS cycle
         FROM resources
-        WHERE id = ${folderId} AND type = 'folder' AND status = 'active'
+        WHERE id = ANY(${folderIds}::uuid[]) AND type = 'folder' AND status = 'active'
         UNION ALL
-        SELECT parent.id, parent.parent_id
+        SELECT parent.id, parent.parent_id, child.visited || parent.id, parent.id = ANY(child.visited)
         FROM resources AS parent
         INNER JOIN ancestors AS child ON parent.id = child.parent_id
-        WHERE parent.type = 'folder' AND parent.status = 'active'
+        WHERE parent.type = 'folder' AND parent.status = 'active' AND NOT child.cycle
       )
-      UPDATE resources
-      SET size_bytes = size_bytes + ${deltaBytes}, updated_at = now()
-      WHERE id IN (SELECT id FROM ancestors)
+      SELECT DISTINCT id, cycle FROM ancestors
     `;
+    if (chain.some(row => row.cycle)) throw new Error("Catalog accounting ancestry contains a cycle");
+    const ids = [...new Set(chain.map(row => row.id))].sort();
+    // NO KEY UPDATE is compatible with the FK key-share locks taken when
+    // another publication inserts a child. FOR UPDATE would cause an upgrade
+    // deadlock even with sorted ancestors. The following statement receives
+    // a fresh READ COMMITTED snapshot and increments the locked current rows.
+    await sql`SELECT id FROM resources WHERE id=ANY(${ids}::uuid[]) ORDER BY id FOR NO KEY UPDATE`;
+    return ids;
   }
 }

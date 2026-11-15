@@ -15,6 +15,18 @@ function locationBody(pattern) {
   return match[1];
 }
 
+test("guarded sync reaches API without buffering or mutation replay", () => {
+  const sync = locationBody(/location \^~ \/sync\/v1\/ \{([\s\S]*?)\n    \}/);
+  assert.match(sync, /proxy_pass http:\/\/saturn_api;/);
+  for (const directive of ["proxy_request_buffering off", "proxy_buffering off", "proxy_cache off",
+    "client_max_body_size 40m", "client_body_timeout 60s", "proxy_read_timeout 60s", "proxy_send_timeout 60s"])
+    assert.ok(sync.includes(`${directive};`), directive);
+  assert.match(config, /^\s*proxy_next_upstream off;/m);
+  assert.match(config, /^\s*proxy_intercept_errors off;/m);
+  assert.doesNotMatch(config, /proxy_hide_header\s+(?:Retry-After|ETag|Upload-Offset)/i);
+  assert.doesNotMatch(config, /proxy_set_header\s+(?:Authorization|If-Match|If-None-Match|Upload-Offset)\s+""/i);
+});
+
 test("owner UI and API use the public-authenticated ingress profile", () => {
   const ownerApi = locationBody(/location \/api\/ \{([\s\S]*?)\n    \}/);
   const ownerUi = locationBody(/location \/ \{([\s\S]*?)\n    \}/);

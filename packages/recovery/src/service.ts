@@ -7,6 +7,7 @@ import { ensureStorageDirectory } from "@saturn/storage";
 import { v7 as uuidv7 } from "uuid";
 import { BackupArchiveValidator, ManifestedZipBackupWriter } from "./archive.js";
 import { RecoveryCommitUncertainError } from "./types.js";
+import { assertUnregisteredRecovery, coherenceSchema } from "./consistent-snapshot.js";
 import type { PostgresRecoveryRepository } from "./repository.js";
 import type {
   BackupMember,
@@ -70,6 +71,7 @@ export class SaturnBackupService {
   readonly #validator: BackupArchiveValidator;
   readonly #repository: PostgresRecoveryRepository | undefined;
   readonly #storage: StorageAdapter | undefined;
+  readonly #metadataBudget: { readonly totalBytes:number;readonly memberBytes:number };
 
   constructor(input: {
     readonly spoolRoot: string;
@@ -87,6 +89,7 @@ export class SaturnBackupService {
     this.#validator = new BackupArchiveValidator(input.limits);
     this.#repository = input.repository;
     this.#storage = input.storage;
+    this.#metadataBudget = {totalBytes:input.limits.maxExtractedBytes,memberBytes:input.limits.maxMemberBytes};
   }
 
   async createBackup(input: BackupRunInput): Promise<CreatedBackup> {
@@ -99,8 +102,6 @@ export class SaturnBackupService {
     try {
       const members: BackupMember[] = [];
       const databaseDumpPath = path.join(runDirectory, "database.dump");
-      await this.#database.createDump(databaseDumpPath);
-      members.push({ path: "database/database.dump", sourcePath: databaseDumpPath, mediaType: "application/vnd.postgresql.custom-dump" });
 
       const configPath = path.join(runDirectory, "public-config.json");
       await writeJson(configPath, input.publicConfiguration);
@@ -119,14 +120,22 @@ export class SaturnBackupService {
         await copyPrivate(path.join(input.migrationsDirectory, name), destination);
         members.push({ path: `migrations/${name}`, sourcePath: destination, mediaType: "application/sql" });
       }
-      members.push(...await this.#metadata.exportTo(path.join(runDirectory, "metadata")));
-
       if (input.encryptedRecoveryBundlePath !== undefined) {
         await assertAgeBundle(input.encryptedRecoveryBundlePath);
         const encryptedPath = path.join(runDirectory, "recovery.age");
         await copyPrivate(input.encryptedRecoveryBundlePath, encryptedPath);
         members.push({ path: "secrets/recovery.age", sourcePath: encryptedPath, mediaType: "application/age-encryption" });
       }
+
+      const staticBytes = (await Promise.all(members.map(member => fs.stat(member.sourcePath)))).reduce((sum,entry)=>sum+entry.size,0);
+      const remainingBytes = this.#metadataBudget.totalBytes-staticBytes;
+      if(remainingBytes<1)throw new Error('Backup static members exceed the configured extracted byte budget');
+      const coherentMembers = this.#database.createCoherentBackup === undefined ? undefined
+        : await this.#database.createCoherentBackup(databaseDumpPath, path.join(runDirectory, "metadata"), this.#metadata, undefined,
+          {...this.#metadataBudget,totalBytes:remainingBytes});
+      if (coherentMembers === undefined) await this.#database.createDump(databaseDumpPath);
+      members.push({ path: "database/database.dump", sourcePath: databaseDumpPath, mediaType: "application/vnd.postgresql.custom-dump" });
+      members.push(...coherentMembers ?? await this.#metadata.exportTo(path.join(runDirectory, "metadata")));
 
       await this.#repository?.setBackupValidating(backupId);
       const result = await this.#writer.create({
@@ -198,6 +207,15 @@ export class SaturnBackupService {
     try {
       const validated = await this.#validator.validate(path.resolve(input.archivePath), extractionDirectory);
       const dumpPath = path.join(extractionDirectory, "database", "database.dump");
+      if (validated.manifest.members.some(member => member.path === "metadata/coherence.json")) {
+        const coherencePath = path.join(extractionDirectory, "metadata", "coherence.json");
+        if ((await fs.stat(coherencePath)).size > 65_536) throw new Error("Backup coherence manifest exceeds the size limit");
+        const coherence = coherenceSchema.parse(JSON.parse(await fs.readFile(coherencePath, "utf8")) as unknown);
+        if (coherence.databaseDumpSha256 !== validated.manifest.members.find(member => member.path === "database/database.dump")?.sha256) {
+          throw new Error("Backup coherence manifest does not match its database dump");
+        }
+        assertUnregisteredRecovery(coherence.journal);
+      }
       if (input.configuration !== undefined) {
         const publicPath = path.join(extractionDirectory, "config", "public.json");
         if ((await fs.stat(publicPath)).size > 65_536) throw new Error("Recovered configuration exceeds the size limit");
@@ -218,6 +236,10 @@ export class SaturnBackupService {
         try {
           if (input.mode === "replace" && this.#database.beginReplacement !== undefined) {
             await this.#database.beginReplacement();
+            preserved = true;
+          }
+          if (input.mode === "clean" && this.#database.beginCleanRestore !== undefined) {
+            await this.#database.beginCleanRestore();
             preserved = true;
           }
           await this.#database.restoreDump(dumpPath, input.mode);

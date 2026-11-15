@@ -1,8 +1,17 @@
 import type { Readable } from "node:stream";
 import type { Resource, SecurityClassification } from "@saturn/file-core";
+import type { PostgresPackageLifecycle } from "./package-lifecycle.js";
 
 export type ShareMode = "view" | "download" | "browse" | "download_folder";
 export type ShareState = "active" | "revoked" | "expired" | "exhausted";
+export interface ShareDownloadRange { readonly offset: number; readonly length?: number }
+export type ShareRangeSelection = ShareDownloadRange | ((resource: Resource) => ShareDownloadRange);
+export interface ShareDownloadClaimInput {
+  readonly id: string;
+  readonly resourceId: string;
+  readonly kind: "content" | "package";
+}
+export interface SharePackageEntry { readonly resource: Resource; readonly path: string }
 
 export interface ShareRecord {
   readonly id: string;
@@ -54,6 +63,7 @@ export interface ShareSession {
 }
 
 export interface SharePackage {
+  readonly generationId?: string;
   readonly sourceFingerprint?: string;
   readonly id: string;
   readonly shareId: string;
@@ -85,6 +95,7 @@ export interface ShareOptions {
 }
 
 export interface ShareRepository {
+  readonly packageLifecycle?: Pick<PostgresPackageLifecycle, "begin" | "renewWriter" | "confirmWriterClosed" | "publish" | "fail" | "acquireReader" | "renewReader" | "releaseReader" | "claimCleanup" | "completeCleanup">;
   claimPendingPackage?(now: Date): Promise<SharePackage | undefined>;
   createShare(input: Omit<ShareRecord, "downloadCount" | "state" | "updatedAt">): Promise<ShareRecord>;
   getShareById(id: string): Promise<ShareRecord | undefined>;
@@ -94,26 +105,30 @@ export interface ShareRepository {
   updateShare(id: string, input: { readonly mode?: ShareMode; readonly expiresAt?: Date | null; readonly passwordHash?: string | null; readonly maxDownloads?: number | null; readonly allowedCidr?: string | null }, now: Date): Promise<ShareRecord>;
   revokeShare(id: string, now: Date): Promise<ShareRecord>;
   sourceAllowed(sourceIp: string, cidr: string): Promise<boolean>;
-  isDescendant(rootId: string, candidateId: string): Promise<boolean>;
+  isDescendant(rootId: string, candidateId: string, ceiling?: ShareRecord["classificationCeiling"]): Promise<boolean>;
+  /** One current, bounded database snapshot; refuses inaccessible roots and overflow. */
+  readPackageTree?(rootId: string, ceiling: ShareRecord["classificationCeiling"], maxEntries: number): Promise<readonly SharePackageEntry[]>;
   createSession(input: Omit<ShareSession, "state" | "downloadClaimed" | "lastSeenAt">): Promise<ShareSession>;
   touchSession(input: { readonly shareId: string; readonly tokenHash: string; readonly sourceIpHash: string; readonly userAgentHash: string; readonly now: Date }): Promise<ShareSession | undefined>;
-  claimDownload(shareId: string, sessionId: string, now: Date): Promise<{ readonly share: ShareRecord; readonly session: ShareSession }>;
-  validateActive(shareId: string, now: Date): Promise<boolean>;
+  claimDownload(shareId: string, sessionId: string, now: Date, transfer?: ShareDownloadClaimInput): Promise<{ readonly share: ShareRecord; readonly session: ShareSession }>;
+  cleanupExpiredDownloadClaims?(now: Date, limit: number): Promise<number>;
+  validateActive(shareId: string, now: Date, sessionId?: string): Promise<boolean>;
   beginPasswordAttempt(input: { readonly sourceIpHash: string; readonly since: Date; readonly limit: number; readonly occurredAt: Date }): Promise<string | undefined>;
   finishPasswordAttempt(sequence: string, outcome: "success" | "failure", occurredAt: Date): Promise<void>;
   writeAccessEvent(input: { readonly id: string; readonly shareId?: string; readonly sourceIpHash: string; readonly action: "metadata" | "unlock" | "browse" | "thumbnail" | "content" | "package_create" | "package_content"; readonly outcome: "success" | "denied" | "failure"; readonly statusCode: number; readonly rangeStart?: number; readonly rangeLength?: number; readonly occurredAt: Date; readonly details?: Readonly<Record<string, unknown>> }): Promise<void>;
   createPackage(input: Omit<SharePackage, "state" | "fileCount" | "sizeBytes">): Promise<{ readonly value: SharePackage; readonly created: boolean }>;
   getCurrentPackage(shareId: string): Promise<SharePackage | undefined>;
   setPackageReady(id: string, input: { readonly fileCount: number; readonly sizeBytes: number; readonly sha256: string; readonly readyAt: Date; readonly sourceFingerprint?: string }): Promise<SharePackage>;
-  setPackageFailed(id: string, errorCode: string): Promise<void>;
+  setPackageFailed(id: string, errorCode: string, expectedGenerationId?: string): Promise<void>;
   claimExpiredPackages(now: Date, limit: number): Promise<readonly SharePackage[]>;
   markPackageExpired(id: string): Promise<void>;
+  deleteExpiredPackage?(id: string): Promise<void>;
 }
 
 export interface ShareFileGateway {
   getResource(id: string): Promise<Resource>;
   listChildren(parentId: string, offset?: number, limit?: number): Promise<readonly Resource[]>;
-  openDownload(id: string, offset?: number, length?: number): Promise<{ readonly resource: Resource; readonly stream: Readable }>;
+  openDownload(id: string, offset?: number | ((resource: Resource) => ShareDownloadRange), length?: number): Promise<{ readonly resource: Resource; readonly stream: Readable }>;
   setSecurityClassification(id: string, classification: SecurityClassification): Promise<Resource>;
 }
 

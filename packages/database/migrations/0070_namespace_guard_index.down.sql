@@ -1,0 +1,1 @@
+DROP INDEX operation_pending_namespace_guard;

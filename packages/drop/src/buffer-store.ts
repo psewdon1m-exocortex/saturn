@@ -1,7 +1,10 @@
 import { createHash } from "node:crypto";
-import { createReadStream } from "node:fs";
-import { mkdir, open, rm, statfs } from "node:fs/promises";
+import { constants, createReadStream } from "node:fs";
+import { lstat, mkdir, open, rm, statfs } from "node:fs/promises";
 import path from "node:path";
+// Node declarations expose a number, but Windows omits this POSIX flag.
+const optionalNoFollow: unknown = Reflect.get(constants, "O_NOFOLLOW");
+const noFollowFlag = typeof optionalNoFollow === "number" ? optionalNoFollow : 0;
 import type { Readable } from "node:stream";
 
 export interface DropBufferStoreOptions {
@@ -62,6 +65,24 @@ export class DropBufferStore {
     await this.initialize();
     const handle = await open(this.#absolute(relativePath), "wx", 0o600);
     try { await handle.sync(); } finally { await handle.close(); }
+    await this.#syncDirectory();
+  }
+
+  /** Resume ONLY a still-reserved upload under its cross-process upload lock.
+   * A lost fsync/metadata reply may leave the original empty file in place;
+   * never truncate it, follow a link, or accept unexpectedly received bytes. */
+  async createReserved(relativePath: string): Promise<void> {
+    try { await this.create(relativePath); return; }
+    catch (error) { if (!(error instanceof Error) || !("code" in error) || error.code !== "EEXIST") throw error; }
+    const absolute = this.#absolute(relativePath), before = await lstat(absolute);
+    if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1 || before.size !== 0) throw new Error("Reserved Drop buffer is not an empty private file; retain it for reconciliation");
+    const handle = await open(absolute, constants.O_RDWR | noFollowFlag);
+    try {
+      const opened = await handle.stat(), current = await lstat(absolute);
+      if (!opened.isFile() || opened.nlink !== 1 || opened.size !== 0 || current.isSymbolicLink()
+        || before.dev !== opened.dev || before.ino !== opened.ino || current.dev !== opened.dev || current.ino !== opened.ino) throw new Error("Reserved Drop buffer identity changed; retain it for reconciliation");
+      await handle.sync();
+    } finally { await handle.close(); }
     await this.#syncDirectory();
   }
 

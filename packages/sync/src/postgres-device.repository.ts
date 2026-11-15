@@ -68,7 +68,17 @@ export class PostgresDeviceRepository implements DeviceRepository {
     });
   }
 
-  authenticate(tokenHash: string, now: Date): Promise<DeviceRecord | undefined> {
+  async authenticate(tokenHash: string, now: Date): Promise<DeviceRecord | undefined> {
+    // Read current authority on every request. Only the activity timestamp is
+    // sampled to a minute; caching a token or its rights would delay revocation.
+    // Avoiding a tuple rewrite also avoids contention with publication checks.
+    const current = await this.database.withSql(async sql =>
+      (await sql<DeviceRow[]>`SELECT * FROM devices WHERE token_hash = ${tokenHash}`)[0]);
+    if (!current || current.state !== 'active') return undefined;
+    if ((current.expires_at === null || current.expires_at > now)
+      && current.last_used_at !== null && now.getTime() - current.last_used_at.getTime() < 60_000) return device(current);
+    // An expiry or due activity write must still recheck authority after any
+    // row-lock wait. Never return the earlier SELECT if this write is refused.
     return this.database.transaction(async (sql) => {
       await sql`UPDATE devices SET state = 'expired', updated_at = ${now} WHERE token_hash = ${tokenHash} AND state = 'active' AND expires_at IS NOT NULL AND expires_at <= ${now}`;
       const rows = await sql<DeviceRow[]>`

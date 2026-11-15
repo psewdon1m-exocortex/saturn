@@ -1,8 +1,11 @@
 export * from "./types.js";
+export * from "./storage-verifier.client.js";
+export * from "./local-storage-verifier.js";
 export * from "./ensure-directory.js";
 export * from "./paths.js";
 export * from "./layout.js";
 export * from "./local-storage.adapter.js";
+export * from "./local-custody.js";
 export * from "./sftp-storage.adapter.js";
 export * from "./runtime-storage.manager.js";
 export { createStorageRecoveryParticipant } from "./recovery-configuration.js";

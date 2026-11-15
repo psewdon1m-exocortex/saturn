@@ -5,8 +5,23 @@ import type { AuditSink } from "@saturn/audit";
 import type { StorageAdapter } from "@saturn/storage";
 import { ensureStorageDirectory, joinStoragePath, normalizeStorageName, SATURN_BUSINESS_ROOT_DIRECTORIES, SATURN_LAYOUT_V2_ROOT_DIRECTORIES, SATURN_SYSTEM_DIRECTORIES } from "@saturn/storage";
 import type { CopiedResourceRecord, FileRepository, UploadLimits } from "./repository.js";
-import { archivedVersionPurgeAfter } from "./retention.js";
 import { detectContentType } from "./content-type.js";
+import { VERSION_RETENTION } from "./retention.js";
+import { validSyncMetadataIds, type ScopedSyncMetadata, type ScopedSyncMetadataRequest } from "./sync-metadata.js";
+import { uploadIntentHash, uploadPublicationIntentSchema, type UploadPublicationAuthorization } from "./upload-publication.js";
+import type { CatalogFolderLifecycle } from "./catalog-folder-commit.js";
+import type { CatalogMutationGuard } from "./catalog-guard-admission.js";
+import type { PostgresBrowserNamespaceCoordinator } from "./browser-upload-namespace-context.js";
+import type { CatalogFolderAuthority } from "./catalog-folder-authority.js";
+import type { SyncRootBinding } from "../../contracts/src/sync-protocol.js";
+import type {CatalogUploadPrepareInput} from "./catalog-upload-intent.js";
+import {CatalogUploadError,type CatalogUploadDatabaseCoordinator,type PreparedCatalogUpload} from "./catalog-upload-database.js";
+import {CatalogUploadTransferExecutor, type CatalogStorageVerify} from "./catalog-upload-transfer.js";
+import type {CatalogFolderV2DatabaseCoordinator} from "./catalog-folder-v2-database.js";
+import {CatalogFolderV2TransferExecutor} from "./catalog-folder-v2-transfer.js";
+import type {CatalogRootAdmission} from "./catalog-root-admission.js";
+import type {CatalogFolderRequestV2,CatalogFolderOutcomeV2} from "./catalog-folder-v2-intent.js";
+import { CatalogFolderError,validateCatalogFolderRequest,type CatalogFolderRequest,type CatalogFolderOutcome } from "./catalog-folder-intent.js";
 import {
   DROP_POINT_RESOURCE_ID,
   BACKUPS_RESOURCE_ID,
@@ -35,11 +50,28 @@ export interface FileServiceOptions {
   readonly uploadIncompleteTtlMs?: number;
   readonly trashRetentionMs?: number;
   readonly auditSink?: AuditSink;
+  /** Explicit inactive coordinator composition identity; not a backend fence. */
+  readonly catalogBackendIdentity?: string;
+  /** Explicit inactive A1 fixture composition only; no public route selects it. */
+  readonly catalogFolderCoordinator?: CatalogFolderLifecycle;
+  /** Inactive guarded fixture composition. Unsupported paths reject before any storage effect. */
+  readonly catalogMutationGuard?: CatalogMutationGuard;
+  /** Inactive explicit CJ04 fixed writer composition; never selected by a legacy route. */
+  readonly catalogUploadCoordinator?:CatalogUploadDatabaseCoordinator;
+  /** Explicit inactive modern topology-bound folder composition; legacy routes never select it. */
+  readonly catalogFolderV2Coordinator?:CatalogFolderV2DatabaseCoordinator;
+  /** Shared only by a trusted runtime's guarded writers; unchanged SQL remains authoritative. */
+  readonly catalogRootAdmission?:CatalogRootAdmission;
+  readonly catalogVerify?: CatalogStorageVerify;
+  /** Trusted runtime only, after SQL0110 and the matching backend/context hooks
+   * are qualified. Covers legacy folder creation and retains unknown outcomes. */
+  readonly browserNamespaceCoordinator?: PostgresBrowserNamespaceCoordinator;
 }
 
 export class UploadPreconditionError extends Error {
   constructor() { super("Upload precondition failed"); this.name = "UploadPreconditionError"; }
 }
+
 const CANONICAL_ROOT_RESOURCE_IDS = [
   DROP_POINT_RESOURCE_ID,
   LABORATORY_RESOURCE_ID,
@@ -113,16 +145,83 @@ export class FileService {
   readonly #trashRetentionMs: number;
   readonly #audit: AuditSink | undefined;
   readonly #activePurges = new Map<string, Promise<Resource>>();
+  readonly #catalogBackendIdentity: string | undefined;
+  readonly #catalogFolders: CatalogFolderLifecycle | undefined;
+  readonly #catalogMutationGuard: CatalogMutationGuard | undefined;
+  readonly #catalogUploads:CatalogUploadDatabaseCoordinator|undefined;
+  readonly #catalogUploadTransfer:CatalogUploadTransferExecutor|undefined;
+  readonly #catalogFolderV2Transfer:CatalogFolderV2TransferExecutor|undefined;
+  readonly #catalogRootAdmission:CatalogRootAdmission|undefined;
+  readonly #browserNamespace:PostgresBrowserNamespaceCoordinator|undefined;
+  #activeCatalogFolders=0;
 
   constructor(repository: FileRepository, storage: StorageAdapter, options: FileServiceOptions = {}) {
     this.#repository = repository;
     this.#storage = storage;
+    this.#catalogFolders=options.catalogFolderCoordinator;
+    this.#catalogMutationGuard=options.catalogMutationGuard;
+    this.#catalogUploads=options.catalogUploadCoordinator;
+    this.#catalogRootAdmission=options.catalogRootAdmission;
+    this.#browserNamespace=options.browserNamespaceCoordinator;
     this.#uploadMaxBytes = options.uploadMaxBytes ?? 20 * 1024 * 1024 * 1024;
     this.#uploadBufferMaxBytes = 110 * 1024 * 1024 * 1024;
     this.#uploadChunkMaxBytes = options.uploadChunkMaxBytes ?? 8 * 1024 * 1024;
     this.#uploadIncompleteTtlMs = options.uploadIncompleteTtlMs ?? 24 * 60 * 60 * 1_000;
     this.#trashRetentionMs = options.trashRetentionMs ?? 30 * 24 * 60 * 60 * 1_000;
     this.#audit = options.auditSink;
+    this.#catalogBackendIdentity = options.catalogBackendIdentity;
+    this.#catalogUploadTransfer=this.#catalogUploads?new CatalogUploadTransferExecutor(this.#catalogUploads,storage,this.#uploadMaxBytes,this.#catalogRootAdmission,options.catalogVerify):undefined;
+    this.#catalogFolderV2Transfer=options.catalogFolderV2Coordinator?new CatalogFolderV2TransferExecutor(options.catalogFolderV2Coordinator,repository,storage,this.#catalogRootAdmission):undefined;
+  }
+
+  async prepareCatalogUpload(input:CatalogUploadPrepareInput,proof:CatalogFolderAuthority,originalUploadId?:string):Promise<PreparedCatalogUpload>{
+    if(!this.#catalogUploads||input.backendIdentity!==this.#catalogBackendIdentity)throw new CatalogUploadError("binding_invalid");
+    const coordinator=this.#catalogUploads;
+    if(this.#catalogRootAdmission&&await coordinator.supportsPublicationGroups())return this.#catalogRootAdmission.runSqlBatch(input.intent.rootId,()=>coordinator.prepare(input,proof,originalUploadId));
+    return this.#catalogRootAdmission?this.#catalogRootAdmission.run(input.intent.rootId,()=>coordinator.prepare(input,proof,originalUploadId)):coordinator.prepare(input,proof,originalUploadId);
+  }
+  async inspectCatalogUpload(prepared:PreparedCatalogUpload,proof:CatalogFolderAuthority):Promise<PreparedCatalogUpload>{
+    if(!this.#catalogUploads)throw new CatalogUploadError("binding_invalid");return this.#catalogUploads.status(prepared,proof);
+  }
+  /** Called only after the small-batch parser has sealed a complete part. */
+  async prepareSmallCatalogUpload(input:CatalogUploadPrepareInput,proof:CatalogFolderAuthority,originalUploadId?:string):Promise<PreparedCatalogUpload>{
+    if(!this.#catalogUploads||input.backendIdentity!==this.#catalogBackendIdentity)throw new CatalogUploadError('binding_invalid');
+    if(!await this.supportsReplayableCatalogTransfers())return this.prepareCatalogUpload(input,proof,originalUploadId);
+    const coordinator=this.#catalogUploads,action=()=>coordinator.prepareSmall(input,proof,originalUploadId);
+    if(this.#catalogRootAdmission&&await coordinator.supportsPublicationGroups())return this.#catalogRootAdmission.runSqlBatch(input.intent.rootId,action);
+    return this.#catalogRootAdmission?this.#catalogRootAdmission.run(input.intent.rootId,action):action();
+  }
+  async appendCatalogUpload(prepared:PreparedCatalogUpload,proof:CatalogFolderAuthority,offset:string,bytes:Buffer):Promise<PreparedCatalogUpload>{
+    if(!this.#catalogUploadTransfer)throw new CatalogUploadError("binding_invalid");return this.#catalogUploadTransfer.append(prepared,proof,offset,bytes);
+  }
+  supportsReplayableCatalogTransfers():Promise<boolean>{return this.#catalogUploadTransfer?.supportsReplayableChunks()??Promise.resolve(false);}
+  async completeSmallCatalogUpload(prepared:PreparedCatalogUpload,proof:CatalogFolderAuthority,bytes:Buffer):Promise<PreparedCatalogUpload>{
+    if(!this.#catalogUploadTransfer)throw new CatalogUploadError('binding_invalid');return this.#catalogUploadTransfer.completeSmall(prepared,proof,bytes);
+  }
+  /** A sealed execution-job member only; callers must join completion before
+   * releasing the request lease. Ordinary upload handles cannot use this API. */
+  async materializeSmallExecutionJob(prepared:PreparedCatalogUpload,proof:CatalogFolderAuthority,bytes:Buffer):Promise<{readonly completion:Promise<PreparedCatalogUpload>}>{
+    if(!this.#catalogUploadTransfer)throw new CatalogUploadError('binding_invalid');return this.#catalogUploadTransfer.materializeJob(prepared,proof,bytes);
+  }
+  async prepareSmallExecutionJob(bytes:Uint8Array,binding:SyncRootBinding,proof:CatalogFolderAuthority,command:'prepare'|'status'|'data'|'execute'){
+    const coordinator=this.#catalogUploads;
+    if(!coordinator||!this.#catalogRootAdmission||!this.#catalogBackendIdentity)throw new CatalogUploadError('binding_invalid');
+    return this.#catalogRootAdmission.run(binding.root_id,()=>coordinator.prepareExecutionJob(bytes,binding,proof,command==='data'||command==='execute',command==='status',this.#catalogBackendIdentity,command==='execute'));
+  }
+  async completeCatalogUpload(prepared:PreparedCatalogUpload,proof:CatalogFolderAuthority):Promise<PreparedCatalogUpload>{
+    if(!this.#catalogUploadTransfer)throw new CatalogUploadError("binding_invalid");return this.#catalogUploadTransfer.complete(prepared,proof);
+  }
+  /** Before-publication cancellation keeps the original accepted identity. */
+  async cancelCatalogUpload(prepared:PreparedCatalogUpload,proof:CatalogFolderAuthority):Promise<PreparedCatalogUpload>{
+    if(!this.#catalogUploads)throw new CatalogUploadError("binding_invalid");
+    const coordinator=this.#catalogUploads,action=()=>coordinator.cancel(prepared,proof);
+    return this.#catalogRootAdmission?this.#catalogRootAdmission.run(prepared.input.intent.rootId,action):action();
+  }
+
+  /** Historical execution outcome, not a current namespace descriptor or client baseline. */
+  async ensureCatalogFolderV2(request:CatalogFolderRequestV2,proof:CatalogFolderAuthority,signal?:AbortSignal):Promise<CatalogFolderOutcomeV2>{
+    if(!this.#catalogFolderV2Transfer||!this.#catalogBackendIdentity)throw new CatalogFolderError("binding_invalid");
+    return this.#catalogFolderV2Transfer.ensure(request,proof,this.#catalogBackendIdentity,signal);
   }
 
   async initializeStorage(): Promise<void> {
@@ -147,6 +246,16 @@ export class FileService {
     return resource;
   }
 
+  get supportsSyncMetadataBatch(): boolean { return this.#repository.readScopedSyncMetadata !== undefined; }
+
+  async readScopedSyncMetadata(request: ScopedSyncMetadataRequest): Promise<ScopedSyncMetadata> {
+    if (!validSyncMetadataIds(request.nodeIds) || !validSyncMetadataIds([request.rootId, request.rootParentId])) {
+      throw new Error("Sync metadata IDs are invalid");
+    }
+    if (this.#repository.readScopedSyncMetadata === undefined) throw new Error("Sync metadata batch is not supported");
+    return this.#repository.readScopedSyncMetadata(request);
+  }
+
   async getUploadLimits(): Promise<UploadLimits> {
     const configured = await this.#repository.getUploadLimits();
     const limits = configured ?? { bufferMaxBytes: this.#uploadBufferMaxBytes, maximumFileBytes: this.#uploadMaxBytes };
@@ -164,6 +273,14 @@ export class FileService {
     const parent = await this.getResource(parentId);
     if (parent.type !== "folder" || parent.status !== "active") throw new Error("Parent folder is not active");
     return this.#repository.listChildren(parentId, offset, limit);
+  }
+
+  async findChildExact(parentId: string, name: string): Promise<Resource | undefined> {
+    const parent = await this.getResource(parentId);
+    if (parent.type !== "folder" || parent.status !== "active") throw new Error("Parent folder is not active");
+    const child = await this.#repository.getChild(parentId, name);
+    // The repository index folds case; legacy device paths require the exact stored name.
+    return child?.parentId === parentId && child.name === name && child.status === "active" ? child : undefined;
   }
 
   async resolveFolderPath(segments: readonly string[], rootId = ROOT_RESOURCE_ID): Promise<readonly Resource[]> {
@@ -203,6 +320,17 @@ export class FileService {
   }
 
   async createFolder(parentId: string, rawName: string, auditActor?: { readonly type: string; readonly id: string }): Promise<Resource> {
+    const namespace=this.#browserNamespace;
+    if(!namespace)return this.#createFolder(parentId,rawName,auditActor);
+    const name=normalizeStorageName(rawName);
+    this.#assertRootNameAvailable(parentId,name);
+    // Acquire before resolving the current parent. The permit remains held
+    // across physical mkdir and the repository's same-transaction catalog check.
+    return namespace.run({operationId:uuidv7(),kind:"create-folder",parentId,name},()=>this.#createFolder(parentId,name,auditActor));
+  }
+
+  async #createFolder(parentId: string, rawName: string, auditActor?: { readonly type: string; readonly id: string }): Promise<Resource> {
+    await this.#catalogMutationGuard?.assertOutside([parentId]);
     const parent = await this.getResource(parentId);
     if (parent.type !== "folder" || parent.status !== "active") throw new Error("Parent folder is not active");
     const name = normalizeStorageName(rawName);
@@ -210,13 +338,62 @@ export class FileService {
     if (await this.#repository.getChild(parentId, name)) throw new Error("A sibling with this name already exists");
     const storagePath = joinStoragePath(parent.storagePath, name);
     await this.#storage.mkdir(storagePath);
+    const resourceId=uuidv7();
     try {
-      const resource = await this.#repository.createFolder({ id: uuidv7(), parentId, name, storagePath });
+      const resource = await this.#repository.createFolder({ id: resourceId, parentId, name, storagePath });
       await this.#writeAudit("folder.created", `folder:${resource.id}`, resource.id, { parentId, name }, auditActor);
       return resource;
     } catch (error) {
-      await this.#storage.delete(storagePath).catch(() => undefined);
+      // Resolve a lost catalog ACK only by the exact newly allocated ID. SQL
+      // finish still joins its linked physical task and publication witness.
+      if(this.#browserNamespace){
+        const published=await this.#repository.getResource(resourceId).catch(()=>undefined);
+        if(published?.id===resourceId&&published.type==="folder"&&published.status==="active"&&published.parentId===parentId&&published.name===name&&published.storagePath===storagePath){
+          await this.#writeAudit("folder.created",`folder:${resourceId}`,resourceId,{parentId,name},auditActor);
+          return published;
+        }
+      }else await this.#storage.delete(storagePath).catch(() => undefined);
+      // An unresolved acknowledgement retains the original and its physical
+      // directory; no delete is safe merely because the reply was lost.
       throw error;
+    }
+  }
+
+  /** Internal A1 fixture path. The result is historical; it is not current CAS or a baseline. */
+  async ensureCatalogFolder(request:CatalogFolderRequest,authority:CatalogFolderAuthority,signal?:AbortSignal):Promise<CatalogFolderOutcome> {
+    validateCatalogFolderRequest(request);
+    return this.#catalogRootAdmission?this.#catalogRootAdmission.run(request.rootId,()=>this.#ensureCatalogFolder(request,authority,signal),signal):this.#ensureCatalogFolder(request,authority,signal);
+  }
+  async #ensureCatalogFolder(request:CatalogFolderRequest,authority:CatalogFolderAuthority,signal?:AbortSignal):Promise<CatalogFolderOutcome> {
+    const coordinator=this.#catalogFolders,backend=this.#catalogBackendIdentity;
+    if(!coordinator||!backend)throw new CatalogFolderError("binding_invalid");
+    if(signal?.aborted)throw new CatalogFolderError("cancelled");
+    // Covers physical I/O and lock wait, not just the short SQL transaction.
+    // Per FileService instance/process only; no API+worker/global fencing claim.
+    if(this.#activeCatalogFolders>=4)throw new CatalogFolderError("admission_full");
+    this.#activeCatalogFolders++;
+    const lockId=uuidv7();let locked=false;
+    try {
+      locked=await this.#acquireLocksWithin(lockId,[`catalog-folder:${request.operationId}`,`upload-target:${request.parentId}:${request.name.toLowerCase()}`,`resource:${request.parentId}`],MUTATION_LOCK_MS,2000);
+      if(!locked)throw new CatalogFolderError("admission_full");
+      const prepared=await coordinator.prepare(request,authority,backend,signal);
+      if(prepared.outcome)return prepared.outcome;
+      this.#assertRootNameAvailable(request.parentId,request.name);
+      await coordinator.beginPhysical(prepared,authority);
+      try {
+        if(signal?.aborted)throw new CatalogFolderError("cancelled");
+        // Exclusive mkdir: no ensure/stat adoption and no delete compensation.
+        await this.#storage.mkdir(prepared.storagePath);
+        return await coordinator.commit(prepared,authority,signal);
+      } catch(error) {
+        // Query the original accepted result before considering an uncertain SQL ACK.
+        const accepted=await coordinator.accepted(prepared,authority).catch(()=>undefined);
+        if(accepted)return accepted;
+        await coordinator.markUnknown(prepared).catch(()=>undefined);
+        throw new CatalogFolderError("reconciliation_required",{cause:error});
+      }
+    } finally {
+      try {if(locked)await this.#repository.releaseLocks(lockId);} finally {this.#activeCatalogFolders--;}
     }
   }
 
@@ -233,6 +410,7 @@ export class FileService {
     readonly mimeType: string;
     readonly auditActor?: { readonly type: string; readonly id: string };
   }): Promise<Resource> {
+    await this.#catalogMutationGuard?.assertOutside([input.rootId]);
     const root = await this.getResource(input.rootId);
     if (root.type !== "folder" || root.status !== "active") throw new Error("Catalog adoption root is not active");
     const sha256 = input.sha256.toLowerCase();
@@ -307,6 +485,7 @@ export class FileService {
     readonly sha256: string;
     readonly auditActor?: { readonly type: string; readonly id: string };
   }): Promise<void> {
+    await this.#catalogMutationGuard?.assertOutside([input.rootId]);
     const root = await this.getResource(input.rootId);
     const prefix = root.storagePath === "" ? "" : `${root.storagePath}/`;
     if (root.type !== "folder" || !input.storagePath.startsWith(prefix) || !/^[a-f0-9]{64}$/.test(input.sha256)) {
@@ -327,6 +506,7 @@ export class FileService {
   }
 
   async setSecurityClassification(resourceId: string, classification: SecurityClassification): Promise<Resource> {
+    await this.#catalogMutationGuard?.assertOutside([resourceId]);
     if (!["public", "internal", "confidential", "secret"].includes(classification)) throw new Error("Security classification is invalid");
     const current = await this.getResource(resourceId);
     if (current.status !== "active") throw new Error("Resource is not active");
@@ -342,11 +522,12 @@ export class FileService {
   }
 
   async createUpload(input: CreateUploadInput): Promise<UploadSession> {
+    await this.#catalogMutationGuard?.assertOutside([input.parentId??ROOT_RESOURCE_ID,...(input.overwriteResourceId===undefined?[]:[input.overwriteResourceId])]);
     validateIdempotencyKey(input.idempotencyKey);
+    const publicationIntent = input.publicationIntent === undefined ? undefined : uploadPublicationIntentSchema.parse(input.publicationIntent);
     const limits = await this.getUploadLimits();
-    if (!Number.isSafeInteger(input.expectedSize) || input.expectedSize < 0 || input.expectedSize > limits.maximumFileBytes) {
-      throw new Error("Upload size is invalid");
-    }
+    if (!Number.isSafeInteger(input.expectedSize) || input.expectedSize < 0) throw new Error("Upload size is invalid");
+    if (input.expectedSize > limits.maximumFileBytes) throw new Error("payload_too_large");
     const expectedSha256 = input.expectedSha256?.toLowerCase();
     if (expectedSha256 !== undefined && !/^[a-f0-9]{64}$/.test(expectedSha256)) throw new Error("Expected SHA-256 is invalid");
     let parentId = input.parentId ?? ROOT_RESOURCE_ID;
@@ -375,6 +556,10 @@ export class FileService {
         || (existing.auditActorId ?? "owner") !== (input.auditActor?.id ?? "owner")) {
         throw new Error("Idempotency key was already used for different upload parameters");
       }
+      if ((publicationIntent === undefined) !== (existing.publicationIntent === undefined)
+        || (publicationIntent !== undefined && uploadIntentHash(publicationIntent) !== existing.intentHash)) {
+        throw new Error("Idempotency key was already used for different upload publication intent");
+      }
       return existing;
     }
     if (overwrite === undefined) {
@@ -386,6 +571,13 @@ export class FileService {
       }
     }
     const id = uuidv7();
+    if (publicationIntent !== undefined && (publicationIntent.idempotencyKey !== input.idempotencyKey || publicationIntent.parentId !== parentId || publicationIntent.name !== filename
+      || publicationIntent.targetId !== (overwrite?.id ?? null) || publicationIntent.sizeBytes !== String(input.expectedSize)
+      || publicationIntent.sha256 !== expectedSha256 || publicationIntent.requireAbsent !== (input.requireAbsent ?? false)
+      || publicationIntent.expectedVersionId !== (input.expectedVersionId ?? null)
+      || input.auditActor?.type !== "device_token" || publicationIntent.deviceId !== input.auditActor.id)) {
+      throw new Error("Upload publication intent differs from upload parameters");
+    }
     const upload = await this.#repository.createUpload({
       id,
       idempotencyKey: input.idempotencyKey,
@@ -399,6 +591,7 @@ export class FileService {
       ...(input.expectedVersionId === undefined ? {} : { expectedVersionId: input.expectedVersionId }),
       ...(input.requireAbsent === undefined ? {} : { requireAbsent: input.requireAbsent }),
       ...(input.auditActor === undefined ? {} : { auditActorType: input.auditActor.type, auditActorId: input.auditActor.id }),
+      ...(publicationIntent === undefined ? {} : { publicationIntent }),
       expiresAt: new Date(Date.now() + this.#uploadIncompleteTtlMs),
     });
     await this.#writeAudit("upload.created", `upload:${input.idempotencyKey}`, undefined, {
@@ -458,6 +651,7 @@ export class FileService {
     }
     try {
       const upload = await this.getUpload(id);
+      await this.#catalogMutationGuard?.assertOutside([upload.parentId]);
       if (["active", "committing", "verifying"].includes(upload.status) || await this.#repository.hasUploadRecoveryJournal?.(id) || await this.#repository.isBufferedDeliveryUpload?.(id)) {
         throw new Error("Committed or recovering upload cannot be abandoned");
       }
@@ -486,6 +680,7 @@ export class FileService {
     }
     try {
       const upload = await this.getUpload(id);
+      await this.#catalogMutationGuard?.assertOutside([upload.parentId]);
       if (!["created", "uploading", "failed_retryable"].includes(upload.status)) throw new Error("Upload does not accept chunks in its current state");
       if (await this.#repository.hasUploadRecoveryJournal?.(id)) throw new Error("Upload requires recovery before accepting chunks");
       if (upload.expiresAt <= new Date() && !await this.#repository.isBufferedDeliveryUpload?.(id)) throw new Error("Upload session has expired");
@@ -521,12 +716,14 @@ export class FileService {
     }
   }
 
-  async completeUpload(id: string): Promise<CompleteUploadResult> {
+  async completeUpload(id: string, publicationAuthorization?:UploadPublicationAuthorization): Promise<CompleteUploadResult> {
     const preliminary = await this.getUpload(id);
     if (preliminary.status === "active" && preliminary.resourceId !== undefined) {
-      return { upload: preliminary, resource: await this.getResource(preliminary.resourceId) };
+      return { upload: preliminary, resource: await this.getResource(preliminary.resourceId),
+        ...(preliminary.publicationReceipt === undefined ? {} : { publicationReceipt: preliminary.publicationReceipt }) };
     }
     const lockId = uuidv7();
+    await this.#catalogMutationGuard?.assertOutside([preliminary.parentId]);
     const destinationLock = `upload-target:${preliminary.parentId}:${preliminary.filename.toLocaleLowerCase()}`;
     if (!(await this.#acquireLocksWithin(lockId, [`upload:${id}`, destinationLock], UPLOAD_LOCK_MS, 30_000))) {
       throw new Error("Upload is locked by another operation");
@@ -534,8 +731,10 @@ export class FileService {
     try {
       let upload = await this.getUpload(id);
       if (upload.status === "active" && upload.resourceId !== undefined) {
-        return { upload, resource: await this.getResource(upload.resourceId) };
+        return { upload, resource: await this.getResource(upload.resourceId),
+          ...(upload.publicationReceipt === undefined ? {} : { publicationReceipt: upload.publicationReceipt }) };
       }
+      const preparedCatalog = await this.#repository.prepareUploadCatalog?.(id,this.#catalogBackendIdentity,publicationAuthorization);
       const recovering = ["committing", "verifying"].includes(upload.status) || await this.#repository.hasUploadRecoveryJournal?.(id);
       if (await this.#repository.hasCommittingTarget?.(upload.parentId, upload.filename, id)) throw new Error("Destination has an interrupted upload requiring recovery");
       if (upload.status === "committing") {
@@ -618,14 +817,20 @@ export class FileService {
         try {
           await this.#storage.rename(upload.tempPath, upload.targetPath);
         } catch (error) {
-          await this.#storage.rename(archivePath, upload.targetPath).catch(() => undefined);
-          await this.#repository.setUploadState(id, "failed_retryable", { errorCode: "overwrite_storage_failed" });
+          try {
+            // A lost rename response may mean the replacement already moved.
+            // Verify both versions and return it to temp before restoring the
+            // original. Failed rollback must keep the durable recovery journal.
+            await this.#recoverInterruptedUpload({ ...upload, status: "committing", actualSha256: digest.sha256 }, lockId);
+          } catch {
+            await this.#repository.setUploadState(id, "committing", { errorCode: "reconciliation_required" });
+          }
           throw error;
         }
         try {
-          const previousVersionPurgeAfter = archivedVersionPurgeAfter(target.retentionClass ?? "general", new Date());
           const completed = await this.#repository.commitOverwrite({
             uploadId: upload.id,
+            ...(publicationAuthorization === undefined ? {} : {publicationAuthorization}),
             resourceId: target.id,
             versionId: uuidv7(),
             parentId: upload.parentId,
@@ -633,10 +838,10 @@ export class FileService {
             storagePath: upload.targetPath,
             sizeBytes: upload.expectedSize,
             sha256: digest.sha256,
+            ...(preparedCatalog === undefined ? {} : {catalogEvidence:{...preparedCatalog,verifiedSizeBytes:String(digest.bytes),verifiedSha256:digest.sha256}}),
             mimeType,
             previousVersionId: target.currentVersionId,
             previousVersionArchivePath: archivePath,
-            ...(previousVersionPurgeAfter === undefined ? {} : { previousVersionPurgeAfter }),
           });
           await this.#writeAudit("file.overwritten", `upload-complete:${upload.id}`, target.id, {
             previousVersionId: target.currentVersionId,
@@ -646,7 +851,8 @@ export class FileService {
           return completed;
         } catch (error) {
           const recorded = await this.#repository.getUpload(id);
-          if (recorded?.status === "active" && recorded.resourceId !== undefined) return { upload: recorded, resource: await this.getResource(recorded.resourceId) };
+          if (recorded?.status === "active" && recorded.resourceId !== undefined) return { upload: recorded, resource: await this.getResource(recorded.resourceId),
+            ...(recorded.publicationReceipt === undefined ? {} : { publicationReceipt: recorded.publicationReceipt }) };
           try {
             await this.#storage.rename(upload.targetPath, upload.tempPath);
             await this.#storage.rename(archivePath, upload.targetPath);
@@ -670,6 +876,7 @@ export class FileService {
       try {
         const completed = await this.#repository.commitUpload({
           uploadId: upload.id,
+          ...(publicationAuthorization === undefined ? {} : {publicationAuthorization}),
           resourceId: uuidv7(),
           versionId: uuidv7(),
           parentId: upload.parentId,
@@ -677,6 +884,7 @@ export class FileService {
           storagePath: upload.targetPath,
           sizeBytes: upload.expectedSize,
           sha256: digest.sha256,
+          ...(preparedCatalog === undefined ? {} : {catalogEvidence:{...preparedCatalog,verifiedSizeBytes:String(digest.bytes),verifiedSha256:digest.sha256}}),
           mimeType,
         });
         await this.#writeAudit("file.upload.completed", `upload-complete:${upload.id}`, completed.resource.id, {
@@ -687,7 +895,8 @@ export class FileService {
         return completed;
       } catch (error) {
         const recorded = await this.#repository.getUpload(id);
-        if (recorded?.status === "active" && recorded.resourceId !== undefined) return { upload: recorded, resource: await this.getResource(recorded.resourceId) };
+        if (recorded?.status === "active" && recorded.resourceId !== undefined) return { upload: recorded, resource: await this.getResource(recorded.resourceId),
+          ...(recorded.publicationReceipt === undefined ? {} : { publicationReceipt: recorded.publicationReceipt }) };
         try {
           await this.#storage.rename(upload.targetPath, upload.tempPath);
           await this.#repository.setUploadState(id, "failed_retryable", { actualSha256: digest.sha256, errorCode: "database_commit_failed" });
@@ -751,6 +960,7 @@ export class FileService {
   }
 
   async moveResource(resourceId: string, input: MoveResourceInput): Promise<Resource> {
+    await this.#catalogMutationGuard?.assertOutside([resourceId,input.parentId]);
     const source = await this.getResource(resourceId);
     const completed = await this.#completedMutation("move", input.idempotencyKey, resourceId);
     if (completed !== undefined) return completed;
@@ -798,10 +1008,11 @@ export class FileService {
         await this.#rollbackRename(operation.id, newPath, source.storagePath);
         throw error;
       }
-    });
+    }, targetParent, tree);
   }
 
   async copyResource(resourceId: string, input: CopyResourceInput): Promise<Resource> {
+    await this.#catalogMutationGuard?.assertOutside([resourceId,input.parentId]);
     const source = await this.getResource(resourceId);
     const completed = await this.#completedMutation("copy", input.idempotencyKey, resourceId);
     if (completed !== undefined) return completed;
@@ -872,10 +1083,11 @@ export class FileService {
         await this.#repository.setOperationState(operation.id, "failed_retryable", { errorCode: "copy_failed" });
         throw error;
       }
-    });
+    }, targetParent, tree);
   }
 
   async trashResource(resourceId: string, input: ResourceMutationInput): Promise<Resource> {
+    await this.#catalogMutationGuard?.assertOutside([resourceId]);
     const source = await this.getResource(resourceId);
     const completed = await this.#completedMutation("trash", input.idempotencyKey, resourceId);
     if (completed !== undefined) return completed;
@@ -918,10 +1130,11 @@ export class FileService {
         await this.#rollbackRename(operation.id, trashPath, source.storagePath);
         throw error;
       }
-    });
+    }, undefined, tree);
   }
 
   async restoreResource(resourceId: string, input: ResourceMutationInput): Promise<Resource> {
+    await this.#catalogMutationGuard?.assertOutside([resourceId]);
     const source = await this.getResource(resourceId);
     if (await this.#repository.hasPendingPurge?.(resourceId)) throw new Error("Trash purge is in progress and requires completion");
     const completed = await this.#completedMutation("restore", input.idempotencyKey, resourceId);
@@ -966,7 +1179,7 @@ export class FileService {
         await this.#rollbackRename(operation.id, restoredPath, source.storagePath);
         throw error;
       }
-    });
+    }, parent, tree);
   }
 
   purgeTrashResource(resourceId: string, input: ResourceMutationInput): Promise<Resource> {
@@ -981,6 +1194,7 @@ export class FileService {
   }
 
   async #executeTrashPurge(resourceId: string, input: ResourceMutationInput): Promise<Resource> {
+    await this.#catalogMutationGuard?.assertOutside([resourceId]);
     const source = await this.getResource(resourceId);
     const completed = await this.#completedMutation("purge", input.idempotencyKey, resourceId);
     if (completed !== undefined) return completed;
@@ -1034,7 +1248,7 @@ export class FileService {
         await this.#repository.setOperationState(operation.id, "failed_retryable", { errorCode: "purge_commit_failed" });
         throw error;
       }
-    });
+    }, undefined, tree);
   }
 
   async listVersions(resourceId: string, offset = 0, limit = 100) {
@@ -1047,23 +1261,28 @@ export class FileService {
   }
 
   async limitVersions(resourceId: string, maximumCount: number): Promise<void> {
+    await this.#catalogMutationGuard?.assertOutside([resourceId]);
     if (!Number.isSafeInteger(maximumCount) || maximumCount < 1 || maximumCount > 100) throw new Error("Version limit is invalid");
     if (!this.#repository.expireVersion) throw new Error("Version retention is unavailable");
     const lockId = uuidv7();
     if (!(await this.#acquireLocksWithin(lockId, [`resource:${resourceId}`], UPLOAD_LOCK_MS, 30_000))) throw new Error("Version retention is locked");
     try {
       const resource = await this.getResource(resourceId);
+      if (!VERSION_RETENTION[resource.retentionClass ?? "general"].automaticPurge) return;
       let retained = 1;
       for (let offset = 0; ; offset += 500) {
         const versions = await this.#repository.listVersions(resourceId, offset, 500);
         for (const version of versions) {
-          if (version.state !== "active" || version.id === resource.currentVersionId) continue;
-          if (retained++ < maximumCount) continue;
-            const archiveDirectory = `_system/versions/${resource.id}/${version.id}`;
-            if (!version.storagePath.startsWith(archiveDirectory + "/") || version.storagePath === resource.storagePath) throw new Error("Version archive path is invalid");
-            if (await this.#storage.exists(version.storagePath)) await this.#storage.delete(version.storagePath);
-            await this.#repository.expireVersion(resourceId, version.id);
-            await this.#storage.delete(archiveDirectory).catch(() => undefined);
+          if (version.id === resource.currentVersionId) continue;
+          if (version.state === "active" && retained++ < maximumCount) continue;
+          const archiveDirectory = `_system/versions/${resource.id}/${version.id}`;
+          if (!version.storagePath.startsWith(archiveDirectory + "/") || version.storagePath === resource.storagePath) throw new Error("Version archive path is invalid");
+          // Commit expiry before deleting bytes. Concurrent pins either win the
+          // version lock or observe expired state and refuse; extra pins survive.
+          // Expired rows remain a durable cleanup intent if storage deletion fails.
+          if (!(await this.#repository.expireVersion(resourceId, version))) continue;
+          if (await this.#storage.exists(version.storagePath)) await this.#storage.delete(version.storagePath);
+          await this.#storage.delete(archiveDirectory).catch(() => undefined);
         }
         if (versions.length < 500) break;
       }
@@ -1079,6 +1298,7 @@ export class FileService {
   }
 
   async restoreVersion(resourceId: string, versionId: string, input: ResourceMutationInput): Promise<Resource> {
+    await this.#catalogMutationGuard?.assertOutside([resourceId]);
     const resource = await this.getResource(resourceId);
     const completed = await this.#completedMutation("version_restore", input.idempotencyKey, resourceId);
     if (completed !== undefined) return completed;
@@ -1113,14 +1333,12 @@ export class FileService {
           await this.#storage.rename(archivePath, resource.storagePath).catch(() => undefined);
           throw error;
         }
-        const previousVersionPurgeAfter = archivedVersionPurgeAfter(resource.retentionClass ?? "general", new Date());
         try {
           const restored = await this.#repository.commitVersionRestore({
             operationId: operation.id,
             resourceId: resource.id,
             previousVersionId: currentVersionId,
             previousVersionArchivePath: archivePath,
-            ...(previousVersionPurgeAfter === undefined ? {} : { previousVersionPurgeAfter }),
             newVersionId: uuidv7(),
             storagePath: resource.storagePath,
             sha256: selected.sha256,
@@ -1175,6 +1393,10 @@ export class FileService {
       if (existing.operationType !== operationType || existing.payload.sourceResourceId !== resourceId) {
         throw new Error("Idempotency key was already used for another operation");
       }
+      if (existing.state === "failed_retryable" && Object.entries(payload).some(([key, value]) => key in existing.payload && existing.payload[key] !== value)) {
+        await this.#repository.setOperationState(existing.id, "failed_final", { errorCode: "precondition_failed" });
+        throw new Error("precondition_failed");
+      }
       if (!["active", "failed_retryable"].includes(existing.state)) {
         throw new Error("Operation is already in progress or requires reconciliation");
       }
@@ -1199,12 +1421,21 @@ export class FileService {
     if (existing.operationType !== operationType || existing.payload.sourceResourceId !== sourceResourceId) {
       throw new Error("Idempotency key was already used for another operation");
     }
+    if (existing.state === "failed_final" && (existing.errorCode === "precondition_failed" || existing.errorCode === "conflict")) {
+      throw new Error(existing.errorCode);
+    }
     return existing.state === "active" && existing.resourceId !== undefined
       ? this.getResource(existing.resourceId)
       : undefined;
   }
 
-  async #withMutationLocks<T>(operation: FileOperation, keys: readonly string[], action: () => Promise<T>): Promise<T> {
+  async #withMutationLocks<T>(
+    operation: FileOperation,
+    keys: readonly string[],
+    action: () => Promise<T>,
+    expectedParent?: Resource,
+    expectedTree?: readonly Resource[],
+  ): Promise<T> {
     if (!(await this.#repository.acquireLocks(operation.id, keys, new Date(Date.now() + MUTATION_LOCK_MS)))) {
       await this.#repository.setOperationState(operation.id, "failed_retryable", { errorCode: "resource_locked" });
       throw new Error("Resource is locked by another operation");
@@ -1212,8 +1443,32 @@ export class FileService {
     try {
       if (operation.resourceId !== undefined) {
         const current = await this.getResource(operation.resourceId);
-        const oldPath = operation.payload.oldPath;
-        if (typeof oldPath === "string" && current.storagePath !== oldPath) throw new Error("Resource moved before the operation acquired its lock");
+        const oldPath = operation.payload.oldPath ?? operation.payload.sourcePath;
+        const parent = expectedParent === undefined ? undefined : await this.#repository.getResource(expectedParent.id);
+        const sourceChanged = typeof oldPath === "string" && current.storagePath !== oldPath;
+        const parentChanged = expectedParent !== undefined && (parent?.type !== "folder"
+          || parent.status !== "active" || parent.storagePath !== expectedParent.storagePath);
+        const tree = expectedTree === undefined ? undefined : await this.#repository.listTree(current.storagePath);
+        const expectedById = new Map(expectedTree?.map((item) => [item.id, item]) ?? []);
+        const treeChanged = tree !== undefined && (tree.length !== expectedById.size || tree.some((item) => {
+          const expected = expectedById.get(item.id);
+          return expected === undefined || item.type !== expected.type || item.status !== expected.status
+            || item.storagePath !== expected.storagePath || item.parentId !== expected.parentId || item.name !== expected.name
+            || item.currentVersionId !== expected.currentVersionId || item.sha256 !== expected.sha256 || item.sizeBytes !== expected.sizeBytes;
+        }));
+        if (sourceChanged || parentChanged || treeChanged) {
+          await this.#repository.setOperationState(operation.id, "failed_final", { errorCode: "precondition_failed" });
+          throw new Error("precondition_failed");
+        }
+        const destinationPath = operation.payload.newPath ?? operation.payload.targetPath ?? operation.payload.restoredPath;
+        if (expectedParent !== undefined && typeof destinationPath === "string") {
+          const name = destinationPath.slice(destinationPath.lastIndexOf("/") + 1);
+          const sibling = await this.#repository.getChild(expectedParent.id, name);
+          if (sibling !== undefined && sibling.id !== current.id) {
+            await this.#repository.setOperationState(operation.id, "failed_final", { errorCode: "conflict" });
+            throw new Error("conflict");
+          }
+        }
         if (await this.#repository.hasCommittingTree?.(current.storagePath)) throw new Error("Resource contains an interrupted upload requiring recovery");
       }
       return await action();
@@ -1288,7 +1543,7 @@ export class FileService {
     let current = "";
     for (const segment of storagePath.split("/")) {
       current = current ? `${current}/${segment}` : segment;
-      if (!(await this.#storage.exists(current))) await this.#storage.mkdir(current);
+      await ensureStorageDirectory(this.#storage, current);
     }
   }
 

@@ -1,5 +1,6 @@
 import { Readable } from "node:stream";
-import archiver from "archiver";
+import { createDownloadArchive, downloadTreeFingerprint } from "@saturn/archive";
+import { downloadEtag, validatedRange } from "./download-http.js";
 import {
   Body,
   Controller,
@@ -10,6 +11,7 @@ import {
   Headers,
   HttpCode,
   Inject,
+  Optional,
   Param,
   Patch,
   Post,
@@ -25,7 +27,9 @@ import type { FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { OwnerTokenGuard } from "./owner-token.guard.js";
 import { OWNER_SESSION, type AuthenticatedOwnerRequest } from "./owner-token.guard.js";
-import { APP_CONFIG, FILE_SERVICE } from "./tokens.js";
+import { APP_CONFIG, FILE_SERVICE, GUARDED_RUNTIME } from "./tokens.js";
+import type { GuardedRuntime } from "../../../packages/sync/src/guarded-runtime.js";
+import { guardedOwnerInput } from "./guarded-owner-context.js";
 import { SaturnApiExceptionFilter } from "./saturn-api-exception.filter.js";
 import { TransferMonitorService } from "./transfer-monitor.service.js";
 import { awaitTransferRunnable } from "./transfer-request.js";
@@ -70,10 +74,11 @@ export function parseRange(value: string | undefined, size: number): { readonly 
     return { offset: size - length, length, partial: true };
   }
   const offset = Number(match[1]);
-  const end = match[2] === "" ? size - 1 : Number(match[2]);
-  if (!Number.isSafeInteger(offset) || !Number.isSafeInteger(end) || offset < 0 || end < offset || end >= size) {
+  const requestedEnd = match[2] === "" ? size - 1 : Number(match[2]);
+  if (!Number.isSafeInteger(offset) || !Number.isSafeInteger(requestedEnd) || offset < 0 || offset >= size || requestedEnd < offset) {
     throw new Error("Range is invalid");
   }
+  const end = Math.min(requestedEnd, size - 1);
   return { offset, length: end - offset + 1, partial: true };
 }
 
@@ -132,6 +137,7 @@ export class FileController {
     @Inject(FILE_SERVICE) private readonly files: FileService,
     @Inject(APP_CONFIG) private readonly config: SaturnConfig,
     @Inject(TransferMonitorService) private readonly transfers: TransferMonitorService,
+    @Optional() @Inject(GUARDED_RUNTIME) private readonly guarded?: GuardedRuntime,
   ) {}
 
   #isVolt(resource: { readonly storagePath: string }): boolean {
@@ -199,9 +205,10 @@ export class FileController {
   }
 
   @Post("folders")
-  createFolder(@Body() body: unknown) {
+  createFolder(@Body() body: unknown, @Req() request: AuthenticatedOwnerRequest, @Headers("idempotency-key") key?: string) {
     const input = folderSchema.parse(body);
-    return this.files.createFolder(input.parentId ?? ROOT_RESOURCE_ID, input.name);
+    const action = () => this.files.createFolder(input.parentId ?? ROOT_RESOURCE_ID, input.name);
+    return this.guarded ? this.guarded.ownerAction(guardedOwnerInput(request, this.config), action, key) : action();
   }
 
   @Post("uploads")
@@ -273,6 +280,34 @@ export class FileController {
     return this.files.abandonUpload(id);
   }
 
+  @Head("files/:id/content")
+  async downloadHead(
+    @Param("id") id: string,
+    @Headers("range") rawRange: string | undefined,
+    @Req() request: AuthenticatedOwnerRequest,
+    @Res() reply: FastifyReply,
+  ): Promise<void> {
+    const resource = await this.files.getResource(id);
+    if (resource.type !== "file" || resource.status !== "active") throw new Error("Resource is not an active file");
+    this.#requireRecentProof(resource, request);
+    let range: ReturnType<typeof parseRange>;
+    try { range = parseRange(validatedRange(rawRange, request.headers["if-range"], downloadEtag(resource)), resource.sizeBytes); }
+    catch { reply.status(416).header("Content-Range", `bytes */${String(resource.sizeBytes)}`).send(); return; }
+    this.#downloadHeaders(reply, resource, range);
+    reply.send();
+  }
+
+  #downloadHeaders(reply: FastifyReply, resource: Resource, range: ReturnType<typeof parseRange>): void {
+    const length = range.length ?? resource.sizeBytes;
+    reply.header("Accept-Ranges", "bytes").header("Content-Length", length)
+      .header("Cache-Control", "no-store, private")
+      .header("Content-Type", resource.mimeType ?? "application/octet-stream")
+      .header("Content-Disposition", contentDisposition("attachment", resource.name));
+    const etag = downloadEtag(resource);
+    if (etag !== undefined) reply.header("ETag", etag);
+    if (range.partial) reply.status(206).header("Content-Range", `bytes ${String(range.offset)}-${String(range.offset + length - 1)}/${String(resource.sizeBytes)}`);
+  }
+
   @Get("files/:id/content")
   async download(
     @Param("id") id: string,
@@ -285,22 +320,24 @@ export class FileController {
     if (transferId !== undefined) this.transfers.assertDownloadAvailable(transferId);
     const resource = await this.files.getResource(id);
     this.#requireRecentProof(resource, request);
-    const range = parseRange(rawRange, resource.sizeBytes);
-    const download = await this.files.openDownload(id, range.offset, range.length);
-    const contentLength = range.length ?? resource.sizeBytes;
-    reply
-      .header("Accept-Ranges", "bytes")
-      .header("Content-Length", contentLength)
-      .header("Cache-Control", "no-store, private")
-      .header("Content-Type", resource.mimeType ?? "application/octet-stream")
-      .header("Content-Disposition", contentDisposition("attachment", resource.name))
-      .header("ETag", `"sha256-${resource.sha256 ?? "unknown"}"`);
-    if (range.partial) {
-      reply.status(206).header(
-        "Content-Range",
-        `bytes ${String(range.offset)}-${String(range.offset + contentLength - 1)}/${String(resource.sizeBytes)}`,
-      );
-    }
+    let range: ReturnType<typeof parseRange>;
+    try { range = parseRange(validatedRange(rawRange, request.headers["if-range"], downloadEtag(resource)), resource.sizeBytes); }
+    catch { reply.status(416).header("Content-Range", `bytes */${String(resource.sizeBytes)}`).send({ code: "range_not_satisfiable" }); return; }
+    let invalidRangeSize: number | undefined;
+    const download = await this.files.openDownload(id, current => {
+      // Recheck both authority and representation under the FileService resource lock.
+      this.#requireRecentProof(current, request);
+      try { range = parseRange(validatedRange(rawRange, request.headers["if-range"], downloadEtag(current)), current.sizeBytes); }
+      catch (error) { invalidRangeSize = current.sizeBytes; throw error; }
+      return range;
+    }).catch((error: unknown) => {
+      if (invalidRangeSize === undefined) throw error;
+      reply.status(416).header("Content-Range", `bytes */${String(invalidRangeSize)}`).send({ code: "range_not_satisfiable" });
+      return undefined;
+    });
+    if (download === undefined) return;
+    const contentLength = range.length ?? download.resource.sizeBytes;
+    this.#downloadHeaders(reply, download.resource, range);
     reply.send(this.transfers.trackDownload(download.stream, { ...(transferId === undefined ? {} : { id: transferId }), filename: resource.name, totalBytes: contentLength }));
   }
 
@@ -317,14 +354,25 @@ export class FileController {
     if (folder.type !== "folder" || folder.status !== "active") throw new Error("Resource is not an active folder");
     this.#requireRecentProof(folder, request);
     const prepared = await this.#folderArchiveEntries(folder);
-    const archive = archiver("zip", { zlib: { level: 6 } });
-    const members = new Set<Readable>();
-    const disposeMembers = () => { for (const member of members) member.destroy(); };
-    archive.once("close", disposeMembers);
-    archive.once("error", (error) => { disposeMembers(); reply.raw.destroy(error); });
+    const fingerprint = downloadTreeFingerprint(prepared.entries);
+    const archive = createDownloadArchive({
+      entries: prepared.entries,
+      emptyRoot: `${folder.name}/`,
+      open: async entry => (await this.files.openDownload(entry.resource.id, current => {
+        this.#requireRecentProof(current, request);
+        if (downloadTreeFingerprint([{ resource: current, path: entry.path }]) !== downloadTreeFingerprint([entry])) throw new Error("Archive source version changed");
+        return { offset: 0 };
+      })).stream,
+      validate: async () => {
+        const current = await this.files.getResource(id);
+        this.#requireRecentProof(current, request);
+        if (current.status !== "active" || current.type !== "folder" || current.storagePath !== folder.storagePath
+          || fingerprint !== downloadTreeFingerprint((await this.#folderArchiveEntries(current)).entries)) throw new Error("Archive source tree changed");
+      },
+    });
+    archive.once("error", error => reply.raw.destroy(error));
     reply.raw.once("close", () => {
-      if (!reply.raw.writableFinished) { archive.abort(); archive.destroy(); }
-      disposeMembers();
+      if (!reply.raw.writableFinished) archive.destroy(new Error("Archive download was cancelled"));
     });
     reply
       .header("Content-Type", "application/zip")
@@ -332,24 +380,6 @@ export class FileController {
       .header("Pragma", "no-cache")
       .header("Content-Disposition", contentDisposition("attachment", `${folder.name}.zip`))
       .send(this.transfers.trackDownload(archive, { ...(transferId === undefined ? {} : { id: transferId }), filename: `${folder.name}.zip` }));
-    if (prepared.entries.length === 0) archive.append("", { name: `${folder.name}/` });
-    for (const entry of prepared.entries) {
-      if (entry.resource.type === "folder") {
-        archive.append("", { name: entry.path });
-        continue;
-      }
-      const files = this.files;
-      const member = Readable.from((async function* () {
-        const opened = await files.openDownload(entry.resource.id);
-        try { if (archive.destroyed) return; for await (const chunk of opened.stream) yield chunk; }
-        finally { if (!opened.stream.destroyed) opened.stream.destroy(); }
-      })());
-      members.add(member);
-      member.once("close", () => members.delete(member));
-      archive.append(member, { name: entry.path });
-    }
-    // Return the reply while ZIP generation is running so HTTP backpressure can drain it.
-    void archive.finalize().catch((error: unknown) => archive.destroy(error instanceof Error ? error : new Error("Folder archive failed")));
   }
 
   @Get("files/:id/preview")
@@ -362,9 +392,11 @@ export class FileController {
     const resource = await this.files.getResource(id);
     if (this.#isVolt(resource)) throw new ForbiddenException({ code: "preview_forbidden" });
     this.#requireRecentProof(resource, request);
+    let range: ReturnType<typeof parseRange>;
+    try { range = parseRange(rawRange, resource.sizeBytes); }
+    catch { reply.status(416).header("Content-Range", `bytes */${String(resource.sizeBytes)}`).send({ code: "range_not_satisfiable" }); return; }
     const mimeType = await previewMime(resource, this.files);
     if (mimeType === undefined) throw new Error("File type is not eligible for inline preview");
-    const range = parseRange(rawRange, resource.sizeBytes);
     const download = await this.files.openDownload(id, range.offset, range.length);
     const contentLength = range.length ?? resource.sizeBytes;
     reply

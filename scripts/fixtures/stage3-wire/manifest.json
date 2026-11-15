@@ -1,0 +1,32 @@
+{
+  "b-codec.json": {
+    "sha256": "1d1beed49945d9160b1534071820e9f91504c3865ba053130ab0dce9c98ad743",
+    "bytes": 107,
+    "producer": "Current-RUN compiled Neptune.Core caller via awaited Stage3 B test",
+    "fullProvenanceSha256": "c260c51cfcddd0795485fdc0fd6fea909eae59239a2e5a4849050da7a14e12a6"
+  },
+  "b-directories.json": {
+    "sha256": "d795c2cfcebff326e735ebf716ca9cfc362a385f991a5a5e35fd3fb50f70e579",
+    "bytes": 308943,
+    "producer": "Current-RUN compiled Neptune.Core caller via awaited Stage3 B test",
+    "fullProvenanceSha256": "3691c82807c417593ba827115f33b6aca10bca6ea6d0327ef990277527e82cc5"
+  },
+  "c-catalog.json": {
+    "sha256": "d53ca049680e791c34763028dd1c02bd2d64163406750073f34ee13d508bf189",
+    "bytes": 4429,
+    "producer": "Actual current cmd/pluto ordinary indexed daemon against fresh isolated own TLS fixture",
+    "fullProvenanceSha256": "4b3dabc22ea0aec32e63f0cf5a8d2e2f7696d030231851936563d1d133e142b4"
+  },
+  "c-checkin.json": {
+    "sha256": "1ca7c1d1a30150eef88605ad7f8faab9da980adad814c0d12ab3ee96b15d9e6f",
+    "bytes": 929,
+    "producer": "Actual compiled Go Service.heartbeat invoked inside current-source C13 race test (library caller)",
+    "fullProvenanceSha256": "a0209277a655e105708159fbbd09fafe8b113ea4675013ff0c55b79cf5f020b5"
+  },
+  "c-k4.json": {
+    "sha256": "a472a6cdf30564228c4e8e696413954f1f4c09db39490d82bbe0654697bdc07d",
+    "bytes": 1744,
+    "producer": "Current-RUN native Linux Node24 K4 host and production TypeScript StorageVerifierClient",
+    "fullProvenanceSha256": "965d07d761faa10766889a94e78d39083ef500f0d861323b557c649919d05709"
+  }
+}

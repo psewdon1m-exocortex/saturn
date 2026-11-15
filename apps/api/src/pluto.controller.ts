@@ -7,7 +7,14 @@ import { DEVICE_SERVICE } from "./tokens.js";
 import { SaturnApiExceptionFilter } from "./saturn-api-exception.filter.js";
 
 const redeemSchema = z.object({ code: z.string().regex(/^[A-Za-z0-9_-]{32}$/), version: z.string().min(1).max(100) }).strict();
-const statusSchema = z.object({ enabled: z.boolean(), intervalSeconds: z.number().int().min(60).max(31536000), uploadedFiles: z.number().int().min(0), lastAttemptAt: z.iso.datetime().optional(), lastSuccessAt: z.iso.datetime().optional(), nextRunAt: z.iso.datetime().optional(), error: z.string().max(1000).optional() }).strict();
+const counter=z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
+const engineSchema=z.object({mode:z.string().max(32),phase:z.string().max(64),Queued:counter,Captured:counter,Published:counter,Recovered:counter,Failed:counter,
+  oldestPendingMs:counter,gap:z.boolean(),waitReason:z.string().max(128).optional(),
+  http:z.object({Requests:counter,MetadataBytes:counter,DataBytes:counter,ResponseBytes:counter}).strict(),
+  capture:z.object({source_reads:counter,source_hash_bytes:counter,private_verification_reads:counter,private_verification_bytes:counter,
+    transport_hash_reads:counter,transport_hash_bytes:counter,transactions:counter,committed_transactions:counter,rolled_back_transactions:counter}).strict(),
+  features:z.record(z.string().regex(/^[a-z0-9_-]{1,64}$/),z.boolean()).refine(v=>Object.keys(v).length<=32).optional()}).strict();
+const statusSchema = z.object({ enabled: z.boolean(), intervalSeconds: z.number().int().min(60).max(31536000), uploadedFiles: z.number().int().min(0), lastAttemptAt: z.iso.datetime().optional(), lastSuccessAt: z.iso.datetime().optional(), nextRunAt: z.iso.datetime().optional(), error: z.string().max(1000).optional(),engine:engineSchema.optional() }).strict();
 const checkInSchema = z.object({ version: z.string().min(1).max(100), status: statusSchema }).strict();
 
 @Controller("pluto")

@@ -6,7 +6,13 @@ import { PostgresCommandToolchain } from "./postgres-toolchain.js";
 import type { Database } from "@saturn/database";
 
 function cleanDatabase(occupied = false): Database {
-  return { withSql: async (callback: Parameters<Database["withSql"]>[0]) => callback((async () => [{ occupied }]) as never) } as unknown as Database;
+  const sql = Object.assign(async (parts: TemplateStringsArray) => parts.join("").includes("AS occupied") ? [{ occupied }]
+    : parts.join('').includes('AS namespace_id') ? [{namespace_id:'42'}] : [], {
+    unsafe: (query: string) => Promise.resolve(query.includes("pg_export_snapshot") ? [{snapshot_id:"00000001-00000002-1",started_at:"2026-10-12 00:00:00+00"}] : []),
+  });
+  return { withSql: async (callback: Parameters<Database["withSql"]>[0]) => callback(sql as never),
+    transaction: async (callback: Parameters<Database["transaction"]>[0]) => callback(sql as never),
+  } as unknown as Database;
 }
 
 it.each(["dump", "restore", "idle", "cancel"])("bounds and reaps a stalled %s subprocess", async mode => {

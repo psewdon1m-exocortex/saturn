@@ -1,8 +1,12 @@
-import { Body, Controller, Delete, Get, Headers, Inject, Param, Patch, Post, Query, UseFilters, UseGuards } from "@nestjs/common";
+import { Body, Controller, Delete, Get, Headers, Inject, Optional, Param, Patch, Post, Query, Req, UseFilters, UseGuards } from "@nestjs/common";
 import type { DeviceService } from "@saturn/sync";
 import { z } from "zod";
 import { OwnerTokenGuard, RequireRecentReauthentication } from "./owner-token.guard.js";
-import { DEVICE_SERVICE } from "./tokens.js";
+import { DEVICE_SERVICE, APP_CONFIG, GUARDED_RUNTIME } from "./tokens.js";
+import type { SaturnConfig } from "@saturn/config";
+import type { FastifyRequest } from "fastify";
+import type { GuardedRuntime } from "../../../packages/sync/src/guarded-runtime.js";
+import { guardedOwnerInput } from "./guarded-owner-context.js";
 import { SaturnApiExceptionFilter } from "./saturn-api-exception.filter.js";
 
 const rights = z.object({ read: z.boolean(), write: z.boolean(), move: z.boolean(), delete: z.boolean() }).strict();
@@ -26,7 +30,9 @@ const heartbeatSchema = z.object({ platform: z.enum(["windows", "linux"]), versi
 @UseGuards(OwnerTokenGuard)
 @UseFilters(SaturnApiExceptionFilter)
 export class DeviceController {
-  constructor(@Inject(DEVICE_SERVICE) private readonly devices: DeviceService) {}
+  constructor(@Inject(DEVICE_SERVICE) private readonly devices: DeviceService,
+    @Optional() @Inject(GUARDED_RUNTIME) private readonly guarded?: GuardedRuntime,
+    @Optional() @Inject(APP_CONFIG) private readonly config?: SaturnConfig) {}
 
   @Post()
   create(@Body() body: unknown) {
@@ -35,9 +41,11 @@ export class DeviceController {
   }
 
   @Post("enrollments")
-  createEnrollment(@Body() body: unknown) {
+  createEnrollment(@Body() body: unknown, @Req() request: FastifyRequest) {
     const input = enrollmentCreateSchema.parse(body);
-    return input.deviceKind === "pluto" ? this.devices.createPlutoEnrollment(input.name) : this.devices.createWindowsEnrollment(input.name);
+    const action = () => input.deviceKind === "pluto" ? this.devices.createPlutoEnrollment(input.name) : this.devices.createWindowsEnrollment(input.name);
+    if (!this.guarded) return action(); if (!this.config) throw Error("Owner auth configuration unavailable");
+    return this.guarded.ownerAction(guardedOwnerInput(request, this.config), action);
   }
 
   @Post(":id/enrollment")

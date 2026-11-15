@@ -3,8 +3,10 @@ import { randomUUID } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import path from "node:path";
 import type { Readable } from "node:stream";
-import type { SaturnConfig } from "@saturn/config";
+import type { StorageVerifyRequest } from "../../contracts/src/storage-verifier.js";
+import { requireSftpStorage, type SaturnConfig } from "@saturn/config";
 import { SftpStorageAdapter } from "./sftp-storage.adapter.js";
+import { LocalCustodyStorageAdapter } from "./local-custody.js";
 import type { StorageAdapter, StorageCapacity, StorageFileInfo, StorageListResult, StorageReadOptions, StorageWriteOptions } from "./types.js";
 
 export interface ActiveStorageProfile {
@@ -34,6 +36,7 @@ interface StoredStorageProfile {
 }
 
 export type StorageAdapterFactory = (config: SaturnConfig["storage"]) => StorageAdapter;
+export type StorageProfileGuard = (profile: ActiveStorageProfile) => Promise<void>;
 const ORPHAN_CREDENTIAL_GRACE_MS = 24 * 60 * 60 * 1_000;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -124,8 +127,14 @@ export class RuntimeStorageManager implements StorageAdapter {
   #active: ActiveStorageProfile;
   #adapter: StorageAdapter;
   #refreshing: Promise<void> | undefined;
+  #profileGuard: StorageProfileGuard | undefined;
+  #exactPaths=false;
+  enableExactPaths():void{
+    if(!this.#adapter.enableExactPaths)throw new Error('Exact storage paths unsupported');
+    this.#adapter.enableExactPaths();this.#exactPaths=true;
+  }
 
-  constructor(bootstrap: SaturnConfig["storage"], runtimeDirectory: string, factory: StorageAdapterFactory = (config) => new SftpStorageAdapter(config)) {
+  constructor(bootstrap: SaturnConfig["storage"], runtimeDirectory: string, factory: StorageAdapterFactory = (config) => config.backend === "local" ? new LocalCustodyStorageAdapter(config) : new SftpStorageAdapter(config)) {
     this.#runtimeDirectory = path.resolve(runtimeDirectory);
     this.#activePath = path.join(this.#runtimeDirectory, "active.json");
     this.#factory = factory;
@@ -138,6 +147,12 @@ export class RuntimeStorageManager implements StorageAdapter {
     await fs.mkdir(this.#runtimeDirectory, { recursive: true, mode: 0o700 });
     await fs.chmod(this.#runtimeDirectory, 0o700).catch(() => undefined);
     const previousPath = `${this.#activePath}.previous`;
+    if (this.#active.config.backend === "local") {
+      await this.localCustody();
+      if (await fileExists(previousPath)) throw new Error("Local storage cannot restore an SFTP runtime profile");
+      await this.refresh();
+      return;
+    }
     if (!(await fileExists(this.#activePath)) && await fileExists(previousPath)) {
       await fs.rename(previousPath, this.#activePath);
     }
@@ -153,6 +168,19 @@ export class RuntimeStorageManager implements StorageAdapter {
     return this.#runtimeDirectory;
   }
 
+  async localCustody() {
+    if (this.#active.config.backend !== "local" || !(this.#adapter instanceof LocalCustodyStorageAdapter)) throw new Error("Local custody is unavailable");
+    return this.#adapter.custody();
+  }
+
+  /** Installed once by the qualified deployment factory before application I/O.
+   * It cannot be replaced or disabled by a request/profile rollback. */
+  async installProfileGuard(guard: StorageProfileGuard): Promise<void> {
+    if (this.#profileGuard !== undefined) throw new Error("Storage profile guard is already installed");
+    this.#profileGuard = guard;
+    await guard(this.#active);
+  }
+
   async refresh(): Promise<void> {
     if (this.#refreshing !== undefined) return this.#refreshing;
     this.#refreshing = (async () => {
@@ -162,9 +190,12 @@ export class RuntimeStorageManager implements StorageAdapter {
         if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
         throw error;
       }
+      if (this.#active.config.backend === "local") throw new Error("Local storage cannot activate an SFTP runtime profile");
       const stored = parseStoredProfile(JSON.parse(raw) as unknown, this.#runtimeDirectory);
+      await this.#profileGuard?.({ profileId: stored.profileId, revision: stored.revision, activatedAt: stored.activatedAt, source: "runtime", config: storageConfig(stored,this.#requireFsync) });
       if (stored.profileId === this.#active.profileId && stored.revision === this.#active.revision) return;
       const next = this.#factory(storageConfig(stored,this.#requireFsync));
+      if(this.#exactPaths){if(!next.enableExactPaths)throw new Error('Exact storage paths unsupported');next.enableExactPaths();}
       this.#retired.add(this.#adapter);
       this.#adapter = next;
       this.#active = { profileId: stored.profileId, revision: stored.revision, activatedAt: stored.activatedAt, source: "runtime", config: storageConfig(stored,this.#requireFsync) };
@@ -173,8 +204,11 @@ export class RuntimeStorageManager implements StorageAdapter {
   }
 
   async activate(profile: Omit<ActiveStorageProfile, "source">, adapter?: StorageAdapter): Promise<void> {
+    if (this.#active.config.backend === "local" || profile.config.backend === "local") throw new Error("Local storage profile changes require operator requalification");
+    await this.#profileGuard?.({ ...profile, source: "runtime" });
     if (this.#requireFsync && profile.config.requireFsync !== true) throw new Error("Runtime storage cannot downgrade the fsync requirement");
-    const credentialFile = profile.config.authMode === "password_file" ? profile.config.passwordFile : profile.config.privateKeyFile;
+    const config = requireSftpStorage(profile.config);
+    const credentialFile = config.authMode === "password_file" ? config.passwordFile : config.privateKeyFile;
     if (credentialFile === undefined || !withinDirectory(this.#runtimeDirectory, path.resolve(credentialFile))) {
       throw new Error("Runtime storage credential must be inside the protected storage directory");
     }
@@ -183,12 +217,12 @@ export class RuntimeStorageManager implements StorageAdapter {
       profileId: profile.profileId,
       revision: profile.revision,
       activatedAt: profile.activatedAt,
-      host: profile.config.host,
-      port: profile.config.port,
-      username: profile.config.username,
-      root: profile.config.root,
-      hostFingerprint: profile.config.hostFingerprint,
-      authMode: profile.config.authMode,
+      host: config.host,
+      port: config.port,
+      username: config.username,
+      root: config.root,
+      hostFingerprint: config.hostFingerprint,
+      authMode: config.authMode,
       credentialFile: path.resolve(credentialFile),
       operationTimeoutMs: profile.config.operationTimeoutMs,
       healthTimeoutMs: profile.config.healthTimeoutMs,
@@ -201,12 +235,20 @@ export class RuntimeStorageManager implements StorageAdapter {
     try { await this.#replaceActiveFile(temporary); }
     catch (error) { await fs.rm(temporary, { force: true }); throw error; }
     const next = adapter ?? this.#factory(profile.config);
+    if(this.#exactPaths){if(!next.enableExactPaths)throw new Error('Exact storage paths unsupported');next.enableExactPaths();}
     this.#retired.add(this.#adapter);
     this.#adapter = next;
     this.#active = { ...profile, source: "runtime" };
   }
 
   async restore(profile: ActiveStorageProfile): Promise<void> {
+    await this.#profileGuard?.(profile);
+    if (this.#active.config.backend === "local" || profile.config.backend === "local") {
+      if (profile.source !== this.#active.source || profile.profileId !== this.#active.profileId || profile.revision !== this.#active.revision
+        || JSON.stringify(profile.config) !== JSON.stringify(this.#active.config)) throw new Error("Local storage recovery requires the same operator-pinned configuration");
+      await this.localCustody();
+      return;
+    }
     if (profile.source === "runtime") {
       await this.activate({ profileId: profile.profileId, revision: profile.revision, activatedAt: profile.activatedAt, config: profile.config });
       return;
@@ -270,6 +312,15 @@ export class RuntimeStorageManager implements StorageAdapter {
   }
 
   async stat(storagePath: string): Promise<StorageFileInfo> { return (await this.#delegate()).stat(storagePath); }
+  async supportsVerify():Promise<boolean>{
+    const adapter=await this.#delegate();
+    return typeof adapter.verify==='function'&&(adapter.supportsVerify?await adapter.supportsVerify():true);
+  }
+  async verify(request:StorageVerifyRequest,signal?:AbortSignal){
+    const adapter=await this.#delegate();
+    if(!adapter.verify)throw Object.assign(new Error('unsupported'),{code:'unsupported'});
+    return adapter.verify(request,signal);
+  }
   async list(storagePath: string, cursor: string | undefined, limit: number): Promise<StorageListResult> { return (await this.#delegate()).list(storagePath, cursor, limit); }
   async openRead(storagePath: string, options?: StorageReadOptions): Promise<Readable> { return (await this.#delegate()).openRead(storagePath, options); }
   async write(storagePath: string, source: Readable, options: StorageWriteOptions): Promise<number> { return (await this.#delegate()).write(storagePath, source, options); }
@@ -283,7 +334,9 @@ export class RuntimeStorageManager implements StorageAdapter {
 
   async close(): Promise<void> {
     const adapters = new Set([this.#adapter, ...this.#retired]);
-    await Promise.all([...adapters].map(async (adapter) => adapter.close().catch(() => undefined)));
+    const results=await Promise.allSettled([...adapters].map(adapter=>adapter.close()));
+    const failures=results.filter((result):result is PromiseRejectedResult=>result.status==='rejected');
+    if(failures.length)throw new AggregateError(failures.map(result=>result.reason as unknown),"Storage shutdown unconfirmed");
     this.#retired.clear();
   }
 }

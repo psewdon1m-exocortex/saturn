@@ -1,7 +1,7 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import fs from "node:fs/promises";
 import { Client, type ConnectConfig, type SFTPWrapper } from "ssh2";
-import type { SaturnConfig } from "@saturn/config";
+import { requireSftpStorage, type SaturnConfig, type SftpStorageConfig } from "@saturn/config";
 
 export interface SftpLease {
   readonly sftp: SFTPWrapper;
@@ -23,6 +23,14 @@ interface Waiter {
 }
 
 const channelDisconnects = new WeakMap<SFTPWrapper,AbortSignal>();
+// Mark only errors delivered by an SFTP RPC callback, preserving ssh2's original
+// Error/code for callers. A numeric code on a stream/local error is insufficient.
+const reusableStatusErrors = new WeakSet<Error>();
+const REUSABLE_STATUS_CODES = new Set([1, 2, 3, 4, 8]);
+
+export function canReuseSftpLeaseAfterError(error: unknown, lease: SftpLease): boolean {
+  return error instanceof Error && reusableStatusErrors.has(error) && lease.disconnected?.aborted !== true;
+}
 
 function fingerprintForKey(key: Buffer): string {
   return `SHA256:${createHash("sha256").update(key).digest("base64").replace(/=+$/, "")}`;
@@ -59,29 +67,40 @@ function withTimeout<T>(label: string, timeoutMs: number, register: (finish: (er
 async function closeConnection(connection: PooledConnection): Promise<void> {
   connection.healthy = false;
   if (connection.closed) return;
-  await new Promise<void>((resolve) => {
+  await closeClient(connection.client);
+}
+async function closeClient(client:Client):Promise<void>{
+  await new Promise<void>((resolve,reject) => {
     let settled = false;
+    let forced:NodeJS.Timeout|undefined;
     const finish = (): void => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      if(forced)clearTimeout(forced);
       resolve();
     };
-    const timer = setTimeout(() => { connection.client.destroy(); finish(); }, 2_000);
-    connection.client.once("close", finish);
-    connection.client.end();
+    const timer = setTimeout(() => {
+      client.destroy();
+      if(settled)return;
+      forced=setTimeout(()=>{if(settled)return;settled=true;client.removeListener("close",finish);reject(new Error("SFTP connection closure unconfirmed"));},2000);
+    }, 2_000);
+    client.once("close", finish);
+    client.end();
   });
 }
 
 export class SftpConnectionPool {
-  readonly #storage: SaturnConfig["storage"];
+  readonly #storage: SftpStorageConfig;
   readonly #idle: PooledConnection[] = [];
   readonly #waiters: Waiter[] = [];
+  readonly #clients=new Set<Client>();
+  #closing:Promise<void>|undefined;
   #total = 0;
   #closed = false;
 
   constructor(storage: SaturnConfig["storage"]) {
-    this.#storage = storage;
+    this.#storage = requireSftpStorage(storage);
   }
 
   async #authentication(): Promise<Pick<ConnectConfig, "password" | "privateKey">> {
@@ -98,12 +117,18 @@ export class SftpConnectionPool {
   async #connectOnce(deadline: number): Promise<PooledConnection> {
     const client = new Client();
     const authentication = await this.#authentication();
+    this.#assertOpen();
+    this.#clients.add(client);
+    client.once("close",()=>this.#clients.delete(client));
     const remaining = Math.max(1,deadline-Date.now());
     try {
     await withTimeout<undefined>("SSH ready", remaining, (finish) => {
       client.once("ready", () => finish(undefined));
-      client.once("error", (error) => finish(error));
+      // ssh2 can emit another transport error while destroying a failed
+      // handshake. Keep a listener for that client's entire lifetime.
+      client.on("error", (error) => finish(error));
       client.once("end", () => finish(new Error("SSH connection ended before ready")));
+      client.once("close", () => finish(new Error("SSH connection closed before ready")));
       client.connect({
         host: this.#storage.host,
         port: this.#storage.port,
@@ -112,7 +137,10 @@ export class SftpConnectionPool {
         hostVerifier: hostVerifier(this.#storage.hostFingerprint),
         readyTimeout: Math.min(remaining, 20_000),
         keepaliveInterval: 10_000,
-        keepaliveCountMax: 3,
+        // Do not discard a still-pending mutation before its configured RPC
+        // deadline. A short outage can otherwise turn a delayed original ACK
+        // into an irrecoverable UNKNOWN despite an intact TCP connection.
+        keepaliveCountMax: Math.max(3, Math.ceil(this.#storage.operationTimeoutMs / 10_000) + 1),
         algorithms: { serverHostKey: ["ssh-ed25519", "rsa-sha2-512", "rsa-sha2-256", "ssh-rsa"] },
       });
     });
@@ -223,7 +251,7 @@ export class SftpConnectionPool {
         reject(error);
       };
       const waiter: Waiter = {
-        resolve: lease => { if (settled) { void lease.release(); return; } settled = true; clean(); resolve(lease); },
+        resolve: lease => { if (settled) { void lease.release().catch(()=>undefined); return; } settled = true; clean(); resolve(lease); },
         reject: fail,
       };
       const abort = () => fail(new Error("SFTP acquisition was cancelled"));
@@ -234,12 +262,18 @@ export class SftpConnectionPool {
   }
 
   async close(): Promise<void> {
-    if (this.#closed) return;
+    if(this.#closing)return this.#closing;
     this.#closed = true;
     for (const waiter of this.#waiters.splice(0)) waiter.reject(new Error("SFTP pool is closed"));
-    const idle = this.#idle.splice(0);
-    await Promise.allSettled(idle.map(closeConnection));
-    this.#total -= idle.length;
+    this.#idle.splice(0);
+    // Includes leased streams and handshakes; idle-only shutdown cannot prove
+    // that a fenced writer's old sockets stopped issuing requests.
+    this.#closing=(async()=>{
+      const outcomes=await Promise.allSettled([...this.#clients].map(closeClient));
+      const errors=outcomes.filter((v):v is PromiseRejectedResult=>v.status==='rejected');
+      if(errors.length)throw new AggregateError(errors.map(v=>v.reason as unknown),'SFTP shutdown unconfirmed');
+    })();
+    return this.#closing;
   }
 }
 
@@ -256,6 +290,10 @@ export function callSftp<T>(
       finish(new Error(`SFTP method is unavailable: ${method}`));
       return;
     }
-    callable.call(sftp, ...args, (error?: Error, value?: T) => finish(error, value));
+    callable.call(sftp, ...args, (error?: Error, value?: T) => {
+      if (error instanceof Error && "code" in error && typeof error.code === "number" && REUSABLE_STATUS_CODES.has(error.code)
+        && channelDisconnects.get(sftp)?.aborted !== true) reusableStatusErrors.add(error);
+      finish(error, value);
+    });
   },channelDisconnects.get(sftp));
 }

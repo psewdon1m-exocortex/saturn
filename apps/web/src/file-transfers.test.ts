@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { downloadUrl, folderDownloadUrl, publicShareApi, resumeOwnerUpload, uploadDropFile } from "./api.js";
+vi.mock("./upload-sha256.js", () => ({ uploadSourceHasher: { hash: vi.fn(async () => "a".repeat(64)) } }));
 
-afterEach(() => { window.sessionStorage.clear(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
+afterEach(() => { window.sessionStorage.clear(); window.localStorage.clear(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 const status = { id: "test-upload", state: "uploading", expectedSize: 6, receivedSize: 0, completed: false, expiresAt: new Date(Date.now() + 60_000).toISOString() };
 const json = (value: unknown) => new Response(JSON.stringify(value), { headers: { "Content-Type": "application/json" } });
 describe("Drop browser transfer recovery", () => {
@@ -31,7 +32,7 @@ describe("Drop browser transfer recovery", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
     const created = vi.fn();
-    await expect(uploadDropFile(new File(["saturn"], "value.bin"), vi.fn(), { signal: controller.signal, onCreated: created })).rejects.toMatchObject({ name: "AbortError" });
+    await expect(uploadDropFile(new File(["saturn"], "value.bin"), vi.fn(), { signal: controller.signal, onCreated: created, channelId: "test-channel" })).rejects.toMatchObject({ name: "AbortError" });
     expect(created).toHaveBeenCalledWith(status);
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
@@ -44,6 +45,7 @@ describe("Drop browser transfer recovery", () => {
       if (init?.method === "PATCH") return new Response(null, { status: 204 });
       return json(status);
     }));
-    await expect(uploadDropFile(new File(["saturn"], "value.bin"), vi.fn())).resolves.toMatchObject({ state: "stored", receivedSize: 6 });
+    await expect(uploadDropFile(new File(["saturn"], "value.bin"), vi.fn(), { channelId: "test-channel" })).resolves.toMatchObject({ state: "stored", receivedSize: 6 });
   });
 });
+vi.mock("./upload-recovery-durable.js", async () => (await import("./upload-recovery-test-backend.js")).recoveryUnitBackend());

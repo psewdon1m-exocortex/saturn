@@ -87,16 +87,16 @@ pinned in `.release/updater.version`; CI refuses to build with another version.
    real data. Independent second-copy delivery and restore evidence remain a
    separate disaster-recovery procedure; they are not Saturn runtime variables.
 
-For a host with an older prepared release, run the `0.2.2` bootstrap with
-`--refresh`. It preserves
+For a host with an older prepared release, select the exact qualified target
+bootstrap with `--refresh`, following the
+[README production installation procedure](../../README.md#production-installation).
+Do not select a historical bootstrap solely from an outdated version example.
+
+It preserves
 `/etc/vault/.env.production`, removes the obsolete `VAULT_DEV_STORAGE_*` and
 `VAULT_SECOND_COPY_ID` entries, repairs the absolute runtime env path, writes
 the new release lock, and preserves the old bundle under
-`/opt/vault.previous-<timestamp>`:
-
-```sh
-curl -fsSL https://github.com/psewdon1m-exocortex/saturn/releases/download/saturn-v0.2.2/bootstrap.sh | sudo sh -s -- --refresh
-```
+`/opt/vault.previous-<timestamp>`.
 
 `READINESS_TIMEOUT_MS` defaults to 3000 ms and bounds database, storage and
 worker checks in parallel. `STORAGE_HEALTH_TIMEOUT_MS` defaults to 3000 ms and
@@ -116,11 +116,13 @@ logical PostgreSQL snapshot. Start the candidate API/worker/web processes
 before switching server Nginx. Retain the prior image digests and snapshot until the new release has
 passed readiness, authenticated E2E and recovery verification.
 
-If a candidate gate fails, do not switch traffic. If post-switch health fails,
-restore the prior image references and server Nginx upstream configuration. Use a database
-rollback only when the release manifest declares the migration reversible;
-otherwise restore the verified pre-update snapshot. Preserve bounded redacted
-logs and reconciliation evidence.
+If a candidate gate fails, do not switch traffic. After traffic has switched,
+close new admissions and preserve post-update bytes, originals and receipts
+before recovery. Return to prior images only if they are compatible with the
+applied schema and retained state. A pre-update database snapshot can discard
+newer writes; use a qualified roll-forward or coordinated recovery procedure
+that reconciles those writes and backend bytes. Preserve bounded redacted logs
+and reconciliation evidence.
 
 ## Backup and disaster recovery
 

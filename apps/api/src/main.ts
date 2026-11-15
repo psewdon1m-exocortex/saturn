@@ -9,11 +9,14 @@ import type { Database } from "@saturn/database";
 import type { FastifyPluginCallback, FastifyRequest } from "fastify";
 import { AppModule } from "./app.module.js";
 import type { DeviceService } from "@saturn/sync";
-import { DATABASE, DEVICE_SERVICE } from "./tokens.js";
+import { DATABASE, DEVICE_SERVICE, GUARDED_RUNTIME } from "./tokens.js";
 import { registerWebDav } from "./webdav.js";
 import { registerResourceReader } from "./resource-reader.js";
 import { TransferMonitorService } from "./transfer-monitor.service.js";
 import { registerRawBodyParsers } from "./raw-body-parsers.js";
+import { registerSyncMetadataLimits } from "./sync-metadata-limits.js";
+import type { GuardedRuntime } from "../../../packages/sync/src/guarded-runtime.js";
+import { guardedSyncRuntimeHttp } from "./guarded-sync-runtime-http.js";
 
 const config = loadEnvironment();
 const adapter = new FastifyAdapter({
@@ -41,10 +44,12 @@ for (const method of ["PROPFIND", "MKCOL", "MOVE", "COPY"]) {
 }
 await adapter.getInstance().register(fastifyCookie as unknown as FastifyPluginCallback);
 registerRawBodyParsers(adapter.getInstance());
+registerSyncMetadataLimits(adapter.getInstance());
 const app = await NestFactory.create<NestFastifyApplication>(AppModule, adapter, { bufferLogs: true });
-app.enableShutdownHooks();
+app.enableShutdownHooks([], { useProcessExit: process.platform === "win32" });
 app.setGlobalPrefix("api/v1", { exclude: ["health/live", "health/ready", "internal/gryphon/command", { path: "a/:assetId/:filename", method: RequestMethod.ALL }] });
 const database = app.get<Database>(DATABASE);
+await adapter.getInstance().register(guardedSyncRuntimeHttp, { runtime: app.get<GuardedRuntime>(GUARDED_RUNTIME), database });
 registerWebDav(adapter.getInstance(), app.get<DeviceService>(DEVICE_SERVICE), config, app.get(TransferMonitorService),
   (action) => database.withSharedMaintenance(action));
 registerResourceReader(adapter.getInstance(), app.get<DeviceService>(DEVICE_SERVICE),

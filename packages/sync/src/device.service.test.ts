@@ -87,6 +87,7 @@ class MemoryFiles {
 
   async getResource(id: string) { const value = this.resources.get(id); if (value === undefined) throw new Error("Resource not found"); return value; }
   async listChildren(parentId: string, offset = 0, limit = 500) { return [...this.resources.values()].filter((item) => item.parentId === parentId && item.status === "active").slice(offset, offset + limit); }
+  async findChildExact(parentId: string, name: string) { return [...this.resources.values()].find(item => item.parentId === parentId && item.name === name && item.status === "active"); }
   async createFolder(parentId: string, name: string) { const value = folder(crypto.randomUUID(), parentId, name); this.resources.set(value.id, value); return value; }
   async createUpload(input: { readonly parentId?: string; readonly filename: string; readonly overwriteResourceId?: string }) {
     const id = crypto.randomUUID();
@@ -94,6 +95,7 @@ class MemoryFiles {
     this.uploadBytes.set(id, []);
     return { id };
   }
+  async findUploadByIdempotencyKey() { return undefined; }
   async appendUpload(id: string, _offset: number, _length: number, source: Readable) { for await (const chunk of source) this.uploadBytes.get(id)?.push(Buffer.from(chunk as Uint8Array)); return { id }; }
   async completeUpload(id: string) {
     const upload = this.uploads.get(id); if (upload === undefined) throw new Error("Upload not found");
@@ -127,6 +129,32 @@ describe("DeviceService", () => {
 
   afterEach(() => {
     vi.useRealTimers();
+  });
+
+  it.each(["windows_sync", "pluto"] as const)("resolves %s paths in a wide folder without enumerating siblings", async kind => {
+    const enrollment = kind === "pluto"
+      ? await service.createPlutoEnrollment("Wide tree", now)
+      : await service.createWindowsEnrollment("Wide tree", now);
+    const redeemed = kind === "pluto"
+      ? await service.redeemPlutoEnrollment(enrollment.code, "test", now)
+      : await service.redeemWindowsEnrollment(enrollment.code, "test", now);
+    const context = await service.authenticate(`Bearer ${redeemed.token}`, now);
+    const rootId = context.device.syncRootId;
+    if (rootId === undefined) throw new Error("Device root was not assigned");
+    const parent = await files.createFolder(rootId, "wide");
+    for (let index = 0; index < 5000; index++) {
+      const child = folder(`wide-child-${String(index)}`, parent.id, `child-${String(index)}`);
+      files.resources.set(child.id, child);
+    }
+    const lookup = vi.spyOn(files, "findChildExact");
+    const enumeration = vi.spyOn(files, "listChildren").mockRejectedValue(new Error("Path resolution must not enumerate siblings"));
+    const prefix = `${kind === "pluto" ? "pluto" : "sync"}/Wide tree/wide`;
+    expect((await service.propfind(context, `${prefix}/child-4999`, 0))[0]?.resource.id).toBe("wide-child-4999");
+    expect(lookup).toHaveBeenCalledTimes(2);
+    await expect(service.propfind(context, `${prefix}/missing`, 0)).rejects.toMatchObject({ code: "not_found" });
+    await expect(service.propfind(context, `${prefix}/Child-4999`, 0)).rejects.toMatchObject({ code: "not_found" });
+    await expect(service.propfind(context, `${kind === "pluto" ? "pluto" : "sync"}/Other device/wide/child-4999`, 0)).rejects.toMatchObject({ code: "not_found" });
+    expect(enumeration).not.toHaveBeenCalled();
   });
 
   it("enrolls Pluto once into its named folder, isolates peers, caps versions and preserves files on revoke", async () => {
@@ -292,6 +320,26 @@ describe("DeviceService", () => {
       { ifNoneMatch: "*" })).rejects.toMatchObject({ code: "invalid_body" });
     expect(abandon).toHaveBeenCalledOnce();
     expect([...files.resources.values()].some((value) => value.name === "overflow.bin")).toBe(false);
+  });
+
+  it.each(["pluto", "windows_sync"] as const)("reports an authoritative payload limit for %s without creating a partial upload", async (kind) => {
+    const enrollment = kind === "pluto" ? await service.createPlutoEnrollment("Outside", now) : await service.createWindowsEnrollment("Office PC", now);
+    const redeemed = kind === "pluto"
+      ? await service.redeemPlutoEnrollment(enrollment.code, "test", now)
+      : await service.redeemWindowsEnrollment(enrollment.code, "test", now);
+    const context = await service.authenticate(`Bearer ${redeemed.token}`, now);
+    const create = vi.spyOn(files, "createUpload").mockRejectedValueOnce(new Error("payload_too_large"));
+    if (kind === "pluto") {
+      await expect(service.put(context, "pluto/Outside/too-large.bin", Readable.from([]), 10, { ifNoneMatch: "*" }))
+        .rejects.toMatchObject({ code: "payload_too_large" });
+    } else {
+      await expect(service.createResumableUpload(context, {
+        path: "sync/Office PC/too-large.bin", expectedSize: 10, expectedSha256: "a".repeat(64), idempotencyKey: "b".repeat(64), ifNoneMatch: "*",
+      })).rejects.toMatchObject({ code: "payload_too_large" });
+    }
+    expect(create).toHaveBeenCalledOnce();
+    expect(files.uploads.size).toBe(0);
+    expect([...files.resources.values()].some((value) => value.name === "too-large.bin")).toBe(false);
   });
 
   it("keeps the current resource and records a conflict copy for stale If-Match", async () => {

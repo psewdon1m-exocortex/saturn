@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { Readable } from "node:stream";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { LocalStorageAdapter } from "@saturn/storage";
 import { BackupIngestService, BackupServiceError } from "./backup.service.js";
 import { retentionCandidates } from "./retention.js";
@@ -12,11 +12,53 @@ import { MemoryRepository } from "./testing/memory.repository.js";
 
 
 const options = { enabled: true, trustClientCertificateHeader: true, tokenRotationGraceMs: 1000, uploadChunkMaxBytes: 1024, incompleteTtlMs: 60_000, defaults: { requireEncryption: true, maxBackupBytes: 4096, dailyQuotaBytes: 8192, storedQuotaBytes: 16384, maxConcurrentRuns: 1, freshnessSlaMs: 86_400_000, retention: { daily: 7, weekly: 4, monthly: 12, yearly: 3 } } } as const;
-let root: string; let repository: MemoryRepository; let service: BackupIngestService; let published: BackupRunRecord[]; let purged: BackupRunRecord[];
-beforeEach(async () => { root = await fs.mkdtemp(path.join(os.tmpdir(), "vault-backup-test-")); const storage = new LocalStorageAdapter(root); await storage.initialize(); repository = new MemoryRepository(); published = []; purged = []; service = new BackupIngestService({ repository, storage, pepper: "p".repeat(64), options, catalog: { publish: async (run) => { published.push(run); }, purge: async (run) => { purged.push(run); } } }); });
+let root: string; let storage: LocalStorageAdapter; let repository: MemoryRepository; let service: BackupIngestService; let published: BackupRunRecord[]; let purged: BackupRunRecord[];
+beforeEach(async () => { root = await fs.mkdtemp(path.join(os.tmpdir(), "vault-backup-test-")); storage = new LocalStorageAdapter(root); await storage.initialize(); repository = new MemoryRepository(); published = []; purged = []; service = new BackupIngestService({ repository, storage, pepper: "p".repeat(64), options, catalog: { publish: async (run) => { published.push(run); }, purge: async (run) => { purged.push(run); } } }); });
 afterEach(async () => fs.rm(root, { recursive: true, force: true }));
 
 describe("BackupIngestService", () => {
+  it("retains the original run and does not enqueue cleanup when parent admission failed before a part existed", async () => {
+    const created = await service.createService({ slug: "parent-refused", name: "Parent refused" });
+    const context = await service.authenticate(`Bearer ${created.token}`), payload = Buffer.from("precious");
+    const run = await service.createRun(context, "parent-refused", { filename: "backup.age", createdAt: new Date(), backupType: "full", expectedSize: payload.length, sha256: createHash("sha256").update(payload).digest("hex"), sourceVersion: "1", encrypted: true, idempotencyKey: "parent-refusal-original" });
+    const failure = new Error("private_owner_unknown"), remove = vi.spyOn(storage, "delete");
+    vi.spyOn(service, "ensureParents").mockRejectedValueOnce(failure);
+    await expect(service.append(context, "parent-refused", run.id, 0, payload.length, Readable.from(payload))).rejects.toBe(failure);
+    expect(remove).not.toHaveBeenCalled();expect(repository.runs.size).toBe(1);
+    expect(repository.runs.get(run.id)?.receivedSize).toBe(0);
+    await expect(service.append(context, "parent-refused", run.id, 0, payload.length, Readable.from(payload))).resolves.toBe(payload.length);
+    await expect(service.complete(context, "parent-refused", run.id)).resolves.toMatchObject({ id: run.id, state: "complete" });
+  });
+  it.each([0, 3])("resumes a crashed append from its durable offset %i without keeping unacknowledged bytes", async (offset) => {
+    const payload = Buffer.from("precious"), created = await service.createService({ slug: "crash-resume", name: "Crash resume" });
+    const context = await service.authenticate(`Bearer ${created.token}`);
+    const run = await service.createRun(context, "crash-resume", { filename: "backup.age", createdAt: new Date(), backupType: "full", expectedSize: payload.length, sha256: createHash("sha256").update(payload).digest("hex"), sourceVersion: "1", encrypted: true, idempotencyKey: "crashed-append-resume" });
+    if (offset) await service.append(context, "crash-resume", run.id, 0, offset, Readable.from(payload.subarray(0, offset)));
+    const record = await repository.claimAppend(context.service.id, run.id, offset, payload.length - offset, new Date());
+    await service.ensureParents(record.tempPath);
+    // The writer died after sending bytes, before committing its offset.
+    await storage.write(record.tempPath, Readable.from(payload.subarray(offset)), { offset, create: offset === 0, exclusive: offset === 0, truncate: offset === 0 });
+    expect(await service.uploadOffset(context, "crash-resume", run.id)).toBe(offset);
+    expect(repository.runs.get(run.id)?.state).toBe("uploading");
+    if (offset) expect(await fs.readFile(path.join(root, record.tempPath))).toEqual(payload.subarray(0, offset));
+    else await expect(fs.stat(path.join(root, record.tempPath))).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(service.append(context, "crash-resume", run.id, offset, payload.length - offset, Readable.from(payload.subarray(offset)))).resolves.toBe(payload.length);
+    await expect(service.complete(context, "crash-resume", run.id)).resolves.toMatchObject({ state: "complete" });
+    expect(await fs.readFile(path.join(root, record.finalPath))).toEqual(payload);
+  });
+
+  it("does not release a crashed append when its storage rollback fails", async () => {
+    const created = await service.createService({ slug: "crash-offline", name: "Crash offline" });
+    const context = await service.authenticate(`Bearer ${created.token}`), payload = Buffer.from("precious");
+    const run = await service.createRun(context, "crash-offline", { filename: "backup.age", createdAt: new Date(), backupType: "full", expectedSize: payload.length, sha256: createHash("sha256").update(payload).digest("hex"), sourceVersion: "1", encrypted: true, idempotencyKey: "crashed-append-offline" });
+    const record = await repository.claimAppend(context.service.id, run.id, 0, payload.length, new Date());
+    await service.ensureParents(record.tempPath);
+    await storage.write(record.tempPath, Readable.from(payload), { offset: 0, create: true, exclusive: true, truncate: true });
+    vi.spyOn(storage, "delete").mockRejectedValueOnce(new Error("storage unavailable"));
+    await expect(service.uploadOffset(context, "crash-offline", run.id)).rejects.toThrow("storage unavailable");
+    expect(repository.runs.get(run.id)?.state).toBe("appending");
+    expect(await fs.readFile(path.join(root, record.tempPath))).toEqual(payload);
+  });
   it("allows simultaneous first chunks to create their shared SFTP parent", async () => {
     let checks = 0, release!: () => void;
     const checked = new Promise<void>(resolve => { release = resolve; });
@@ -51,6 +93,27 @@ describe("BackupIngestService", () => {
     repository.finishAppend = async (...args) => { await finish(...args); throw new Error("acknowledgement lost"); };
     expect(await service.append(context, "ack-test", run.id, 0, payload.length, Readable.from(payload))).toBe(payload.length);
     expect(await service.complete(context, "ack-test", run.id)).toMatchObject({ state: "complete" });
+  });
+  it("rolls back a storage-full chunk and preserves the resumable backup identity", async () => {
+    const payload = Buffer.from("precious-backup-after-capacity-recovers");
+    const created = await service.createService({ slug: "storage-full", name: "Storage full" });
+    const context = await service.authenticate(`Bearer ${created.token}`);
+    const run = await service.createRun(context, "storage-full", {
+      filename: "backup.age", createdAt: new Date(), backupType: "full", expectedSize: payload.length,
+      sha256: createHash("sha256").update(payload).digest("hex"), sourceVersion: "version-1", encrypted: true,
+      idempotencyKey: "storage-full-backup",
+    });
+    const record = repository.runs.get(run.id);
+    if (record === undefined) throw new Error("Created run is missing");
+    vi.spyOn(storage, "write").mockRejectedValueOnce(Object.assign(new Error("No space left on device"), { code: "ENOSPC" }));
+
+    await expect(service.append(context, "storage-full", run.id, 0, payload.length, Readable.from(payload))).rejects.toMatchObject({ code: "ENOSPC" });
+    expect(repository.runs.get(run.id)).toMatchObject({ state: "uploading", receivedSize: 0, failureCode: "append_failed" });
+    await expect(fs.stat(path.join(root, record.tempPath))).rejects.toMatchObject({ code: "ENOENT" });
+
+    await expect(service.append(context, "storage-full", run.id, 0, payload.length, Readable.from(payload))).resolves.toBe(payload.length);
+    await expect(service.complete(context, "storage-full", run.id)).resolves.toMatchObject({ state: "complete" });
+    expect((await fs.readFile(path.join(root, record.finalPath))).equals(payload)).toBe(true);
   });
   it("keeps selected archive/mirror capabilities through enrollment and rejects archive access for mirror-only identities", async () => {
     for (const kind of ["volt", "mastermind"] as const) {
@@ -151,6 +214,15 @@ describe("BackupIngestService", () => {
     const a = await service.createService({ slug: "service-a", name: "A" }); const b = await service.createService({ slug: "service-b", name: "B" }); const contextA = await service.authenticate(`Bearer ${a.token}`); const contextB = await service.authenticate(`Bearer ${b.token}`);
     await expect(service.createRun(contextA, "service-b", { filename: "x.age", createdAt: new Date(), backupType: "full", expectedSize: 1, sha256: "a".repeat(64), sourceVersion: "1", encrypted: true, idempotencyKey: "isolation-key" })).rejects.toMatchObject({ code: "not_found" });
     await expect(service.inspectRun(contextB, "service-b", crypto.randomUUID())).rejects.toMatchObject({ code: "not_found" });
+  });
+  it("rejects an oversized producer run before reserving quota or creating temporary bytes", async () => {
+    const created = await service.createService({ slug: "size-limited", name: "Size limited", maxBackupBytes: 8, dailyQuotaBytes: 16, storedQuotaBytes: 16 });
+    const context = await service.authenticate(`Bearer ${created.token}`);
+    await expect(service.createRun(context, "size-limited", {
+      filename: "too-large.age", createdAt: new Date(), backupType: "full", expectedSize: 9, sha256: "a".repeat(64), sourceVersion: "version-1", encrypted: true, idempotencyKey: "oversized-run",
+    })).rejects.toMatchObject({ code: "limit" });
+    expect(repository.runs.size).toBe(0);
+    expect(await fs.readdir(root)).toEqual([]);
   });
   it("cancels an unfinished owner backup and removes its temporary bytes", async () => {
     const payload = Buffer.from("unfinished-backup"); const created = await service.createService({ slug: "service-a", name: "A" }); const context = await service.authenticate(`Bearer ${created.token}`);

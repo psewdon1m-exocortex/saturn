@@ -33,11 +33,13 @@ export class ReconciliationService {
     this.#audit = audit;
   }
 
-  async run(mode: ReconciliationMode): Promise<ReconciliationRun> {
-    return this.#repository.withRunLock?.(() => this.#run(mode)) ?? this.#run(mode);
+  async run(mode: ReconciliationMode, options: { readonly signal?: AbortSignal } = {}): Promise<ReconciliationRun> {
+    options.signal?.throwIfAborted();
+    return this.#repository.withRunLock?.(() => this.#run(mode, options.signal)) ?? this.#run(mode, options.signal);
   }
 
-  async #run(mode: ReconciliationMode): Promise<ReconciliationRun> {
+  async #run(mode: ReconciliationMode, signal?: AbortSignal): Promise<ReconciliationRun> {
+    signal?.throwIfAborted();
     const runId = uuidv7();
     await this.#repository.startRun(runId, mode);
     let scannedResources = 0;
@@ -69,9 +71,11 @@ export class ReconciliationService {
       let afterId: string | undefined;
       let resourcePageSize: number;
       do {
+        signal?.throwIfAborted();
         const page = await this.#repository.listActiveFiles(afterId, 100);
         resourcePageSize = page.length;
         for (const tracked of page) {
+          signal?.throwIfAborted();
           scannedResources += 1;
           const inspect = async () => {
           if (!(await this.#storage.exists(tracked.storagePath))) {
@@ -105,15 +109,19 @@ export class ReconciliationService {
         afterId = page.at(-1)?.id;
       } while (resourcePageSize === 100);
 
+      signal?.throwIfAborted();
       const queue: string[] = [...await this.#repository.listManagedRootPaths()];
       while (queue.length > 0) {
+        signal?.throwIfAborted();
         const directory = queue.shift();
         if (directory === undefined) break;
         let cursor: string | undefined;
         do {
+          signal?.throwIfAborted();
           const page = await this.#storage.list(directory, cursor, 500);
           cursor = page.nextCursor;
           for (const entry of page.entries) {
+            signal?.throwIfAborted();
             scannedStorageEntries += 1;
             if (entry.type === "directory") {
               queue.push(entry.path);
@@ -125,7 +133,9 @@ export class ReconciliationService {
         } while (cursor !== undefined);
       }
 
+      signal?.throwIfAborted();
       for (const interrupted of await this.#repository.listInterruptedOperations()) {
+        signal?.throwIfAborted();
         await addIssue(
           "operation_interrupted",
           interrupted.storagePath,
@@ -136,6 +146,7 @@ export class ReconciliationService {
         );
       }
 
+      signal?.throwIfAborted();
       const completed = await this.#repository.finishRun(runId, {
         state: "complete",
         scannedResources,
@@ -157,7 +168,7 @@ export class ReconciliationService {
         scannedResources,
         scannedStorageEntries,
         issueCount,
-        errorCode: "reconciliation_failed",
+        errorCode: signal?.aborted && error === signal.reason ? "reconciliation_cancelled" : "reconciliation_failed",
       }).catch(() => undefined);
       await this.#audit?.write({
         actorType: "system",

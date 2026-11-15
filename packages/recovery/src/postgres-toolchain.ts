@@ -1,12 +1,14 @@
 import { randomUUID } from "node:crypto";
 import { createHash } from "node:crypto";
+import { createReadStream } from "node:fs";
 import type { StorageAdapter } from "@saturn/storage";
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { Database } from "@saturn/database";
-import type { LogicalDatabaseToolchain } from "./types.js";
+import type { BackupMember, LogicalDatabaseToolchain, MetadataExporter, MetadataExportBudget } from "./types.js";
 import { RecoveryCommitUncertainError } from "./types.js";
 import { runPgProcess } from "./pg-process.js";
+import { assertUnregisteredRecovery, guardRecoveryMutation, inspectJournal, withRecoverySnapshot, type RecoverySnapshot } from "./consistent-snapshot.js";
 
 interface DatabaseConnectionArguments {
   readonly args: readonly string[];
@@ -67,6 +69,8 @@ export class PostgresCommandToolchain implements LogicalDatabaseToolchain {
   readonly #maximumDumpBytes: number;
   readonly #commandTimeoutMs: number;
   readonly #dumpIdleTimeoutMs: number;
+  readonly #snapshotTimeoutMs: number;
+  #snapshotActive = false;
   #replacementSchema: string | undefined;
 
   constructor(input: {
@@ -80,6 +84,7 @@ export class PostgresCommandToolchain implements LogicalDatabaseToolchain {
     readonly maximumDumpBytes: number;
     readonly commandTimeoutMs?: number;
     readonly dumpIdleTimeoutMs?: number;
+    readonly snapshotTimeoutMs?: number;
   }) {
     this.#databaseUrl = input.databaseUrl;
     this.#database = input.database;
@@ -91,12 +96,58 @@ export class PostgresCommandToolchain implements LogicalDatabaseToolchain {
     this.#maximumDumpBytes = input.maximumDumpBytes;
     this.#commandTimeoutMs = input.commandTimeoutMs ?? 15 * 60_000;
     this.#dumpIdleTimeoutMs = input.dumpIdleTimeoutMs ?? 2 * 60_000;
+    this.#snapshotTimeoutMs = input.snapshotTimeoutMs ?? Math.min(input.commandTimeoutMs ?? 60_000,600_000);
     for (const timeout of [this.#commandTimeoutMs,this.#dumpIdleTimeoutMs]) if (!Number.isSafeInteger(timeout) || timeout < 1) throw new Error("PostgreSQL deadline is invalid");
+    if (!Number.isSafeInteger(this.#snapshotTimeoutMs) || this.#snapshotTimeoutMs < 1 || this.#snapshotTimeoutMs > 600_000) throw new Error("PostgreSQL snapshot deadline is invalid");
   }
 
   async createDump(outputPath: string, signal?: AbortSignal): Promise<void> {
+    await this.#withSnapshot(signal, snapshot => this.#dumpFromSnapshot(outputPath, snapshot));
+  }
+
+  async createCoherentBackup(outputPath: string, metadataDirectory: string, metadata: MetadataExporter, signal?: AbortSignal, budget?: MetadataExportBudget): Promise<readonly BackupMember[]> {
+    const exportSnapshot = metadata.exportFromSnapshot?.bind(metadata);
+    if (exportSnapshot === undefined) throw new Error("Coherent PostgreSQL backup requires a snapshot-aware metadata exporter");
+    const created: string[] = [];
+    try {
+      return await this.#withSnapshot(signal, async snapshot => {
+        // The same exported MVCC snapshot controls dump policy and every JSONL page.
+        await this.#dumpFromSnapshot(outputPath, snapshot);
+        created.push(outputPath);
+        const remainingMetadataBytes = budget === undefined ? undefined : budget.totalBytes-(await fs.stat(outputPath)).size-65_536;
+        if(remainingMetadataBytes!==undefined && remainingMetadataBytes<1)throw new Error('Backup dump exceeds the remaining extracted byte budget');
+        const members = await exportSnapshot(metadataDirectory, budget === undefined ? snapshot : {
+          ...snapshot, exportBudget: {totalBytes:remainingMetadataBytes ?? 0,memberBytes:budget.memberBytes},
+        });
+        created.push(...members.map(member => member.sourcePath));
+        const hash = createHash("sha256");
+        for await (const chunk of createReadStream(outputPath)) { snapshot.signal.throwIfAborted(); hash.update(Buffer.from(chunk as Uint8Array)); }
+        const manifestPath = path.join(metadataDirectory, "coherence.json");
+        await fs.writeFile(manifestPath, `${JSON.stringify({
+          schema: "saturn.backup-coherence.v1", snapshotId: snapshot.snapshotId, snapshotStartedAt: snapshot.startedAt,
+          journal: snapshot.journal, clockCutMember: snapshot.journal.shape === "legacy" ? null : "metadata/sync_root_clock.jsonl",
+          databaseDumpSha256: hash.digest("hex"), metadataAuthority: "diagnostic-only-same-cut",
+          registeredRootRecovery: "blocked-requires-backend-reconciliation",
+        }, null, 2)}\n`, { flag: "wx", mode: 0o600 });
+        created.push(manifestPath);
+        return [...members, { path: "metadata/coherence.json", sourcePath: manifestPath, mediaType: "application/json" }];
+      });
+    } catch (error) { await Promise.all(created.map(file => fs.rm(file, { force: true }))); throw error; }
+  }
+
+  async #withSnapshot<T>(signal: AbortSignal | undefined, action: (snapshot: RecoverySnapshot) => Promise<T>): Promise<T> {
+    if (this.#snapshotActive) throw new Error("A consistent backup snapshot is already running in this toolchain");
+    this.#snapshotActive = true;
+    try { return await withRecoverySnapshot(this.#database, this.#snapshotTimeoutMs, signal, action); }
+    finally { this.#snapshotActive = false; }
+  }
+
+  async #dumpFromSnapshot(outputPath: string, snapshot: RecoverySnapshot): Promise<void> {
     const connection = connectionArguments(this.#databaseUrl);
     await fs.mkdir(path.dirname(outputPath), { recursive: true, mode: 0o700 });
+    if (await fs.stat(outputPath).then(() => true, (error: unknown) => { if ((error as NodeJS.ErrnoException).code === "ENOENT") return false; throw error; })) {
+      throw new Error("Database dump destination already exists");
+    }
     try { await runPgProcess({ executable: this.#pgDumpExecutable, args: [
       ...this.#pgDumpPrefixArgs,
       "--format=custom",
@@ -104,10 +155,12 @@ export class PostgresCommandToolchain implements LogicalDatabaseToolchain {
       "--no-owner",
       "--no-acl",
       "--schema=public",
-      ...RECOVERY_TRANSIENT_TABLES.map((table) => `--exclude-table-data=${table}`),
+      `--snapshot=${snapshot.snapshotId}`,
+      ...RECOVERY_TRANSIENT_TABLES.filter(table => snapshot.journal.dumpPolicy === "legacy-transient"
+        || table !== "operation_journal" && table !== "upload_sessions").map((table) => `--exclude-table-data=public.${table}`),
       ...(this.#commandConnectionArgs ?? connection.args),
     ], environment: { ...connection.environment, PGCONNECT_TIMEOUT: "10" }, timeoutMs: this.#commandTimeoutMs,
-      idleTimeoutMs: this.#dumpIdleTimeoutMs, outputPath, maximumBytes: this.#maximumDumpBytes, ...(signal === undefined ? {} : { signal }) });
+      idleTimeoutMs: this.#dumpIdleTimeoutMs, outputPath, maximumBytes: this.#maximumDumpBytes, signal: snapshot.signal });
     } catch (error) {
       await fs.rm(outputPath, { force: true });
       throw error;
@@ -116,22 +169,7 @@ export class PostgresCommandToolchain implements LogicalDatabaseToolchain {
 
   async restoreDump(dumpPath: string, mode: "clean" | "replace", signal?: AbortSignal): Promise<void> {
     if (mode === "replace" && this.#replacementSchema === undefined) throw new Error("Replacement restore must preserve the original schema first");
-    if (mode === "clean") {
-      const occupied = await this.#database.withSql(async sql => {
-        const rows = await sql<{ readonly occupied: boolean }[]>`
-          SELECT EXISTS (
-            SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public'
-            UNION ALL
-            SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public'
-            UNION ALL
-            SELECT 1 FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace
-              WHERE n.nspname = 'public' AND t.typtype IN ('d', 'e', 'r')
-          ) AS occupied
-        `;
-        return rows[0]?.occupied !== false;
-      });
-      if (occupied) throw new Error("Clean restore target must have an empty public schema");
-    }
+    if (mode === "clean" && this.#replacementSchema === undefined) await this.beginCleanRestore();
     const connection = connectionArguments(this.#databaseUrl);
     await runPgProcess({ executable: this.#pgRestoreExecutable, args: [
       ...this.#pgRestorePrefixArgs,
@@ -144,6 +182,27 @@ export class PostgresCommandToolchain implements LogicalDatabaseToolchain {
       ...(this.#commandConnectionArgs ?? connection.args),
     ], environment: { ...connection.environment, PGCONNECT_TIMEOUT: "10", PGOPTIONS: `-c statement_timeout=${String(this.#commandTimeoutMs)} -c lock_timeout=${String(Math.min(this.#commandTimeoutMs,30_000))}` },
       inputPath: dumpPath, timeoutMs: this.#commandTimeoutMs, ...(signal === undefined ? {} : { signal }) });
+  }
+
+  async beginCleanRestore(): Promise<void> {
+    if (this.#replacementSchema !== undefined) throw new Error("A replacement restore is already active");
+    await this.#beginReplacement(true);
+  }
+
+  async #assertEmptySchema(sql: Parameters<Parameters<Database["transaction"]>[0]>[0], schema: string): Promise<void> {
+        const rows = await sql<{ readonly occupied: boolean }[]>`
+          SELECT EXISTS (
+            SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = ${schema}
+            UNION ALL
+            SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = ${schema}
+            UNION ALL
+            SELECT 1 FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace
+              WHERE n.nspname = ${schema} AND t.typtype IN ('d', 'e', 'r')
+            UNION ALL
+            SELECT 1 FROM pg_extension e JOIN pg_namespace n ON n.oid=e.extnamespace WHERE n.nspname=${schema}
+          ) AS occupied
+        `;
+      if (rows[0]?.occupied !== false) throw new Error("Clean restore target must have an empty public schema");
   }
 
   async checkReady(): Promise<void> {
@@ -159,8 +218,17 @@ export class PostgresCommandToolchain implements LogicalDatabaseToolchain {
   }
 
   async beginReplacement(): Promise<void> {
+    await this.#beginReplacement(false);
+  }
+
+  async #beginReplacement(clean: boolean): Promise<void> {
     const original = `_saturn_original_${randomUUID().replaceAll("-", "")}`;
     await this.#database.transaction(async sql => {
+      await sql.unsafe(`SET LOCAL lock_timeout='${String(Math.min(this.#commandTimeoutMs, 10_000))}ms'`);
+      await guardRecoveryMutation(sql);
+      if (clean) await this.#assertEmptySchema(sql,"public");
+      const originalNamespace = (await sql<{ namespace_id: string }[]>`SELECT to_regnamespace('public')::oid::text AS namespace_id`)[0]?.namespace_id;
+      if(originalNamespace===undefined)throw new Error('Recovery source namespace is unavailable');
       const extensions = await sql`SELECT 1 FROM pg_extension e JOIN pg_namespace n ON n.oid=e.extnamespace WHERE n.nspname='public'`;
       if (extensions.length > 0) throw new Error("Replacement restore requires extensions outside the public schema");
       // Creating the guard fails if another replacement or an interrupted one exists.
@@ -168,6 +236,9 @@ export class PostgresCommandToolchain implements LogicalDatabaseToolchain {
       await sql`CREATE TABLE _saturn_restore_guard.state (original_schema text PRIMARY KEY)`;
       await sql`INSERT INTO _saturn_restore_guard.state VALUES (${original})`;
       await sql.unsafe(`ALTER SCHEMA public RENAME TO "${original}"`);
+      const renamedNamespace = (await sql<{ namespace_id: string }[]>`SELECT to_regnamespace(${original})::oid::text AS namespace_id`)[0]?.namespace_id;
+      if(renamedNamespace!==originalNamespace)throw new Error('Recovery preserved namespace identity changed');
+      if(clean)await this.#assertEmptySchema(sql,original);
       await sql`CREATE SCHEMA public`;
     });
     this.#replacementSchema = original;
@@ -178,6 +249,7 @@ export class PostgresCommandToolchain implements LogicalDatabaseToolchain {
     const original = this.#replacementSchema;
     try {
       await this.#database.transaction(async sql => {
+        await guardRecoveryMutation(sql);
         await sql.unsafe(`DROP SCHEMA "${original}" CASCADE`);
         await sql`DROP SCHEMA _saturn_restore_guard CASCADE`;
       });
@@ -213,6 +285,7 @@ export class PostgresCommandToolchain implements LogicalDatabaseToolchain {
 
   verifyRestoredDatabase(): Promise<Record<string, number>> {
     return this.#database.withSql(async (sql) => {
+      assertUnregisteredRecovery(await inspectJournal(sql));
       const [resources, versions, audit, migrations] = await Promise.all([
         sql<{ count: string }[]>`SELECT count(*)::text AS count FROM resources`,
         sql<{ count: string }[]>`SELECT count(*)::text AS count FROM file_versions`,

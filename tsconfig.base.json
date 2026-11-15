@@ -38,6 +38,7 @@
       "@saturn/protection": ["packages/protection/src/index.ts"],
       "@saturn/recovery": ["packages/recovery/src/index.ts"],
       "@saturn/storage": ["packages/storage/src/index.ts"],
+      "@saturn/storage-verifier": ["packages/storage-verifier/src/index.ts"],
       "@saturn/storage-health": ["packages/storage-health/src/index.ts"]
     }
   }

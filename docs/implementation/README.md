@@ -31,6 +31,19 @@ negative-path behavior and recovery path must be tested.
 The 2026-10-06 audit fixes and upgrade/rollback procedure are covered by
 [Transfer safety and recovery](TRANSFER_SAFETY_AND_RECOVERY.md).
 
+The 2026-10-12 cross-project performance work has its own
+[Neptune Windows, Saturn and Pluto staged plan](NEPTUNE_WINDOWS_SATURN_PLUTO_IMPLEMENTATION_PLAN_v1.0.md)
+and [execution acceptance matrix](NEPTUNE_WINDOWS_SATURN_PLUTO_ACCEPTANCE_MATRIX.md).
+Its PERF stages preserve the existing storage, transfer safety and upgrade
+contracts; their acceptance is tracked separately from the historical stages
+below.
+
+The 2026-10-14 CHAT-A source implementation is described in the
+[Saturn handoff](CHAT_A_IMPLEMENTATION_HANDOFF_2026-10-14.md),
+[shared contracts](PARALLEL_SYNC_CONTRACTS_2026-10-14.md) and
+[cross-project checklist](PARALLEL_INTEGRATION_CHECKLIST_2026-10-14.md).
+It has not been built, tested, migrated or deployed; runtime qualification remains open.
+
 ## 2. Stage state model
 
 Every stage uses the following state machine:

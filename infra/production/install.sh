@@ -272,6 +272,11 @@ install_release() {
   docker network inspect exocortex-services >/dev/null 2>&1 || docker network create exocortex-services >/dev/null
   refresh_runtime_secrets
   docker compose --env-file "$CONFIG_FILE" -f "$COMPOSE_FILE" up -d postgres
+  # Schema upgrades (including Drop transfer leases) require a single writer
+  # generation. A repeated install must not migrate beneath existing services.
+  docker compose --env-file "$CONFIG_FILE" -f "$COMPOSE_FILE" stop --timeout 60 web api worker
+  running_writers=$(docker compose --env-file "$CONFIG_FILE" -f "$COMPOSE_FILE" ps --status running -q api worker)
+  [ -z "$running_writers" ] || die "API/worker are still running; refusing migration"
   docker compose --env-file "$CONFIG_FILE" -f "$COMPOSE_FILE" run --rm migrate
   docker compose --env-file "$CONFIG_FILE" -f "$COMPOSE_FILE" up -d worker api web
   attempts=0

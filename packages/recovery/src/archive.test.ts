@@ -72,10 +72,11 @@ async function writeZip(
 }
 
 describe("manifested ZIP backup", () => {
-  it("creates and independently validates an allow-listed archive", async () => {
+  it.each([false,true])("creates and independently validates an allow-listed archive with optional guard policy=%s", async (includeGuard) => {
     const root = await temporaryRoot();
     const members = [];
-    for (const [memberPath, value] of requiredMembers()) {
+    const inputs=requiredMembers();if(includeGuard)inputs.set("metadata/catalog_guard_roots.jsonl",Buffer.from('{"root_id":"00000000-0000-7000-8000-000000000001"}\n'));
+    for (const [memberPath, value] of inputs) {
       const sourcePath = path.join(root, "sources", ...memberPath.split("/"));
       await fs.mkdir(path.dirname(sourcePath), { recursive: true });
       await fs.writeFile(sourcePath, value);
@@ -92,8 +93,9 @@ describe("manifested ZIP backup", () => {
     });
     const validated = await new BackupArchiveValidator(limits).validate(output, path.join(root, "reader-validation"));
     expect(validated.archiveSha256).toBe(created.archiveSha256);
-    expect(validated.manifest.members).toHaveLength(requiredMembers().size);
+    expect(validated.manifest.members).toHaveLength(inputs.size);
     expect(await fs.readFile(path.join(validated.extractionDirectory, "database", "database.dump"), "utf8")).toBe("PGDMP-safe");
+    if(includeGuard)expect(await fs.readFile(path.join(validated.extractionDirectory,"metadata","catalog_guard_roots.jsonl"),"utf8")).toBe(inputs.get("metadata/catalog_guard_roots.jsonl")?.toString());
   });
 
   it("rejects unsafe paths and a configured plaintext secret", async () => {

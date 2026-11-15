@@ -1,8 +1,9 @@
 # Update protocol 2 — release preparation
 
-This checkout requires the signed **Updater 0.5.0** package. It has not been
-published by these changes. Publish and verify that dependency before building
-service releases; the bundle pin and minimum updater version must agree.
+This checkout pins signed **Updater 0.6.17** in `.release/updater.version`.
+The bundle pin and manifest minimum updater version must agree. A source pin
+does not establish release availability or the version installed on a host;
+record the signed dependency assets and actual installed baseline separately.
 
 ## Operator flow
 
@@ -29,6 +30,11 @@ bound to service, head, exact version, request ID, SHA-256, size and expiry
 the browser. Updater independently verifies the receipt, signed release, digests,
 minimum version and actual running version. Downgrade and reinstall are rejected.
 
+The Saturn recovery ZIP contains the database, control-plane metadata, safe
+configuration and deployment inputs; it does not contain stored user file
+bytes. Complete recovery also requires the matching current/retained storage
+bytes and the protected secret recovery set.
+
 During an update, only RAM holds the ZIP for automatic rollback. When a restore
 tool needs a path, Updater uses verified tmpfs and removes the temporary file.
 After daemon/host restart, use Rollback and upload the original saved ZIP; its
@@ -39,8 +45,9 @@ Job/deployment metadata is retained, not ZIP contents or copied .env secrets.
 
 ## First transition from protocol 1
 
-Publish and verify signed Updater 0.5.0 first; build the new head release with
-that pinned bundle. Existing release tags and trust anchors stay immutable.
+Publish and verify the signed Updater version pinned by the selected Saturn
+source (`0.6.17` in this checkout) before building the head release. Existing
+release tags and trust anchors stay immutable.
 
 1. Download the old head's normal full ZIP to the operator PC and confirm it is
    saved. Keep this original copy until the new release is accepted.

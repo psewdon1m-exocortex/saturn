@@ -1,4 +1,7 @@
 import type { FileOperation, FileVersion, Resource, SecurityClassification, UploadSession, UploadStatus } from "./models.js";
+import type { ScopedSyncMetadata, ScopedSyncMetadataRequest } from "./sync-metadata.js";
+import type { UploadPublicationAuthorization, UploadPublicationIntent, UploadPublicationReceipt } from "./upload-publication.js";
+import type { PreparedCatalogUpload, VerifiedCatalogUpload } from "./catalog-commit.js";
 
 export interface CreateUploadRecord {
   readonly id: string;
@@ -15,6 +18,7 @@ export interface CreateUploadRecord {
   readonly requireAbsent?: boolean;
   readonly auditActorType?: string;
   readonly auditActorId?: string;
+  readonly publicationIntent?: UploadPublicationIntent;
 }
 
 export interface CommitUploadRecord {
@@ -27,6 +31,9 @@ export interface CommitUploadRecord {
   readonly sizeBytes: number;
   readonly sha256: string;
   readonly mimeType: string;
+  readonly publicationAuthorization?: UploadPublicationAuthorization;
+  /** Internal verified FileService evidence; never populated by the HTTP contract. */
+  readonly catalogEvidence?: VerifiedCatalogUpload;
 }
 
 export interface AdoptExistingFileRecord {
@@ -46,6 +53,8 @@ export interface UploadLimits {
 }
 
 export interface FileRepository {
+  /** Optional for legacy adapters; never emulate this with per-node tree reads. */
+  readScopedSyncMetadata?(request: ScopedSyncMetadataRequest): Promise<ScopedSyncMetadata>;
   getResource(id: string): Promise<Resource | undefined>;
   getResourceAtPath(storagePath: string): Promise<Resource | undefined>;
   getChild(parentId: string, name: string): Promise<Resource | undefined>;
@@ -66,13 +75,16 @@ export interface FileRepository {
   updateUploadProgress(id: string, expectedOffset: number, newOffset: number): Promise<UploadSession>;
   setUploadState(id: string, state: UploadStatus, fields?: { readonly actualSha256?: string; readonly errorCode?: string }): Promise<UploadSession>;
   retargetUpload?(id: string, targetPath: string): Promise<UploadSession>;
+  prepareUploadCatalog?(id: string, backendIdentity: string | undefined, authorization?: UploadPublicationAuthorization): Promise<PreparedCatalogUpload | undefined>;
   commitUpload(record: CommitUploadRecord): Promise<CompleteUploadRecordResult>;
   adoptExistingFile(record: AdoptExistingFileRecord): Promise<Resource>;
   removeAdoptedFile(storagePath: string, expectedSha256: string): Promise<Resource | undefined>;
   commitOverwrite(record: CommitOverwriteRecord): Promise<CompleteUploadRecordResult>;
   getVersion(resourceId: string, versionId: string): Promise<FileVersion | undefined>;
   listVersions(resourceId: string, offset: number, limit: number): Promise<readonly FileVersion[]>;
-  expireVersion?(resourceId: string, versionId: string): Promise<void>;
+  /** Atomically reject current/pinned/immutable versions before physical deletion.
+   * Returns true for an identical expired row so interrupted deletion can resume. */
+  expireVersion?(resourceId: string, version: Pick<FileVersion, "id" | "storagePath" | "sizeBytes" | "sha256">): Promise<boolean>;
   getOperation(idempotencyKey: string): Promise<FileOperation | undefined>;
   createOperation(record: {
     readonly id: string;
@@ -123,18 +135,18 @@ export interface FileRepository {
 }
 
 export interface CommitOverwriteRecord extends CommitUploadRecord {
+  // The repository anchors archive/deadline timestamps together at commit.
   readonly resourceId: string;
   readonly previousVersionId: string;
   readonly previousVersionArchivePath: string;
-  readonly previousVersionPurgeAfter?: Date;
 }
 
 export interface CommitVersionRestoreRecord {
+  // No client-clock deadline: use the persisted resource's retention policy.
   readonly operationId: string;
   readonly resourceId: string;
   readonly previousVersionId: string;
   readonly previousVersionArchivePath: string;
-  readonly previousVersionPurgeAfter?: Date;
   readonly newVersionId: string;
   readonly storagePath: string;
   readonly sha256: string;
@@ -157,4 +169,5 @@ export interface CopiedResourceRecord {
 export interface CompleteUploadRecordResult {
   readonly upload: UploadSession;
   readonly resource: Resource;
+  readonly publicationReceipt?: UploadPublicationReceipt;
 }

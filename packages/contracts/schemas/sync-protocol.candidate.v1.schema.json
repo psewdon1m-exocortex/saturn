@@ -1,0 +1,377 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:exocortex:sync-protocol:candidate:v1",
+  "$comment": "INACTIVE candidate. Never asserts writer/feed/source authority; no API exports/routes enabled. Feed continuity, binding equality and UTF-8 aggregate limits require semantic validator. All numeric int64 exact decimal strings.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/snapshot_ready"
+    },
+    {
+      "$ref": "#/$defs/feed_page"
+    }
+  ],
+  "$defs": {
+    "integer64": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]{0,17}|9223372036854775807|[1-8][0-9]{18}|9[0-1][0-9]{17}|92[0-1][0-9]{16}|922[0-2][0-9]{15}|9223[0-2][0-9]{14}|92233[0-6][0-9]{13}|922337[0-1][0-9]{12}|92233720[0-2][0-9]{10}|922337203[0-5][0-9]{9}|9223372036[0-7][0-9]{8}|92233720368[0-4][0-9]{7}|922337203685[0-3][0-9]{6}|9223372036854[0-6][0-9]{5}|92233720368547[0-6][0-9]{4}|922337203685477[0-4][0-9]{3}|9223372036854775[0-7][0-9]{2}|922337203685477580[0-6])$"
+    },
+    "descriptor": {
+      "type": "object",
+      "required": [
+        "node_id",
+        "parent_id",
+        "name",
+        "type",
+        "size_bytes",
+        "content_sha256",
+        "content_version_id",
+        "version",
+        "availability"
+      ],
+      "properties": {
+        "node_id": {
+          "type": "string",
+          "pattern": "^[!-~]{1,128}$"
+        },
+        "parent_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[!-~]{1,128}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1020,
+          "pattern": "^[^\u0000/\\\\]+$",
+          "$comment": "UTF-8 bytes <=1020 and Unicode scalar strings validated by the bounded wire reader."
+        },
+        "type": {
+          "enum": [
+            "file",
+            "folder"
+          ]
+        },
+        "size_bytes": {
+          "$ref": "#/$defs/integer64"
+        },
+        "content_sha256": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "content_version_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[!-~]{1,128}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "version": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$"
+        },
+        "availability": {
+          "enum": [
+            "AVAILABLE",
+            "UNAVAILABLE",
+            "UNKNOWN"
+          ]
+        }
+      },
+      "additionalProperties": true,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "folder"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "content_sha256": {
+                "type": "null"
+              },
+              "content_version_id": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "file"
+              },
+              "availability": {
+                "const": "AVAILABLE"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "content_sha256": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "content_version_id": {
+                "type": "string",
+                "pattern": "^[!-~]{1,128}$"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "expected": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "const": "absent"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "node_id",
+            "version"
+          ],
+          "properties": {
+            "kind": {
+              "const": "version"
+            },
+            "node_id": {
+              "type": "string",
+              "pattern": "^[!-~]{1,128}$"
+            },
+            "version": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$"
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "feed_item": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/descriptor"
+        },
+        {
+          "type": "object",
+          "required": [
+            "seq",
+            "kind",
+            "operation_id"
+          ],
+          "properties": {
+            "seq": {
+              "$ref": "#/$defs/integer64"
+            },
+            "kind": {
+              "enum": [
+                "upsert",
+                "tombstone"
+              ]
+            },
+            "operation_id": {
+              "type": "string",
+              "pattern": "^[!-~]{1,128}$"
+            },
+            "before_version": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$"
+            }
+          },
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "tombstone"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "before_version"
+            ]
+          }
+        }
+      ]
+    },
+    "feed_page": {
+      "type": "object",
+      "required": [
+        "protocol",
+        "descriptor_schema",
+        "server_identity",
+        "root_id",
+        "server_epoch",
+        "policy_version",
+        "from_exclusive",
+        "to_inclusive",
+        "items",
+        "next_cursor",
+        "has_more",
+        "binding_version"
+      ],
+      "properties": {
+        "protocol": {
+          "const": "neptune-sync/1"
+        },
+        "descriptor_schema": {
+          "const": "saturn.current-namespace.v1"
+        },
+        "server_identity": {
+          "type": "string",
+          "pattern": "^[!-~]{1,128}$"
+        },
+        "root_id": {
+          "type": "string",
+          "pattern": "^[!-~]{1,128}$"
+        },
+        "server_epoch": {
+          "type": "string",
+          "pattern": "^[!-~]{1,128}$"
+        },
+        "policy_version": {
+          "type": "string",
+          "pattern": "^[!-~]{1,128}$"
+        },
+        "from_exclusive": {
+          "$ref": "#/$defs/integer64"
+        },
+        "to_inclusive": {
+          "$ref": "#/$defs/integer64"
+        },
+        "items": {
+          "type": "array",
+          "maxItems": 500,
+          "items": {
+            "$ref": "#/$defs/feed_item"
+          }
+        },
+        "next_cursor": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "pattern": "^[!-~]+$"
+        },
+        "has_more": {
+          "type": "boolean"
+        },
+        "binding_version": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$"
+        }
+      },
+      "additionalProperties": true
+    },
+    "snapshot_ready": {
+      "type": "object",
+      "required": [
+        "protocol",
+        "descriptor_schema",
+        "server_identity",
+        "root_id",
+        "server_epoch",
+        "policy_version",
+        "snapshot_id",
+        "state",
+        "cut_seq",
+        "entries_cursor",
+        "changes_cursor",
+        "lease_seconds",
+        "absolute_lifetime_seconds",
+        "binding_version"
+      ],
+      "properties": {
+        "protocol": {
+          "const": "neptune-sync/1"
+        },
+        "descriptor_schema": {
+          "const": "saturn.current-namespace.v1"
+        },
+        "server_identity": {
+          "type": "string",
+          "pattern": "^[!-~]{1,128}$"
+        },
+        "root_id": {
+          "type": "string",
+          "pattern": "^[!-~]{1,128}$"
+        },
+        "server_epoch": {
+          "type": "string",
+          "pattern": "^[!-~]{1,128}$"
+        },
+        "policy_version": {
+          "type": "string",
+          "pattern": "^[!-~]{1,128}$"
+        },
+        "snapshot_id": {
+          "type": "string",
+          "pattern": "^[!-~]{1,128}$"
+        },
+        "state": {
+          "const": "READY"
+        },
+        "cut_seq": {
+          "$ref": "#/$defs/integer64"
+        },
+        "entries_cursor": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "pattern": "^[!-~]+$"
+        },
+        "changes_cursor": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "pattern": "^[!-~]+$"
+        },
+        "lease_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 86400
+        },
+        "absolute_lifetime_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 86400
+        },
+        "binding_version": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$"
+        }
+      },
+      "additionalProperties": true
+    }
+  }
+}

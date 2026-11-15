@@ -96,6 +96,11 @@ release can publish artifacts.
 
 ## Release identity
 
+Versions and helper pins in this checkout describe packaging inputs. They do
+not identify the versions installed on a production host or establish current
+release availability. Record the actual installed image/package digests,
+migration ledger, storage layout and signed target assets before an upgrade.
+
 Production releases are created only by tags matching
 `saturn-vMAJOR.MINOR.PATCH`. The current fix identity is `saturn-v0.2.13`; its
 versioned OCI repositories are `saturn-app` and `saturn-web`, and its
@@ -246,3 +251,7 @@ verified against the production-signed Updater manifest and existing trust key.
 ## Enrollment update — 2026-10-05
 
 Host recovery names derive from component + Server ID. Volt/Mastermind registration selects archive, mirror or both. Windows Connection name creates its dedicated server folder and is returned to Neptune; server-side DAV authorization protects its root and excludes other connections. Migration 0042 adds these capabilities; legacy unbound Windows clients require isolated setup. See the accepted [central decision](https://github.com/psewdon1m-exocortex/general/blob/main/decisions/2026-10-05-synchronization-enrollment.md).
+
+## Targeted test lanes
+
+See [test lanes and fixture custody](docs/TEST_LANES.md) before running integration tests. Guarded migrations bind SQL functions to `public`; isolated test databases are required. A passed local audit is not a production activation receipt. Current release gate: [production readiness](docs/implementation/PRODUCTION_READINESS.md).

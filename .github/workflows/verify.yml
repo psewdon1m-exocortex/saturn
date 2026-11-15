@@ -13,6 +13,7 @@ on:
   push:
     branches:
       - main
+      - "release-qualification/package1-*"
     tags:
       - "v*.*.*"
 
@@ -54,7 +55,7 @@ jobs:
           pnpm --filter @saturn/web test:consumers
   verify:
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
@@ -65,7 +66,12 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
       - name: Install Chromium runtime
-        run: pnpm exec playwright install --with-deps chromium
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y libnss3-tools openssl
+          pnpm exec playwright install --with-deps chromium
+      - name: Verify isolated Stage 13 orchestration controls
+        run: node --test --test-concurrency=2 scripts/stage13-*.test.mjs scripts/ci-workspace-*.test.mjs
       - name: Validate the pinned Part 12 catalog and fail-closed gate
         run: |
           python3 scripts/test-known-problems-gate.py
@@ -96,28 +102,7 @@ jobs:
   postgres:
     name: PostgreSQL integration
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    services:
-      postgres:
-        image: postgres:18.1-alpine
-        env:
-          POSTGRES_USER: vault
-          POSTGRES_PASSWORD: disposable-ci-fixture
-          POSTGRES_DB: saturn_test
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U vault -d saturn_test"
-          --health-interval 5s --health-timeout 5s --health-retries 10
-    env:
-      DATABASE_URL: postgresql://vault:disposable-ci-fixture@127.0.0.1:5432/saturn_test
-      PIPELINE_TEST_DATABASE_URL: postgresql://vault:disposable-ci-fixture@127.0.0.1:5432/saturn_test
-      STORAGE_SETTINGS_TEST_DATABASE_URL: postgresql://vault:disposable-ci-fixture@127.0.0.1:5432/saturn_test
-      PLUTO_TEST_DATABASE_URL: postgresql://vault:disposable-ci-fixture@127.0.0.1:5432/saturn_test
-      DEVICE_TEST_DATABASE_URL: postgresql://vault:disposable-ci-fixture@127.0.0.1:5432/saturn_test
-      POLICY_TEST_DATABASE_URL: postgresql://vault:disposable-ci-fixture@127.0.0.1:5432/saturn_test
-      SATURN_HOST_RECOVERY_TEST_DATABASE_URL: postgresql://vault:disposable-ci-fixture@127.0.0.1:5432/saturn_test
-      SATURN_CATALOG_INTEGRATION: '1'
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
@@ -126,8 +111,16 @@ jobs:
       - run: corepack enable && corepack prepare pnpm@11.24.0 --activate
       - run: pnpm install --frozen-lockfile
       - run: pnpm -r --filter @saturn/api... --filter @saturn/protection... build
-      - run: pnpm --filter @saturn/database migrate
-      - run: pnpm -r --filter @saturn/database --filter @saturn/protection --filter @saturn/api test
+      - name: Run SQL suites with owned PostgreSQL, SFTP, K4 and dump inputs
+        run: node scripts/ci-workspace-inputs.mjs --postgres-suite
+      - name: Preserve input closure evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: saturn-postgres-inputs-${{ github.sha }}
+          path: artifacts/verification/workspace-inputs/
+          if-no-files-found: ignore
+          retention-days: 14
 
   pre-push-gate:
     name: Pre-push gate

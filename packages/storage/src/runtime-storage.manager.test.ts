@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { Readable } from "node:stream";
-import type { SaturnConfig } from "@saturn/config";
+import { requireSftpStorage, type SaturnConfig } from "@saturn/config";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { RuntimeStorageManager } from "./runtime-storage.manager.js";
 import type { StorageAdapter } from "./types.js";
@@ -30,6 +30,21 @@ afterEach(async () => {
 });
 
 describe("RuntimeStorageManager", () => {
+  it("rechecks optional verifier support after profile changes without treating availability as a proof",async()=>{
+    const directory=await fs.mkdtemp(path.join(os.tmpdir(),"saturn-verifier-capability-"));temporaryDirectories.push(directory);
+    const credential=path.join(directory,"password");await fs.writeFile(credential,"fixture-secret");
+    const plain=adapter("plain"),legacy={...adapter("legacy"),verify:vi.fn()},unavailable={...adapter("unavailable"),verify:vi.fn(),supportsVerify:vi.fn(async()=>false)};
+    const manager=new RuntimeStorageManager(config(credential),directory,value=>value.host==='bootstrap.example'?plain:value.host==='legacy.example'?legacy:unavailable);
+    try{
+      await manager.initialize();expect(await manager.supportsVerify()).toBe(false);
+      await manager.activate({profileId:"11111111-1111-4111-8111-111111111111",revision:2,activatedAt:new Date().toISOString(),config:config(credential,"legacy.example")});
+      expect(await manager.supportsVerify()).toBe(true);expect(legacy.verify).not.toHaveBeenCalled();
+      await manager.activate({profileId:"22222222-2222-4222-8222-222222222222",revision:3,activatedAt:new Date().toISOString(),config:config(credential,"unavailable.example")});
+      expect(await manager.supportsVerify()).toBe(false);expect(unavailable.verify).not.toHaveBeenCalled();
+      unavailable.supportsVerify.mockResolvedValue(true);expect(await manager.supportsVerify()).toBe(true);
+      expect(unavailable.supportsVerify).toHaveBeenCalledTimes(2);
+    }finally{await manager.close();}
+  });
   it("applies production fsync policy to a legacy profile and rejects a weaker activation",async()=>{
     const directory=await fs.mkdtemp(path.join(os.tmpdir(),"saturn-storage-strict-"));temporaryDirectories.push(directory);
     const credential=path.join(directory,"password");await fs.writeFile(credential,"fixture-secret");
@@ -48,7 +63,7 @@ describe("RuntimeStorageManager", () => {
     await fs.writeFile(bootstrapCredential, "bootstrap-secret\n", { mode: 0o600 });
     await fs.writeFile(runtimeCredential, "runtime-secret\n", { mode: 0o600 });
     const created: string[] = [];
-    const factory = (value: SaturnConfig["storage"]) => { created.push(value.host); return adapter(value.host); };
+    const factory = (value: SaturnConfig["storage"]) => { const sftp = requireSftpStorage(value); created.push(sftp.host); return adapter(sftp.host); };
     const manager = new RuntimeStorageManager(config(bootstrapCredential), directory, factory);
     await manager.initialize();
     await manager.activate({ profileId: "11111111-1111-4111-8111-111111111111", revision: 2, activatedAt: "2026-09-04T00:00:00.000Z", config: config(runtimeCredential, "next.example") });
@@ -81,7 +96,7 @@ describe("RuntimeStorageManager", () => {
     const bootstrapCredential = path.join(directory, "bootstrap-password");
     const candidateCredential = path.join(directory, "credential-candidate.password");
     await fs.writeFile(bootstrapCredential, "bootstrap-secret\n", { mode: 0o600 });
-    const factory = (value: SaturnConfig["storage"]) => adapter(value.host);
+    const factory = (value: SaturnConfig["storage"]) => adapter(requireSftpStorage(value).host);
     const manager = new RuntimeStorageManager(config(bootstrapCredential), directory, factory);
     const bootstrap = manager.current();
     await manager.initialize();

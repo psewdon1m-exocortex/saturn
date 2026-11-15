@@ -1,3 +1,5 @@
+import type { RecoverySnapshot } from "./consistent-snapshot.js";
+
 export interface RecoveryLimits {
   readonly maxArchiveBytes: number;
   readonly maxMemberBytes: number;
@@ -50,12 +52,19 @@ export interface ValidatedBackup {
 
 export interface LogicalDatabaseToolchain {
   createDump(outputPath: string): Promise<void>;
+  createCoherentBackup?(outputPath: string, metadataDirectory: string, metadata: MetadataExporter, signal?: AbortSignal, budget?: MetadataExportBudget): Promise<readonly BackupMember[]>;
   restoreDump(dumpPath: string, mode: "clean" | "replace"): Promise<void>;
   verifyRestoredDatabase(): Promise<Record<string, number>>;
   verifyStorage?(storage: StorageAdapter): Promise<void>;
   beginReplacement?(): Promise<void>;
+  beginCleanRestore?(): Promise<void>;
   commitReplacement?(): Promise<void>;
   rollbackReplacement?(): Promise<void>;
+}
+
+export interface MetadataExportBudget {
+  readonly totalBytes: number;
+  readonly memberBytes: number;
 }
 
 export class RecoveryCommitUncertainError extends Error {
@@ -67,6 +76,7 @@ export class RecoveryCommitUncertainError extends Error {
 
 export interface MetadataExporter {
   exportTo(directory: string): Promise<readonly BackupMember[]>;
+  exportFromSnapshot?(directory: string, snapshot: RecoverySnapshot): Promise<readonly BackupMember[]>;
 }
 
 export interface BackupRunInput {

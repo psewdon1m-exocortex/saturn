@@ -39,6 +39,12 @@ Populate actual Kernel/Volt bootstrap coordinates, service tokens, SFTP host fin
 
 ## Recovery boundaries
 
+Automatic logical replacement is blocked when registered sync roots or sealed
+upload identities require backend reconciliation. A database dump alone does
+not restore backend bytes, custody or fencing. See the coherent journal recovery
+contract in `packages/recovery/COHERENT_JOURNAL_RECOVERY.md`; an ordinary empty
+stand restore does not qualify activated-root recovery.
+
 Keep the Access Key and host-recovery passphrase separately from recovery files. Main-service recovery retains user settings and application data while preserving or requiring re-enrollment of external host trust. Host recovery is controlled through `sudo updater tui`: Updater, Neptune, Gryphon, Wyvern and Window are optional independent pipelines with separate setup codes, producer identities and revoke lifecycles. Gateway stores each configured service under its own physical `# sync inner services/<service>/<server>` tree while receipts retain the stable `/backups/<service>/<server>` logical alias; an absent service needs no identity. Saturn exposes neither a helper-recovery browser form nor a proxy route. The files exclude executables, release trust keys, systemd units and head deployment environments. Install trusted software before restoring one downloaded service-scoped file. Each file fails explicitly at 128 MiB expanded or 10000 files; it never silently omits data or replaces neighboring service roots.
 
 ## Acceptance evidence

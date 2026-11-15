@@ -10,10 +10,22 @@ import { LocalStorageAdapter, RuntimeStorageManager } from "@saturn/storage";
 import { ROOT_RESOURCE_ID, SYNC_RESOURCE_ID, DROP_POINT_RESOURCE_ID, VOLT_RESOURCE_ID } from "@saturn/file-core";
 import type { SaturnConfig } from "@saturn/config";
 import { StorageCatalogService } from "./storage-catalog.service.js";
+import { checkpointCatalog } from "./storage-catalog-checkpoint.fixture.js";
 
 const enabled=process.env.SATURN_CATALOG_INTEGRATION==='1';
+const evidence=process.env.SATURN_CATALOG_EVIDENCE_DIR;
+// Full-schema down/up is an integration operation even without evidence export.
+const proofTimeout=30_000;
 const migrations=fileURLToPath(new URL('../../database/migrations/',import.meta.url));
 const hash=(value:string)=>createHash('sha256').update(value).digest('hex');
+async function createCatalogStorage(directory: string) {
+  const storage = new LocalStorageAdapter(path.join(directory, 'storage'));
+  await storage.initialize();
+  const manager = new RuntimeStorageManager({host:'localhost',port:22,username:'fixture',root:'.',hostFingerprint:`SHA256:${'a'.repeat(43)}`,
+    authMode:'password_file',passwordFile:path.join(directory,'unused'),operationTimeoutMs:10000,healthTimeoutMs:1000,maxConnections:2} satisfies SaturnConfig['storage'],path.join(directory,'runtime'),()=>storage);
+  await manager.initialize();
+  return {storage,manager};
+}
 describe.skipIf(!enabled)('storage catalog PostgreSQL round trip',()=>{
   const name=`catalog_test_${randomUUID().replaceAll('-','')}`;
   let admin:Database;let database:Database;let databaseUrl:string;let directory:string;
@@ -31,10 +43,11 @@ describe.skipIf(!enabled)('storage catalog PostgreSQL round trip',()=>{
     await migrate(databaseUrl,migrations);
     database=new Database(databaseUrl,{max:5,maintenanceBarrier:true});
     directory=await fs.mkdtemp(path.join(os.tmpdir(),'saturn-catalog-integration-'));
-    storage=new LocalStorageAdapter(path.join(directory,'storage'));await storage.initialize();
-    manager=new RuntimeStorageManager({host:'localhost',port:22,username:'fixture',root:'.',hostFingerprint:`SHA256:${'a'.repeat(43)}`,
-      authMode:'password_file',passwordFile:path.join(directory,'unused'),operationTimeoutMs:10000,healthTimeoutMs:1000,maxConnections:2} satisfies SaturnConfig['storage'],path.join(directory,'runtime'),()=>storage);
-    await manager.initialize();
+    if(evidence!==undefined){
+      if(!path.isAbsolute(evidence)||path.dirname(await fs.realpath(evidence))!==await fs.realpath(os.tmpdir()))throw new Error('Catalog evidence directory outside owned TEMP');
+      await fs.writeFile(path.join(evidence,'ownership.json'),JSON.stringify({name,directory,knownId,goneId,versionId,fileShare,rootShare,unrelatedShare}),{flag:'wx'});
+    }
+    ({storage,manager}=await createCatalogStorage(directory));
     const roots=await database.withSql(sql=>sql<{storage_path:string}[]>`SELECT storage_path FROM resources WHERE parent_id='00000000-0000-7000-8000-000000000001'`);
     for(const root of roots)await storage.mkdir(root.storage_path);
     await storage.write('# sync windows/known.txt',Readable.from('abd'),{offset:0,create:true});
@@ -60,10 +73,12 @@ describe.skipIf(!enabled)('storage catalog PostgreSQL round trip',()=>{
     // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
     if(admin!==undefined){
       if(!/^catalog_test_[a-f0-9]{32}$/.test(name))throw new Error('Invalid cleanup database name');
-      await admin.withSql(async sql=>{await sql`DROP DATABASE IF EXISTS ${sql(name)} WITH (FORCE)`;});await admin.close();
+      try{
+        if(evidence===undefined)await admin.withSql(async sql=>{await sql`DROP DATABASE IF EXISTS ${sql(name)} WITH (FORCE)`;});
+      }finally{await admin.close();}
     }
     // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
-    if(directory!==undefined)await fs.rm(directory,{recursive:true,force:true});
+    if(directory!==undefined&&evidence===undefined)await fs.rm(directory,{recursive:true,force:true});
   });
   it('persists a read-only report and refuses concurrent requests',async()=>{
     await service.start();await expect(service.start()).rejects.toMatchObject({code:'storage_analysis_in_progress'});
@@ -123,6 +138,7 @@ describe.skipIf(!enabled)('storage catalog PostgreSQL round trip',()=>{
     }
   });
   it('rejects a report after remote contents changed without modifying catalog rows',async()=>{
+    await checkpointCatalog('before-stale-file',database,databaseUrl,directory);
     await storage.write('# sync windows/known.txt',Readable.from('abe'),{offset:0,create:false,truncate:true});
     await service.start();await service.runNext();const report=await service.latest();if(report.job===null)throw new Error('Report absent');
     await storage.write('# sync windows/known.txt',Readable.from('abf'),{offset:0,create:false,truncate:true});
@@ -130,9 +146,10 @@ describe.skipIf(!enabled)('storage catalog PostgreSQL round trip',()=>{
     expect((await service.latest()).job?.state).toBe('stale');
     const known=await database.withSql(sql=>sql<{sha256:string}[]>`SELECT sha256 FROM resources WHERE id=${knownId}`);
     expect(known[0]?.sha256).toBe(hash('abd'));
-  });
+  },proofTimeout);
   it('rolls back the complete catalog transaction when a database write fails',async()=>{
     await service.start();await service.runNext();const report=await service.latest();if(report.job===null)throw new Error('Report absent');
+    await checkpointCatalog('before-write-failure',database,databaseUrl,directory);
     await database.withSql(async sql=>{await sql.unsafe(`CREATE FUNCTION catalog_fixture_fail() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.name='known.txt' THEN RAISE EXCEPTION 'fixture failure'; END IF; RETURN NEW; END $$; CREATE TRIGGER catalog_fixture_fail BEFORE UPDATE ON resources FOR EACH ROW EXECUTE FUNCTION catalog_fixture_fail()`);});
     try{
       await service.synchronize(report.job.id);await service.runNext();
@@ -140,18 +157,57 @@ describe.skipIf(!enabled)('storage catalog PostgreSQL round trip',()=>{
       const known=await database.withSql(sql=>sql<{sha256:string}[]>`SELECT sha256 FROM resources WHERE id=${knownId}`);
       expect(known[0]?.sha256).toBe(hash('abd'));
     }finally{await database.withSql(async sql=>{await sql.unsafe('DROP TRIGGER catalog_fixture_fail ON resources; DROP FUNCTION catalog_fixture_fail()');});}
-  });
+  },proofTimeout);
   it('guards rollback with active jobs and has a working down/up migration',async()=>{
-    const newer = (await listMigrationPairs(migrations)).filter(pair => pair.name > '0043_storage_catalog_analysis').reverse();
-    for (const pair of newer) expect(await rollback(databaseUrl, migrations)).toBe(pair.name);
-    await service.start();await expect(rollback(databaseUrl,migrations)).rejects.toThrow('Finish storage catalog jobs');
-    await service.runNext();expect(await rollback(databaseUrl,migrations)).toBe('0043_storage_catalog_analysis');
-    expect(await migrate(databaseUrl,migrations)).toBe(newer.length + 1);
-  });
+    await checkpointCatalog('before-migration',database,databaseUrl,directory);
+    const currentDown = await fs.readFile(path.join(migrations,'0050_current_namespace_metadata.down.sql'),'utf8');
+    const original = () => database.withSql(sql=>sql`SELECT id,metadata_version,sync_availability FROM resources ORDER BY id`);
+    const before = await original();
+    await expect(database.transaction(sql=>sql.unsafe(currentDown))).rejects.toMatchObject({code:'23514'});
+    expect(await original()).toEqual(before);
+
+    // A full down/up is valid only while the namespace is unused.
+    const legacyName = 'catalog_test_'+randomUUID().replaceAll('-','');
+    const legacyUrl = new URL(databaseUrl);legacyUrl.pathname='/'+legacyName;
+    const legacyDirectory = await fs.mkdtemp(path.join(os.tmpdir(),'saturn-catalog-rollback-'));
+    const legacyEvidence = evidence===undefined?undefined:await fs.mkdtemp(path.join(os.tmpdir(),'saturn-catalog-rollback-evidence-'));
+    if(evidence!==undefined&&legacyEvidence!==undefined){
+      await fs.writeFile(path.join(legacyEvidence,'ownership.json'),JSON.stringify({name:legacyName,directory:legacyDirectory}),{flag:'wx'});
+      await fs.writeFile(path.join(evidence,'legacy-ownership.json'),JSON.stringify({name:legacyName,directory:legacyDirectory,evidence:legacyEvidence}),{flag:'wx'});
+    }
+    const legacyDb=new Database(legacyUrl.toString(),{max:2,maintenanceBarrier:true});
+    let legacyStorage: Awaited<ReturnType<typeof createCatalogStorage>> | undefined,created=false;
+    try {
+      await admin.withSql(sql=>sql`CREATE DATABASE ${sql(legacyName)}`);created=true;
+      await migrate(legacyUrl.toString(),migrations);
+      legacyStorage=await createCatalogStorage(legacyDirectory);
+      const roots=await legacyDb.withSql(sql=>sql<{storage_path:string}[]>`SELECT storage_path FROM resources WHERE parent_id=${ROOT_RESOURCE_ID} ORDER BY storage_path`);
+      for(const root of roots)await legacyStorage.storage.mkdir(root.storage_path);
+      await checkpointCatalog('before-migration',legacyDb,legacyUrl.toString(),legacyDirectory,legacyEvidence);
+      const legacyService=new StorageCatalogService(legacyDb,legacyStorage.manager);
+      const newer=(await listMigrationPairs(migrations)).filter(pair=>pair.name>'0043_storage_catalog_analysis').reverse();
+      for(const pair of newer)expect(await rollback(legacyUrl.toString(),migrations)).toBe(pair.name);
+      const job=await legacyService.start();
+      await expect(rollback(legacyUrl.toString(),migrations)).rejects.toThrow('Finish storage catalog jobs');
+      await legacyService.runNext();
+      expect((await legacyService.latest()).job).toMatchObject({id:job.id,state:'ready'});
+      expect(await rollback(legacyUrl.toString(),migrations)).toBe('0043_storage_catalog_analysis');
+      expect(await migrate(legacyUrl.toString(),migrations)).toBe(newer.length+1);
+      expect(await migrate(legacyUrl.toString(),migrations)).toBe(0);
+    }finally{
+      await legacyStorage?.manager.close();
+      await legacyDb.close();
+      if(evidence===undefined){
+        if(created)await admin.withSql(sql=>sql`DROP DATABASE ${sql(legacyName)}`);
+        await fs.rm(legacyDirectory,{recursive:true,force:true});
+      }
+    }
+  },proofTimeout);
   it('recovers a worker lease abandoned during analysis',async()=>{
     const queued=await service.start();
+    await checkpointCatalog('before-lease-expiry',database,databaseUrl,directory);
     await database.withSql(async sql=>{await sql`UPDATE storage_catalog_jobs SET state='analyzing',lease_token=${randomUUID()},lease_expires_at=now()-interval '1 minute' WHERE id=${queued.id}`;});
     await new StorageCatalogService(database,manager).runNext();
     expect((await service.latest()).job?.state).toBe('ready');
-  });
+  },proofTimeout);
 });

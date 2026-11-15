@@ -8,7 +8,7 @@ import { BackupIngestService, PostgresBackupRepository, type BackupRepository } 
 import { loadEnvironment, readOwnerAccessKey } from "@saturn/config";
 import { Database } from "@saturn/database";
 import { DropBufferStore, DropService, GryphonNotificationSink, PostgresDropRepository, type DropRepository } from "@saturn/drop";
-import { BACKUPS_RESOURCE_ID, FileService, PostgresFileRepository } from "@saturn/file-core";
+import { BACKUPS_RESOURCE_ID, FileService } from "@saturn/file-core";
 import { LaboratoryService, PostgresLaboratoryRepository, type LaboratoryRepository } from "@saturn/laboratory";
 import { RuntimeStorageManager, type StorageAdapter } from "@saturn/storage";
 import { PostgresPurgeRepository, PostgresReconciliationRepository, PurgeService, ReconciliationService } from "@saturn/protection";
@@ -23,6 +23,8 @@ import { ActivityController } from "./activity.controller.js";
 import { ProtectionController } from "./protection.controller.js";
 import { AuthController } from "./auth.controller.js";
 import { DropController } from "./drop.controller.js";
+import { OwnerBrowserTreeController, DropBrowserTreeController } from "./browser-upload-tree.controller.js";
+import { BROWSER_TREE_HTTP_SERVICE } from "./browser-upload-tree.service.js";
 import { DropSessionGuard } from "./drop-session.guard.js";
 import { GryphonController } from "./gryphon.controller.js";
 import { GryphonOwnerController } from "./gryphon-owner.controller.js";
@@ -62,6 +64,7 @@ import {
   STORAGE_ADAPTER,
   STORAGE_HEALTH,
   STORAGE_RUNTIME,
+  GUARDED_RUNTIME,
 } from "./tokens.js";
 import { ArchiveController } from "./archive.controller.js";
 import { OperatorController } from "./operator.controller.js";
@@ -76,16 +79,21 @@ import { StorageConnectionController } from "./storage-connection.controller.js"
 import { StorageConnectionService } from "./storage-connection.service.js";
 import { StorageCatalogService } from "@saturn/protection";
 import { SyncClientController } from "./sync-client.controller.js";
+import { SyncMetadataController } from "./sync-metadata.controller.js";
 import { NeptuneAgentController, NeptuneFleetOwnerController } from "./neptune-fleet.controller.js";
 import { NeptuneFleetService } from "./neptune-fleet.service.js";
 import { BackupMaintenanceService } from "./backup-maintenance.service.js";
 import { PlutoController } from "./pluto.controller.js";
+import { GuardedRuntime } from "../../../packages/sync/src/guarded-runtime.js";
 
 const config = loadEnvironment();
 
 @Module({
-  controllers: [PlutoController, UpdaterController, HealthController, PublicReachabilityController, AuthController, OperatorController, TransferTaskController, ArchiveController, StorageConnectionController, RecoveryController, NeptuneExportController, NeptuneOwnerController, NeptuneAgentController, NeptuneFleetOwnerController, GryphonOwnerController, FileController, ActivityController, ProtectionController, DropController, GryphonController, ShareOwnerController, ResourceClassificationController, PublicShareController, DeviceController, DeviceEnrollmentController, DeviceSessionController, SyncClientController, BackupOwnerController, BackupRestoreController, BackupEnrollmentController, BackupCapabilitiesController, BackupProducerController, LaboratoryClientController, LaboratoryAssetController, LaboratoryImportController, LaboratoryDeliveryController],
+  controllers: [OwnerBrowserTreeController, DropBrowserTreeController, PlutoController, UpdaterController, HealthController, PublicReachabilityController, AuthController, OperatorController, TransferTaskController, ArchiveController, StorageConnectionController, RecoveryController, NeptuneExportController, NeptuneOwnerController, NeptuneAgentController, NeptuneFleetOwnerController, GryphonOwnerController, FileController, ActivityController, ProtectionController, DropController, GryphonController, ShareOwnerController, ResourceClassificationController, PublicShareController, DeviceController, DeviceEnrollmentController, DeviceSessionController, SyncClientController, SyncMetadataController, BackupOwnerController, BackupRestoreController, BackupEnrollmentController, BackupCapabilitiesController, BackupProducerController, LaboratoryClientController, LaboratoryAssetController, LaboratoryImportController, LaboratoryDeliveryController],
   providers: [
+    // Enable only after the shared fenced runtime/0110 role contract is qualified.
+    // Missing composition refuses admission; ordinary flat upload remains available.
+    { provide: BROWSER_TREE_HTTP_SERVICE, useValue: null },
     { provide: APP_CONFIG, useValue: config },
     { provide: DATABASE, useFactory: () => new Database(config.databaseUrl, { max: 10, maintenanceBarrier: true }) },
     {
@@ -96,7 +104,20 @@ const config = loadEnvironment();
         return storage;
       },
     },
-    { provide: STORAGE_ADAPTER, useExisting: STORAGE_RUNTIME },
+    {
+      provide: GUARDED_RUNTIME,
+      useFactory: async (database: Database, storage: RuntimeStorageManager, audit: AuditService, auth: OwnerAuthService) => GuardedRuntime.create({
+        database, storage, ...(process.env.SATURN_GUARDED_RUNTIME_MANIFEST === undefined ? {} : { manifestFile: process.env.SATURN_GUARDED_RUNTIME_MANIFEST }),
+        files: { ...config.limits, auditSink: audit },
+        validateOwnerSession: input => auth.validateSession(input),
+        device: { pepper: (await fs.readFile(config.device.pepperFile, "utf8")).replace(/[\r\n]+$/, ""), options: {
+          enabled: config.device.enabled, publicOrigin: config.publicOrigin, uploadChunkMaxBytes: config.limits.uploadChunkMaxBytes,
+          propfindMaxItems: config.device.propfindMaxItems, deleteMaxItems: config.device.deleteMaxItems, deleteWindowMs: config.device.deleteWindowMs,
+        } },
+      }),
+      inject: [DATABASE, STORAGE_RUNTIME, AUDIT_SERVICE, AUTH_SERVICE],
+    },
+    { provide: STORAGE_ADAPTER, useFactory: (runtime: GuardedRuntime) => runtime.legacyStorage, inject: [GUARDED_RUNTIME] },
     {
       provide: AUDIT_SERVICE,
       useFactory: (database: Database) => createAuditService(database, config),
@@ -126,12 +147,8 @@ const config = loadEnvironment();
     },
     {
       provide: FILE_SERVICE,
-      useFactory: (database: Database, storage: StorageAdapter, audit: AuditService) => new FileService(
-        new PostgresFileRepository(database),
-        storage,
-        { ...config.limits, auditSink: audit },
-      ),
-      inject: [DATABASE, STORAGE_ADAPTER, AUDIT_SERVICE],
+      useFactory: (runtime: GuardedRuntime) => runtime.legacyFiles,
+      inject: [GUARDED_RUNTIME],
     },
     { provide: ARCHIVE_REPOSITORY, useFactory: (database: Database) => new PostgresArchiveJobRepository(database), inject: [DATABASE] },
     {
@@ -329,8 +346,8 @@ const config = loadEnvironment();
     },
     {
       provide: StorageCatalogService,
-      useFactory: (database: Database, storage: RuntimeStorageManager, audit: AuditService) => new StorageCatalogService(database, storage, audit),
-      inject: [DATABASE, STORAGE_RUNTIME, AUDIT_SERVICE],
+      useFactory: (database: Database, runtime: GuardedRuntime, audit: AuditService) => new StorageCatalogService(database, runtime.catalogStorage, audit),
+      inject: [DATABASE, GUARDED_RUNTIME, AUDIT_SERVICE],
     },
     RecoveryWorkflowService,
     NeptuneFleetService,

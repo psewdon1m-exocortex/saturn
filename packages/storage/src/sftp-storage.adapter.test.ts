@@ -4,9 +4,11 @@ import type { SaturnConfig } from "@saturn/config";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SftpStorageAdapter } from "./sftp-storage.adapter.js";
 import { callSftp } from "./sftp-pool.js";
+import type * as SftpPoolModule from "./sftp-pool.js";
 
 const fixture = vi.hoisted(() => ({ reader: undefined as Readable | undefined, writer: undefined as Writable | undefined, disconnect: undefined as AbortController | undefined, release: vi.fn(async () => undefined) }));
-vi.mock("./sftp-pool.js", () => ({
+vi.mock("./sftp-pool.js", async (importOriginal) => ({
+  ...await importOriginal<typeof SftpPoolModule>(),
   callSftp: vi.fn(),
   SftpConnectionPool: class {
     async acquire() {
@@ -112,7 +114,8 @@ describe("SFTP read lifecycle", () => {
     const stream = await new SftpStorageAdapter(config).openRead("note.md");
     stream.destroy(); await tick(); await tick();
     expect(reader().destroyed).toBe(true);
-    expect(fixture.release).toHaveBeenCalledExactlyOnceWith(true);
+    await stream.storageClosed;
+    expect(fixture.release).toHaveBeenCalledExactlyOnceWith(false);
   });
 
   it("fails the consumer even when the disconnected remote never acknowledges handle destruction", async () => {

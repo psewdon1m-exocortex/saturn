@@ -1,0 +1,114 @@
+{
+  "binding": {
+    "binding_version": "00000000-0000-4000-8000-000000000001",
+    "descriptor_schema": "saturn.current-namespace.v1",
+    "policy_version": "policy",
+    "protocol": "neptune-sync/1",
+    "root_id": "00000000-0000-4000-8000-000000000050",
+    "server_epoch": "00000000-0000-4000-8000-000000000052",
+    "server_identity": "stage3-c"
+  },
+  "caller": "cmd/pluto ordinary indexed daemon",
+  "catalogInput": {
+    "backendIdentity": "backend-c",
+    "bindingVersion": "00000000-0000-4000-8000-000000000001",
+    "epoch": "00000000-0000-4000-8000-000000000052",
+    "intent": {
+      "condition": {
+        "kind": "absent"
+      },
+      "deviceId": "00000000-0000-4000-8000-000000000051",
+      "deviceKind": "pluto",
+      "expectedVersionId": null,
+      "idempotencyKey": "pluto-sync-47234703-2207-44bc-b927-f6e875eb1616",
+      "ifMatch": null,
+      "ifNoneMatch": "*",
+      "name": "file",
+      "parentId": "00000000-0000-4000-8000-000000001004",
+      "parentTopology": [
+        {
+          "name": "source",
+          "nodeId": "00000000-0000-4000-8000-000000001004",
+          "parentId": "00000000-0000-4000-8000-000000001003"
+        },
+        {
+          "name": "f-0001",
+          "nodeId": "00000000-0000-4000-8000-000000001003",
+          "parentId": "00000000-0000-4000-8000-000000001002"
+        },
+        {
+          "name": "endurance-4ace36b4d11a12f9",
+          "nodeId": "00000000-0000-4000-8000-000000001002",
+          "parentId": "00000000-0000-4000-8000-000000001001"
+        },
+        {
+          "name": "retained",
+          "nodeId": "00000000-0000-4000-8000-000000001001",
+          "parentId": "00000000-0000-4000-8000-000000000050"
+        },
+        {
+          "name": "backup",
+          "nodeId": "00000000-0000-4000-8000-000000000050",
+          "parentId": null
+        }
+      ],
+      "requestPath": "/retained/endurance-4ace36b4d11a12f9/f-0001/source/file",
+      "requireAbsent": true,
+      "rootId": "00000000-0000-4000-8000-000000000050",
+      "schema": "saturn.upload-intent.v2",
+      "sha256": "8722bd6c7fdcfcdccaaeac3c64d9c7684a09d6597464efa002a5fcaa992359c1",
+      "sizeBytes": "12",
+      "targetId": null
+    }
+  },
+  "catalogStatus": {
+    "replayed": false,
+    "result": {
+      "firstSeq": "5",
+      "intentHash": "186967059148b3f686ab20b236f9d9217b3dfdf31ebc36da61e573bd259d979b",
+      "lastSeq": "5",
+      "operationId": "00000000-0000-4000-8000-000000006000",
+      "publicationReceipt": {
+        "etag": "\"sha256-8722bd6c7fdcfcdccaaeac3c64d9c7684a09d6597464efa002a5fcaa992359c1\"",
+        "intentHash": "186967059148b3f686ab20b236f9d9217b3dfdf31ebc36da61e573bd259d979b",
+        "name": "file",
+        "operationId": "00000000-0000-4000-8000-000000006000",
+        "parentId": "00000000-0000-4000-8000-000000001004",
+        "publishedAt": "2026-11-04T01:34:09.357Z",
+        "resourceId": "00000000-0000-4000-8000-000000200004",
+        "rootId": "00000000-0000-4000-8000-000000000050",
+        "schema": "saturn.upload-publication.v1",
+        "sha256": "8722bd6c7fdcfcdccaaeac3c64d9c7684a09d6597464efa002a5fcaa992359c1",
+        "sizeBytes": "12",
+        "uploadId": "00000000-0000-4000-8000-000000006000",
+        "versionId": "00000000-0000-4000-8000-000000300004"
+      },
+      "publishedDescription": {
+        "availability": "AVAILABLE",
+        "content_sha256": "8722bd6c7fdcfcdccaaeac3c64d9c7684a09d6597464efa002a5fcaa992359c1",
+        "content_version_id": "00000000-0000-4000-8000-000000300004",
+        "name": "file",
+        "node_id": "00000000-0000-4000-8000-000000200004",
+        "parent_id": "00000000-0000-4000-8000-000000001004",
+        "size_bytes": "12",
+        "type": "file",
+        "version": "00000000-0000-4000-8000-000000400004"
+      },
+      "rootId": "00000000-0000-4000-8000-000000000050",
+      "schema": "saturn.catalog-upload-result.v2",
+      "status": "PUBLISHED",
+      "uploadId": "00000000-0000-4000-8000-000000006000"
+    },
+    "session": {
+      "expectedSizeBytes": "12",
+      "intentHash": "186967059148b3f686ab20b236f9d9217b3dfdf31ebc36da61e573bd259d979b",
+      "operationId": "00000000-0000-4000-8000-000000006000",
+      "phase": "published",
+      "receivedSizeBytes": "12",
+      "rootId": "00000000-0000-4000-8000-000000000050",
+      "transferPending": false,
+      "uploadId": "00000000-0000-4000-8000-000000006000"
+    }
+  },
+  "endpointKind": "disposable TLS fixture"
+}

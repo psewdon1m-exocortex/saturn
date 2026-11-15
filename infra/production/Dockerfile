@@ -3,6 +3,7 @@ FROM node:24-alpine@sha256:d32cdf619f63fe0471182d08996dd516c6275bb5fd31ae06e55a5
 WORKDIR /workspace
 ENV CI=true
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc tsconfig.base.json eslint.config.mjs ./
+COPY patches ./patches
 COPY apps ./apps
 COPY packages ./packages
 RUN corepack enable && corepack prepare pnpm@11.24.0 --activate && pnpm install --frozen-lockfile
@@ -10,6 +11,7 @@ RUN VAULT_RELEASE_BUILD=true pnpm build
 RUN pnpm --filter @saturn/api deploy --prod --legacy /release/api \
  && pnpm --filter @saturn/worker deploy --prod --legacy /release/worker \
  && pnpm --filter @saturn/deployment deploy --prod --legacy /release/deployment \
+ && pnpm --filter @saturn/storage-verifier deploy --prod --legacy /release/storage-verifier \
  && find /release -type f \( -name '*.map' -o -name '*.ts' -o -name '*.tsbuildinfo' \) -delete \
  && find /release -type d \( -name test -o -name tests -o -name coverage \) -prune -exec rm -rf '{}' +
 
@@ -34,6 +36,15 @@ USER node
 ENTRYPOINT ["/sbin/tini","--"]
 CMD ["node","/app/api/dist/main.js"]
 
+# Optional artifact only. No service, host installation or permission grant is
+# enabled by the ordinary app/web targets. Requires explicit protected mounts.
+FROM node:24-alpine@sha256:d32cdf619f63fe0471182d08996dd516c6275bb5fd31ae06e55a570bd9e1ad43 AS storage-verifier
+WORKDIR /app
+COPY --from=build --chown=node:node /release/storage-verifier /app
+USER node
+ENTRYPOINT ["node","/app/dist/main.js"]
+CMD ["/run/saturn-verifier/config.json"]
+
 FROM node:24-alpine@sha256:d32cdf619f63fe0471182d08996dd516c6275bb5fd31ae06e55a570bd9e1ad43 AS web
 ARG VAULT_VERSION=0.0.0
 ARG VAULT_SOURCE_REVISION=unknown
@@ -49,3 +60,4 @@ ENV NODE_ENV=production \
 USER 1000:1000
 EXPOSE 8080
 CMD ["node","/app/static-server.mjs"]
+

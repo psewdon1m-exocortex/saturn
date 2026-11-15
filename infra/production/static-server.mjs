@@ -30,8 +30,9 @@ const contentTypes = new Map([
 const spaRoute = /^(?:\/$|\/dashboard$|\/documentation$|\/files(?:\/.*)?$|\/storage-new(?:\/.*)?$|\/inbox(?:\/.*)?$|\/shared(?:\/.*)?$|\/trash(?:\/.*)?$|\/settings(?:\/.*)?$|\/synchronization(?:\/.*)?$|\/drop$|\/s\/[A-Za-z0-9_-]+$)/;
 const blockedTopLevel = new Set(["artifacts", "data", "docs", "spool"]);
 
-function securityHeaders(response) {
-  response.setHeader("Content-Security-Policy", "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; frame-src 'self' blob:");
+function securityHeaders(response, uploadHashWorker = false) {
+  const scripts = uploadHashWorker ? "'self' 'wasm-unsafe-eval'" : "'self'";
+  response.setHeader("Content-Security-Policy", `default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; script-src ${scripts}; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; frame-src 'self' blob:`);
   response.setHeader("Cross-Origin-Resource-Policy", "same-origin");
   response.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=(), usb=()");
   response.setHeader("Referrer-Policy", "no-referrer");
@@ -54,6 +55,11 @@ async function sendFile(request, response, filename, cacheControl) {
   let attributes;
   try { attributes = await fs.stat(filename); } catch { response.statusCode = 404; response.end(); return; }
   if (!attributes.isFile()) { response.statusCode = 404; response.end(); return; }
+  // Vite emits this exact eight-character content-hash filename. Apply only
+  // after existence/type checks and only to its canonical raw URL. Encoded,
+  // normalized, queried, suffixed and missing paths retain the default policy.
+  if (/^\/assets\/upload-sha256\.worker-[A-Za-z0-9_-]{8}\.js$/.test(request.url ?? "")
+    && path.basename(filename) === request.url.slice("/assets/".length)) securityHeaders(response, true);
   response.statusCode = 200;
   response.setHeader("Cache-Control", cacheControl);
   response.setHeader("Content-Length", attributes.size);

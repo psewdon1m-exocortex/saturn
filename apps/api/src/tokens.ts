@@ -22,3 +22,4 @@ export const SHARE_THUMBNAIL_SERVICE = Symbol("SHARE_THUMBNAIL_SERVICE");
 export const STORAGE_ADAPTER = Symbol("STORAGE_ADAPTER");
 export const STORAGE_HEALTH = Symbol("STORAGE_HEALTH");
 export const STORAGE_RUNTIME = Symbol("STORAGE_RUNTIME");
+export const GUARDED_RUNTIME = Symbol("GUARDED_RUNTIME");

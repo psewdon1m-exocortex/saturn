@@ -11,6 +11,7 @@ describe("WebDAV download snapshot", () => {
     [new Error("SFTP disconnected"), 500],
     [new DeviceServiceError("invalid_body"), 400],
     [new DeviceServiceError("precondition_failed"), 412],
+    [new DeviceServiceError("payload_too_large"), 413],
     [new DeviceServiceError("unauthorized"), 401],
   ])("classifies server failures separately from client errors (%s)", async (error, expected) => {
     const app = Fastify();

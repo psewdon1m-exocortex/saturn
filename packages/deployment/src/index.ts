@@ -108,6 +108,7 @@ export function validateProductionDeployment(
     hashes.add(valueHash);
   }
   const config = loadEnvironment(mapped, baseDirectory);
+  if (config.storage.backend === "local") throw new Error("This SFTP deployment provisioner cannot deploy local custody; use an explicitly qualified local deployment");
   if (!config.storage.requireFsync) throw new Error("Production storage must support and require remote file fsync");
   if (required(input, "SATURN_API_BIND_ADDRESS") !== "127.0.0.1" || required(input, "SATURN_WEB_BIND_ADDRESS") !== "127.0.0.1") {
     throw new Error("Saturn production listeners must bind to IPv4 loopback for server Nginx");

@@ -92,7 +92,9 @@ async function localDiskUsage(): Promise<DiskUsageMetric> {
 
 function isLocalDevelopmentStorage(config: SaturnConfig, storage: RuntimeStorageManager): boolean {
   if (config.environment === "production") return false;
-  const host = storage.current().config.host.trim().toLowerCase().replace(/^\[|\]$/g, "");
+  const active = storage.current().config;
+  if (active.backend === "local") return true;
+  const host = active.host.trim().toLowerCase().replace(/^\[|\]$/g, "");
   return host === "localhost" || host === "::1" || host.startsWith("127.");
 }
 

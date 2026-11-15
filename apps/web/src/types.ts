@@ -378,23 +378,27 @@ export interface KernelStatus {
   readonly reachability: "ready" | "unavailable";
 }
 
-export interface StorageConnectionStatus {
+interface StorageConnectionCommon {
   readonly profileId: string;
   readonly revision: number;
   readonly activatedAt: string;
   readonly source: "bootstrap" | "runtime";
-  readonly host: string;
-  readonly port: number;
-  readonly username: string;
   readonly root: string;
-  readonly hostFingerprint: string;
-  readonly authMode: "password_file" | "private_key_file";
   readonly credentialConfigured: true;
   readonly reachability: "ready" | "unavailable";
   readonly capacity?: { readonly totalBytes: number; readonly availableBytes: number };
   readonly indexed?: { readonly files: number; readonly directories: number; readonly bytes: number };
   readonly revoked?: { readonly shares: number; readonly devices: number };
 }
+
+export type StorageConnectionStatus = StorageConnectionCommon & ({
+  readonly backend?: "sftp";
+  readonly host: string;
+  readonly port: number;
+  readonly username: string;
+  readonly hostFingerprint: string;
+  readonly authMode: "password_file" | "private_key_file";
+} | { readonly backend: "local"; readonly host?: never; readonly port?: never; readonly username?: never; readonly hostFingerprint?: never; readonly authMode?: never });
 
 export interface StorageConnectionInput {
   readonly host: string;

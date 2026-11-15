@@ -1,12 +1,13 @@
+import { isolatedTestDatabase } from "../../../packages/database/src/isolated-test-database.fixture.js";
 import "reflect-metadata";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import { Module } from "@nestjs/common";
 import { NestFactory } from "@nestjs/core";
 import { FastifyAdapter, type NestFastifyApplication } from "@nestjs/platform-fastify";
-import { Database, migrate } from "@saturn/database";
+import { Database } from "@saturn/database";
 import { FileService, PostgresFileRepository } from "@saturn/file-core";
 import { LocalStorageAdapter } from "@saturn/storage";
 import { DeviceService, PostgresDeviceRepository } from "@saturn/sync";
@@ -19,11 +20,8 @@ const databaseUrl = process.env.PLUTO_TEST_DATABASE_URL;
 it.skipIf(!databaseUrl)("copies ordinary Pluto files through HTTP with PostgreSQL isolation, retained versions and revoke", async () => {
   if (!databaseUrl) throw new Error("An isolated, migrated PLUTO_TEST_DATABASE_URL is required");
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "saturn-pluto-http-"));
-  const admin = new Database(databaseUrl), schema = "pluto_qa_" + randomUUID().replaceAll("-", "");
-  await admin.withSql(sql => sql.unsafe(`CREATE SCHEMA ${schema}`));
-  const isolatedUrl = new URL(databaseUrl); isolatedUrl.searchParams.set("options", "-csearch_path=" + schema);
-  await migrate(isolatedUrl.toString());
-  const database = new Database(isolatedUrl.toString()), storage = new LocalStorageAdapter(root);
+  const isolated = await isolatedTestDatabase(databaseUrl, undefined, root);
+  const database = new Database(isolated.url), storage = new LocalStorageAdapter(root);
   const files = new FileService(new PostgresFileRepository(database), storage);
   const devices = new DeviceService({ repository: new PostgresDeviceRepository(database), files,
     pepper: "isolated-pluto-test-pepper-1234567890", options: { enabled: true, publicOrigin: "https://saturn.test", uploadChunkMaxBytes: 1024, propfindMaxItems: 100, deleteMaxItems: 2, deleteWindowMs: 900000 } });
@@ -71,8 +69,6 @@ it.skipIf(!databaseUrl)("copies ordinary Pluto files through HTTP with PostgreSQ
     for await (const chunk of current.stream) chunks.push(Buffer.from(chunk as Uint8Array));
     expect(Buffer.concat(chunks).toString()).toBe("config revision 12");
   } finally {
-    await app.close(); await database.close(); await storage.close(); await fs.rm(root, { recursive: true, force: true });
-    await admin.withSql(async sql => { await sql`SET client_min_messages = warning`; await sql.unsafe(`DROP SCHEMA ${schema} CASCADE`); });
-    await admin.close();
+    await app.close(); await database.close(); await storage.close(); if (!isolated.retained) await fs.rm(root, { recursive: true, force: true });
   }
 }, 30000);

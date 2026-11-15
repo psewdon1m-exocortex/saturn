@@ -1,3 +1,4 @@
+import type { UploadPublicationIntent, UploadPublicationReceipt } from "./upload-publication.js";
 export const ROOT_RESOURCE_ID = "00000000-0000-7000-8000-000000000001";
 export const DROP_POINT_RESOURCE_ID = "00000000-0000-7000-8000-000000000002";
 export const MASTERMIND_RESOURCE_ID = "00000000-0000-7000-8000-000000000003";
@@ -90,6 +91,9 @@ export interface UploadSession {
   readonly requireAbsent?: boolean;
   readonly auditActorType?: string;
   readonly auditActorId?: string;
+  readonly publicationIntent?: UploadPublicationIntent;
+  readonly intentHash?: string;
+  readonly publicationReceipt?: UploadPublicationReceipt;
   readonly expiresAt: Date;
   readonly createdAt: Date;
   readonly updatedAt: Date;
@@ -105,11 +109,13 @@ export interface CreateUploadInput {
   readonly expectedVersionId?: string;
   readonly requireAbsent?: boolean;
   readonly auditActor?: { readonly type: string; readonly id: string };
+  readonly publicationIntent?: UploadPublicationIntent;
 }
 
 export interface CompleteUploadResult {
   readonly upload: UploadSession;
   readonly resource: Resource;
+  readonly publicationReceipt?: UploadPublicationReceipt;
 }
 
 export interface FileVersion {

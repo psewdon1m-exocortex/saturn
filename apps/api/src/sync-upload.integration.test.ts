@@ -1,12 +1,13 @@
+import { isolatedTestDatabase } from "../../../packages/database/src/isolated-test-database.fixture.js";
 import "reflect-metadata";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import { Module } from "@nestjs/common";
 import { NestFactory } from "@nestjs/core";
 import { FastifyAdapter, type NestFastifyApplication } from "@nestjs/platform-fastify";
-import { Database, migrate } from "@saturn/database";
+import { Database } from "@saturn/database";
 import { FileService, PostgresFileRepository } from "@saturn/file-core";
 import { LocalStorageAdapter } from "@saturn/storage";
 import { DeviceService, PostgresDeviceRepository } from "@saturn/sync";
@@ -18,10 +19,8 @@ const databaseUrl = process.env.PLUTO_TEST_DATABASE_URL;
 it.skipIf(!databaseUrl)("resumes scoped Windows uploads, rejects stale preconditions, peers and revoked tokens", async () => {
   if (!databaseUrl) throw new Error("Isolated test database is required");
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "saturn-sync-http-"));
-  const admin = new Database(databaseUrl), schema = "sync_qa_" + randomUUID().replaceAll("-", "");
-  await admin.withSql(sql => sql.unsafe(`CREATE SCHEMA ${schema}`));
-  const url = new URL(databaseUrl); url.searchParams.set("options", "-csearch_path=" + schema); await migrate(url.toString());
-  const db = new Database(url.toString()), storage = new LocalStorageAdapter(root);
+  const isolated = await isolatedTestDatabase(databaseUrl, undefined, root);
+  const db = new Database(isolated.url), storage = new LocalStorageAdapter(root);
   const files = new FileService(new PostgresFileRepository(db), storage);
   const devices = new DeviceService({ repository: new PostgresDeviceRepository(db), files, pepper: "sync-http-fixture-pepper-1234567890", options: { enabled: true, publicOrigin: "https://saturn.test", uploadChunkMaxBytes: 1024, propfindMaxItems: 100, deleteMaxItems: 2, deleteWindowMs: 900000 } });
   @Module({ controllers: [SyncClientController], providers: [{ provide: DEVICE_SERVICE, useValue: devices }, { provide: AUTH_SERVICE, useValue: {} }] })
@@ -62,7 +61,6 @@ it.skipIf(!databaseUrl)("resumes scoped Windows uploads, rejects stale precondit
     await devices.revokeDevice(a.device.id); expect((await inject({ method: "GET", url: target, headers })).statusCode).toBe(401);
     expect(await storage.exists("# sync windows/Win A/config.txt")).toBe(true);
   } finally {
-    await app.close(); await db.close(); await storage.close(); await fs.rm(root,{recursive:true,force:true});
-    await admin.withSql(async sql => { await sql`SET client_min_messages=warning`; await sql.unsafe(`DROP SCHEMA ${schema} CASCADE`); }); await admin.close();
+    await app.close(); await db.close(); await storage.close(); if (!isolated.retained) await fs.rm(root,{recursive:true,force:true});
   }
 },30000);

@@ -1,0 +1,9 @@
+.upload-tree-panel { margin-block: 1rem; padding: .9rem; border: 1px solid var(--line, #435066); border-radius: .6rem; overflow-wrap: anywhere; }
+.upload-tree-panel h3 { margin: 0 0 .5rem; }
+.upload-tree-panel p { margin-block: .5rem; }
+.upload-tree-panel ul { list-style: none; padding: 0; }
+.upload-tree-panel li, .upload-tree-actions, .upload-tree-panel nav { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; }
+.upload-tree-panel li { padding-block: .4rem; }
+.upload-tree-panel li > span { flex: 1 1 16rem; min-width: 0; }
+.upload-tree-panel button { min-height: 2rem; }
+@media (max-width: 600px) { .upload-tree-panel { padding: .6rem; } .upload-tree-panel li > span { flex-basis: 100%; } }

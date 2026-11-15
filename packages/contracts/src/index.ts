@@ -22,3 +22,6 @@ export interface WorkerHeartbeat {
   readonly instanceId: string;
   readonly lastSeenAt: Date;
 }
+export * from "./sync-extensions.js";
+export * from "./storage-verifier.js";
+export * from "./sync-stream.js";

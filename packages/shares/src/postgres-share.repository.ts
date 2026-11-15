@@ -1,5 +1,14 @@
 import type { Database } from "@saturn/database";
-import type { SharePackage, ShareRecord, ShareRepository, ShareSession } from "./types.js";
+import type { Resource } from "@saturn/file-core";
+import type { SharePackage, SharePackageEntry, ShareRecord, ShareRepository, ShareSession } from "./types.js";
+import { PostgresPackageLifecycle } from "./package-lifecycle.js";
+
+interface PackageTreeRow {
+  id: string; type: Resource["type"]; parent_id: string | null; name: string; storage_path: string;
+  mime_type: string | null; size_bytes: string; sha256: string | null; current_version_id: string | null;
+  status: Resource["status"]; security_classification: Resource["securityClassification"];
+  created_at: Date; updated_at: Date; member_path: string;
+}
 
 interface ShareRow {
   id: string;
@@ -34,6 +43,7 @@ interface SessionRow {
 }
 
 interface PackageRow {
+  generation_id?: string | null;
   source_fingerprint: string | null;
   id: string;
   share_id: string;
@@ -86,6 +96,7 @@ function session(row: SessionRow): ShareSession {
 
 function packageValue(row: PackageRow): SharePackage {
   return {
+    ...(row.generation_id == null ? {} : { generationId: row.generation_id }),
     ...(row.source_fingerprint == null ? {} : { sourceFingerprint: row.source_fingerprint }),
     id: row.id,
     shareId: row.share_id,
@@ -104,7 +115,8 @@ function packageValue(row: PackageRow): SharePackage {
 export class PostgresShareRepository implements ShareRepository {
   readonly #database: Database;
 
-  constructor(database: Database) { this.#database = database; }
+  readonly packageLifecycle: PostgresPackageLifecycle;
+  constructor(database: Database) { this.#database = database; this.packageLifecycle = new PostgresPackageLifecycle(database); }
 
   createShare(input: Omit<ShareRecord, "downloadCount" | "state" | "updatedAt">): Promise<ShareRecord> {
     return this.#database.withSql(async (sql) => {
@@ -181,6 +193,7 @@ export class PostgresShareRepository implements ShareRepository {
         RETURNING *
       `;
       await sql`UPDATE share_sessions SET state = 'revoked' WHERE share_id = ${id} AND state = 'active'`;
+      if (input.mode !== undefined && input.mode !== "download_folder") await sql`UPDATE share_packages SET state = 'expired' WHERE share_id = ${id} AND state IN ('preparing', 'ready', 'failed')`;
       const row = rows[0];
       if (row === undefined) throw new Error("Share update returned no row");
       return share(row);
@@ -195,6 +208,7 @@ export class PostgresShareRepository implements ShareRepository {
       `;
       if (rows[0] === undefined) throw new Error("Share not found");
       await sql`UPDATE share_sessions SET state = 'revoked' WHERE share_id = ${id} AND state = 'active'`;
+      await sql`UPDATE share_packages SET state = 'expired' WHERE share_id = ${id} AND state IN ('preparing', 'ready', 'failed')`;
       return share(rows[0]);
     });
   }
@@ -206,17 +220,57 @@ export class PostgresShareRepository implements ShareRepository {
     });
   }
 
-  isDescendant(rootId: string, candidateId: string): Promise<boolean> {
+  isDescendant(rootId: string, candidateId: string, ceiling: ShareRecord["classificationCeiling"] = "internal"): Promise<boolean> {
     return this.#database.withSql(async (sql) => {
       const rows = await sql<{ allowed: boolean }[]>`
-        WITH RECURSIVE descendants AS (
-          SELECT id FROM resources WHERE id = ${rootId}
+        WITH RECURSIVE ancestry AS (
+          SELECT id, parent_id, ARRAY[id] AS visited FROM resources WHERE id = ${candidateId} AND status = 'active'
+            AND CASE security_classification WHEN 'public' THEN 0 WHEN 'internal' THEN 1 ELSE 2 END <= ${ceiling === "public" ? 0 : 1}
           UNION ALL
-          SELECT child.id FROM resources child JOIN descendants parent ON child.parent_id = parent.id
+          SELECT parent.id, parent.parent_id, child.visited || parent.id FROM resources parent JOIN ancestry child ON child.parent_id = parent.id
+          WHERE child.id <> ${rootId} AND parent.status = 'active' AND parent.type = 'folder' AND NOT parent.id = ANY(child.visited)
+            AND CASE parent.security_classification WHEN 'public' THEN 0 WHEN 'internal' THEN 1 ELSE 2 END <= ${ceiling === "public" ? 0 : 1}
         )
-        SELECT EXISTS(SELECT 1 FROM descendants WHERE id = ${candidateId}) AS allowed
+        SELECT EXISTS(SELECT 1 FROM ancestry WHERE id = ${rootId}) AS allowed
       `;
       return rows[0]?.allowed ?? false;
+    });
+  }
+
+  readPackageTree(rootId: string, ceiling: ShareRecord["classificationCeiling"], maxEntries: number): Promise<readonly SharePackageEntry[]> {
+    if (!Number.isSafeInteger(maxEntries) || maxEntries < 1 || maxEntries > 100_000) throw new Error("Share package entry limit is invalid");
+    return this.#database.withSql(async sql => {
+      // LIMIT consumes the recursive CTE on demand; no outer sort/aggregate materializes an unbounded tree.
+      // The root and every traversed ancestor must be active and inside the current classification ceiling.
+      const rows = await sql<PackageTreeRow[]>`
+        WITH RECURSIVE tree AS (
+          SELECT r.*, ''::text AS member_path, ARRAY[r.id] AS visited FROM resources r
+          WHERE r.id = ${rootId} AND r.type = 'folder' AND r.status = 'active'
+            AND CASE r.security_classification WHEN 'public' THEN 0 WHEN 'internal' THEN 1 ELSE 2 END <= ${ceiling === "public" ? 0 : 1}
+          UNION ALL
+          SELECT r.*, CASE WHEN parent.member_path = '' THEN r.name ELSE parent.member_path || '/' || r.name END,
+            parent.visited || r.id
+          FROM resources r JOIN tree parent ON r.parent_id = parent.id
+          WHERE parent.type = 'folder' AND r.status = 'active' AND NOT r.id = ANY(parent.visited)
+            AND CASE r.security_classification WHEN 'public' THEN 0 WHEN 'internal' THEN 1 ELSE 2 END <= ${ceiling === "public" ? 0 : 1}
+        )
+        SELECT id, type, parent_id, name, storage_path, mime_type, size_bytes, sha256, current_version_id,
+          status, security_classification, created_at, updated_at, member_path FROM tree LIMIT ${maxEntries + 2}
+      `;
+      if (!rows.some(row => row.id === rootId && row.member_path === "")) throw new Error("Share package root is unavailable");
+      if (rows.length > maxEntries + 1) throw new Error("Share package entry limit exceeded");
+      return rows.filter(row => row.id !== rootId).map(row => ({
+        path: row.member_path + (row.type === "folder" ? "/" : ""),
+        resource: {
+          id: row.id, type: row.type, name: row.name, storagePath: row.storage_path, sizeBytes: Number(row.size_bytes),
+          status: row.status, createdAt: row.created_at, updatedAt: row.updated_at,
+          ...(row.parent_id === null ? {} : { parentId: row.parent_id }),
+          ...(row.mime_type === null ? {} : { mimeType: row.mime_type }),
+          ...(row.sha256 === null ? {} : { sha256: row.sha256 }),
+          ...(row.current_version_id === null ? {} : { currentVersionId: row.current_version_id }),
+          ...(row.security_classification === undefined ? {} : { securityClassification: row.security_classification }),
+        },
+      }));
     });
   }
 
@@ -251,41 +305,65 @@ export class PostgresShareRepository implements ShareRepository {
     });
   }
 
-  claimDownload(shareId: string, sessionId: string, now: Date): Promise<{ readonly share: ShareRecord; readonly session: ShareSession }> {
+  claimDownload(shareId: string, sessionId: string, now: Date, transfer?: Parameters<ShareRepository["claimDownload"]>[3]): Promise<{ readonly share: ShareRecord; readonly session: ShareSession }> {
     return this.#database.transaction(async (sql) => {
       const shares = await sql<ShareRow[]>`SELECT * FROM shares WHERE id = ${shareId} FOR UPDATE`;
       const sessions = await sql<SessionRow[]>`SELECT * FROM share_sessions WHERE id = ${sessionId} AND share_id = ${shareId} FOR UPDATE`;
       const currentShare = shares[0];
       const currentSession = sessions[0];
-      if (currentShare === undefined || currentSession === undefined || currentShare.state !== "active" || currentSession.state !== "active" || currentSession.expires_at <= now) {
+      if (currentShare === undefined || currentSession === undefined || !["active", "exhausted"].includes(currentShare.state)
+        || currentShare.expires_at !== null && currentShare.expires_at <= now || currentSession.state !== "active" || currentSession.expires_at <= now) {
         throw new Error("Share access is not active");
       }
-      if (!currentSession.download_claimed) {
-        if (currentShare.max_downloads !== null && currentShare.download_count >= currentShare.max_downloads) {
-          await sql`UPDATE shares SET state = 'exhausted', updated_at = ${now} WHERE id = ${shareId}`;
+      let claimed = currentSession.download_claimed;
+      if (transfer !== undefined) {
+        const existing = await sql<{ resource_id: string; kind: string }[]>`SELECT resource_id, kind FROM share_download_claims
+          WHERE session_id = ${sessionId} AND transfer_id = ${transfer.id}`;
+        if (existing[0] !== undefined && (existing[0].resource_id !== transfer.resourceId || existing[0].kind !== transfer.kind)) throw new Error("Download identity target changed");
+        claimed = existing.length !== 0;
+      }
+      if (!claimed) {
+        if (currentShare.state !== "active" || currentShare.max_downloads !== null && currentShare.download_count >= currentShare.max_downloads) {
           throw new Error("Share download limit is exhausted");
         }
-        await sql`UPDATE share_sessions SET download_claimed = true WHERE id = ${sessionId}`;
-        await sql`
+        if (transfer !== undefined) await sql`INSERT INTO share_download_claims (session_id, transfer_id, resource_id, kind, created_at, expires_at)
+          VALUES (${sessionId}, ${transfer.id}, ${transfer.resourceId}, ${transfer.kind}, ${now}, ${currentSession.expires_at})`;
+        const nextSessions = await sql<SessionRow[]>`UPDATE share_sessions SET download_claimed = true WHERE id = ${sessionId} RETURNING *`;
+        const nextShares = await sql<ShareRow[]>`
           UPDATE shares SET download_count = download_count + 1,
             state = CASE WHEN max_downloads IS NOT NULL AND download_count + 1 >= max_downloads THEN 'exhausted' ELSE state END,
             updated_at = ${now}
-          WHERE id = ${shareId}
+          WHERE id = ${shareId} RETURNING *
         `;
+        return { share: share(nextShares[0] ?? currentShare), session: session(nextSessions[0] ?? currentSession) };
       }
-      const nextShares = await sql<ShareRow[]>`SELECT * FROM shares WHERE id = ${shareId}`;
-      const nextSessions = await sql<SessionRow[]>`SELECT * FROM share_sessions WHERE id = ${sessionId}`;
-      return { share: share(nextShares[0] ?? currentShare), session: session(nextSessions[0] ?? currentSession) };
+      return { share: share(currentShare), session: session(currentSession) };
     });
   }
 
-  validateActive(shareId: string, now: Date): Promise<boolean> {
+  cleanupExpiredDownloadClaims(now: Date, limit: number): Promise<number> {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1000) throw new Error("Invalid download cleanup limit");
+    return this.#database.withSql(async sql => {
+      const rows = await sql`WITH expired AS (
+        SELECT session_id, transfer_id FROM share_download_claims WHERE expires_at <= ${now}
+        ORDER BY expires_at, session_id, transfer_id LIMIT ${limit} FOR UPDATE SKIP LOCKED
+      ) DELETE FROM share_download_claims c USING expired e
+        WHERE c.session_id = e.session_id AND c.transfer_id = e.transfer_id RETURNING c.transfer_id`;
+      return rows.length;
+    });
+  }
+
+  validateActive(shareId: string, now: Date, sessionId?: string): Promise<boolean> {
     return this.#database.withSql(async (sql) => {
       const rows = await sql<{ active: boolean }[]>`
         SELECT EXISTS(
           SELECT 1 FROM shares s JOIN resources r ON r.id = s.resource_id
           WHERE s.id = ${shareId} AND s.state IN ('active', 'exhausted')
             AND (s.expires_at IS NULL OR s.expires_at > ${now})
+            AND (${sessionId ?? null}::uuid IS NULL OR EXISTS(
+              SELECT 1 FROM share_sessions session WHERE session.id = ${sessionId ?? null}::uuid
+                AND session.share_id = s.id AND session.state = 'active' AND session.expires_at > ${now}
+            ))
             AND r.status = 'active'
             AND CASE r.security_classification
               WHEN 'public' THEN 0 WHEN 'internal' THEN 1 WHEN 'confidential' THEN 2 ELSE 3 END
@@ -342,6 +420,7 @@ export class PostgresShareRepository implements ShareRepository {
   createPackage(input: Omit<SharePackage, "state" | "fileCount" | "sizeBytes">): Promise<{ readonly value: SharePackage; readonly created: boolean }> {
     return this.#database.transaction(async (sql) => {
       await sql`SELECT pg_advisory_xact_lock(1399677207)`;
+      await sql`UPDATE share_packages SET state='expired' WHERE share_id=${input.shareId} AND state IN ('preparing','ready') AND expires_at<=${input.createdAt}`;
       const existing = await sql<PackageRow[]>`SELECT * FROM share_packages WHERE share_id = ${input.shareId} AND state IN ('preparing', 'ready') LIMIT 1`;
       if (existing[0] !== undefined) return { value: packageValue(existing[0]), created: false };
       const queued = await sql<{ count: number }[]>`SELECT count(*)::int AS count FROM share_packages WHERE state='preparing'`;
@@ -361,7 +440,8 @@ export class PostgresShareRepository implements ShareRepository {
     return this.#database.transaction(async sql => {
       const rows = await sql<PackageRow[]>`
         WITH candidate AS (SELECT id FROM share_packages WHERE state='preparing' AND expires_at>${now}
-          AND (claimed_at IS NULL OR claimed_at<${new Date(now.getTime()-30*60_000)}) ORDER BY created_at,id FOR UPDATE SKIP LOCKED LIMIT 1)
+          AND (claimed_at IS NULL OR claimed_at<${new Date(now.getTime()-30*60_000)}
+            OR claimed_at<${new Date(now.getTime()-30_000)} AND EXISTS(SELECT 1 FROM share_package_generations g WHERE g.id=share_packages.generation_id AND g.writer_expires_at<=${now} AND g.state='writing')) ORDER BY created_at,id FOR UPDATE SKIP LOCKED LIMIT 1)
         UPDATE share_packages SET claimed_at=${now} WHERE id=(SELECT id FROM candidate) RETURNING *
       `;
       return rows[0] === undefined ? undefined : packageValue(rows[0]);
@@ -380,7 +460,7 @@ export class PostgresShareRepository implements ShareRepository {
       const rows = await sql<PackageRow[]>`
         UPDATE share_packages SET state = 'ready', file_count = ${input.fileCount}, size_bytes = ${input.sizeBytes},
           sha256 = ${input.sha256}, ready_at = ${input.readyAt}, source_fingerprint=${input.sourceFingerprint ?? null}
-        WHERE id = ${id} AND state = 'preparing' RETURNING *
+        WHERE id = ${id} AND state = 'preparing' AND generation_id IS NULL RETURNING *
       `;
       const row = rows[0];
       if (row === undefined) throw new Error("Share package is not preparing");
@@ -388,14 +468,18 @@ export class PostgresShareRepository implements ShareRepository {
     });
   }
 
-  setPackageFailed(id: string, errorCode: string): Promise<void> {
-    return this.#database.withSql(async (sql) => { await sql`UPDATE share_packages SET state = 'failed', error_code = ${errorCode} WHERE id = ${id} AND state = 'preparing'`; });
+  setPackageFailed(id: string, errorCode: string, expectedGenerationId?: string): Promise<void> {
+    // Reject an unallocated job or the exact expired generation observed by the
+    // claimant, never a replacement admitted by another worker in the meantime.
+    return this.#database.withSql(async (sql) => { await sql`UPDATE share_packages SET state = 'failed', error_code = ${errorCode} WHERE id = ${id} AND state = 'preparing'
+      AND (generation_id IS NULL AND ${expectedGenerationId ?? null}::uuid IS NULL OR generation_id=${expectedGenerationId ?? null}::uuid
+        AND EXISTS(SELECT 1 FROM share_package_generations g WHERE g.id=share_packages.generation_id AND g.writer_expires_at<=clock_timestamp()))`; });
   }
 
   claimExpiredPackages(now: Date, limit: number): Promise<readonly SharePackage[]> {
     return this.#database.transaction(async (sql) => {
       const rows = await sql<PackageRow[]>`
-        SELECT * FROM share_packages WHERE state IN ('ready', 'failed') AND expires_at <= ${now}
+        SELECT * FROM share_packages WHERE state IN ('failed', 'expired') OR state = 'ready' AND expires_at <= ${now}
         ORDER BY expires_at FOR UPDATE SKIP LOCKED LIMIT ${limit}
       `;
       return rows.map(packageValue);
@@ -404,5 +488,9 @@ export class PostgresShareRepository implements ShareRepository {
 
   markPackageExpired(id: string): Promise<void> {
     return this.#database.withSql(async (sql) => { await sql`UPDATE share_packages SET state = 'expired' WHERE id = ${id} AND state IN ('ready', 'failed')`; });
+  }
+
+  deleteExpiredPackage(id: string): Promise<void> {
+    return this.#database.withSql(async sql => { await sql`DELETE FROM share_packages WHERE id = ${id} AND state = 'expired'`; });
   }
 }

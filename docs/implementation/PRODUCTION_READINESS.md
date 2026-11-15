@@ -2,7 +2,9 @@
 
 This document specializes [Part 04 — bootstrap and deployment](https://github.com/psewdon1m-exocortex/general/blob/main/PART_04_BOOTSTRAP_AND_DEPLOYMENT.md); that central contract remains authoritative.
 
-Status: `NO_GO` for production activation (2026-10-06).
+Status: `NO_GO` for production activation (updated 2026-10-16).
+
+The latest local audit is `.audit/2026-10-16/pre-release-snapshot/REPORT.md` and its compatibility addendum; remediation receipts are in `.audit/2026-10-16/pre-release-remediation/REPORT.md` in the parent workspace. These supersede the old evidence entry point, but do not qualify a new published release. Remaining gates include an immutable candidate identity, production TLS/update lifecycle and trusted client packages. See [targeted test lanes](../TEST_LANES.md).
 
 The working candidate requires fresh qualification against its exact release
 identity. Historical Stage 13 evidence does not qualify changed source, images
@@ -26,7 +28,7 @@ The aggregate gate covers:
   with internal worker and PostgreSQL networks;
 - tag-only pinned CI/release workflows, OCI SBOM/provenance and an Ed25519-signed
   canonical release manifest;
-- migration, canonical six business roots plus hidden `_system` bootstrap and exact temporary-object cleanup;
+- migration, canonical eight layout-v3 business roots plus hidden `_system` bootstrap and exact temporary-object cleanup;
 - HTTPS owner login, upload, metadata, Range, checksum and trash workflow;
 - a 17 MiB whole-file WebDAV PUT streamed through server Nginx, then read,
   checksum verification and deletion;
@@ -110,8 +112,10 @@ compatible. The Linux installer parses dotenv as data and never sources key text
 
 ## Rollback boundary
 
-Before traffic switch, any failed gate discards the candidate and leaves the
-current release untouched. After switch, restore the previous immutable image
-references; use migration rollback only when declared compatible, otherwise
-restore the verified pre-update database snapshot. Never reconnect PROD to DEV
-or to the break-glass main account as an emergency shortcut.
+Before opening new writers, return to previous immutable images only when
+they are compatible with the applied schema; otherwise restore a coordinated,
+verified checkpoint. After new writes, a pre-update database snapshot may
+discard newer data. Close admissions, preserve post-update bytes and originals,
+and use a qualified roll-forward or coordinated data recovery procedure. Do
+not apply a blind schema downgrade. Never reconnect PROD to DEV or to the
+break-glass main account as an emergency shortcut.

@@ -118,6 +118,7 @@ export class DropController {
       return await this.#sessionPayload(created.session);
     } catch (error) {
       if (error instanceof DropServiceError && error.code === "rate_limited") {
+        reply.header("Retry-After", String(Math.ceil(this.config.drop.failureWindowMs / 1_000)));
         throw new HttpException({ code: "drop_unavailable" }, HttpStatus.TOO_MANY_REQUESTS);
       }
       if (error instanceof DropServiceError) throw new UnauthorizedException({ code: "drop_code_rejected" });
@@ -146,6 +147,7 @@ export class DropController {
       reply.header("Location", `/api/v1/drop/uploads/${upload.id}/status`);
       return upload;
     } catch (error) {
+      if (error instanceof DropServiceError && error.code === "payload_too_large") throw new HttpException({ code: "payload_too_large" }, HttpStatus.PAYLOAD_TOO_LARGE);
       if (error instanceof DropServiceError && error.code === "quota_exhausted") throw new HttpException({ code: "drop_quota_exhausted" }, HttpStatus.PAYLOAD_TOO_LARGE);
       throw error;
     }

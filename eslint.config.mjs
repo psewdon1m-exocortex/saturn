@@ -41,4 +41,17 @@ export default tseslint.config(
     files: ["apps/api/vitest.config.ts", "apps/web/src/*.js", "apps/web/integration/*.ts"],
     extends: [tseslint.configs.disableTypeChecked],
   },
+  {
+    files: [
+      "packages/file-core/src/retention-clock.integration.mjs",
+      "packages/protection/src/purge-clock.integration.mjs",
+    ],
+    languageOptions: {
+      parserOptions: {
+        projectService: false,
+        project: ["./tsconfig.eslint-clock.json"],
+        tsconfigRootDir: import.meta.dirname,
+      },
+    },
+  },
 );

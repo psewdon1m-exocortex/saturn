@@ -3,15 +3,17 @@ import { once } from "node:events";
 import { Transform, type Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import type { Stats } from "ssh2";
-import type { SaturnConfig } from "@saturn/config";
-import { joinStoragePath, normalizeStoragePath, storageBasename } from "./paths.js";
-import { callSftp, SftpConnectionPool } from "./sftp-pool.js";
+import { requireSftpStorage, type SaturnConfig, type SftpStorageConfig } from "@saturn/config";
+import { joinStoragePath, normalizeStoragePath,validateExactStoragePath } from "./paths.js";
+import { callSftp, canReuseSftpLeaseAfterError, SftpConnectionPool } from "./sftp-pool.js";
+import { bindStorageReadClosure, createStorageClosureProof } from "./storage-read-closure.js";
 import type {
   StorageAdapter,
   StorageCapacity,
   StorageFileInfo,
   StorageListResult,
   StorageReadOptions,
+  StorageReadStream,
   StorageWriteOptions,
 } from "./types.js";
 
@@ -27,7 +29,7 @@ function info(storagePath: string, attributes: Stats): StorageFileInfo {
   if (!attributes.isFile() && !attributes.isDirectory()) throw new Error("Unsupported SFTP entry type");
   return {
     path: storagePath,
-    name: storagePath ? storageBasename(storagePath) : "",
+    name: storagePath.slice(storagePath.lastIndexOf('/')+1),
     type: attributes.isDirectory() ? "directory" : "file",
     size: attributes.size,
     modifiedAt: new Date(attributes.mtime * 1_000),
@@ -35,16 +37,19 @@ function info(storagePath: string, attributes: Stats): StorageFileInfo {
 }
 
 export class SftpStorageAdapter implements StorageAdapter {
-  readonly #storage: SaturnConfig["storage"];
+  readonly #storage: SftpStorageConfig;
   readonly #pool: SftpConnectionPool;
+  #exactPaths=false;
+  enableExactPaths():void{this.#exactPaths=true;}
+  #path(value:string,allowEmpty=true):string{return this.#exactPaths?validateExactStoragePath(value,allowEmpty):normalizeStoragePath(value,allowEmpty);}
 
   constructor(storage: SaturnConfig["storage"]) {
-    this.#storage = storage;
+    this.#storage = requireSftpStorage(storage);
     this.#pool = new SftpConnectionPool(storage);
   }
 
   #remote(storagePath: string): string {
-    return path.posix.join(this.#storage.root, normalizeStoragePath(storagePath));
+    return path.posix.join(this.#storage.root,this.#path(storagePath));
   }
 
   async #operation<T>(action: (lease: Awaited<ReturnType<SftpConnectionPool["acquire"]>>) => Promise<T>): Promise<T> {
@@ -54,13 +59,13 @@ export class SftpStorageAdapter implements StorageAdapter {
       await lease.release();
       return result;
     } catch (error) {
-      await lease.release(true);
+      await lease.release(!canReuseSftpLeaseAfterError(error, lease));
       throw error;
     }
   }
 
   async stat(storagePath: string): Promise<StorageFileInfo> {
-    const normalized = normalizeStoragePath(storagePath);
+    const normalized = this.#path(storagePath);
     return this.#operation(async (lease) => info(
       normalized,
       await callSftp<Stats>(lease.sftp, "lstat", this.#storage.operationTimeoutMs, this.#remote(normalized)),
@@ -69,7 +74,7 @@ export class SftpStorageAdapter implements StorageAdapter {
 
   async list(storagePath: string, cursor: string | undefined, limit: number): Promise<StorageListResult> {
     if (!Number.isInteger(limit) || limit < 1 || limit > 1_000) throw new Error("Storage list limit is invalid");
-    const normalized = normalizeStoragePath(storagePath);
+    const normalized = this.#path(storagePath);
     const start = cursor === undefined ? 0 : Number.parseInt(Buffer.from(cursor, "base64url").toString("utf8"), 10);
     if (!Number.isSafeInteger(start) || start < 0) throw new Error("Storage cursor is invalid");
     const deadline = Date.now() + this.#storage.operationTimeoutMs;
@@ -96,7 +101,7 @@ export class SftpStorageAdapter implements StorageAdapter {
       const next = start + selected.length;
       return {
         entries: selected.map((entry) => {
-          const childPath = joinStoragePath(normalized, entry.filename);
+          const childPath = this.#exactPaths?validateExactStoragePath((normalized?normalized+'/':'')+entry.filename):joinStoragePath(normalized, entry.filename);
           return info(childPath, entry.attrs);
         }),
         ...(more ? { nextCursor: Buffer.from(String(next)).toString("base64url") } : {}),
@@ -104,32 +109,42 @@ export class SftpStorageAdapter implements StorageAdapter {
     });
   }
 
-  async openRead(storagePath: string, options: StorageReadOptions = {}): Promise<Readable> {
+  async openRead(storagePath: string, options: StorageReadOptions = {}): Promise<StorageReadStream> {
     const offset = options.offset ?? 0;
     if (!Number.isSafeInteger(offset) || offset < 0) throw new Error("Read offset is invalid");
     if (options.length !== undefined && (!Number.isSafeInteger(options.length) || options.length < 1)) {
       throw new Error("Read length is invalid");
     }
-    const lease = await this.#pool.acquire();
+    const lease = await this.#pool.acquire(options.signal);
     const end = options.length === undefined ? undefined : offset + options.length - 1;
     const stream = lease.sftp.createReadStream(this.#remote(storagePath), {
       start: offset,
       highWaterMark: 256 * 1024,
       ...(end === undefined ? {} : { end }),
     });
-    let released = false;
+    const proof = createStorageClosureProof();
+    let released = false, opened = false, remoteClosed = false, awaitingClose = false, failed = false;
+    let cleanup: () => void = () => undefined;
     const release = (broken: boolean): void => {
       if (released) return;
       released = true;
-      void lease.release(broken);
+      // The pool retains an unconfirmed client for shutdown fencing; a stream
+      // callback must not create an unhandled rejection in the API process.
+      void lease.release(broken).catch(()=>undefined);
     };
-    stream.once("end", () => release(false));
-    stream.once("close", () => release(false));
-    stream.once("error", () => release(true));
+    stream.once("open", () => { opened = true; });
+    // ssh2 1.17.0 emits raw close only after its CLOSE callback succeeds.
+    // end precedes that acknowledgement and must not release a healthy lease.
+    stream.once("close", () => {
+      remoteClosed = true; cleanup();
+      if (opened) { proof.confirm(); release(false); }
+      else { proof.reject(new Error("SFTP handle was not opened")); release(true); }
+    });
+    stream.once("error", (error: Error) => { failed = true; proof.reject(error); cleanup(); release(true); });
     // Pin the remote file handle before the caller releases its metadata lock.
     const openDeadline = AbortSignal.timeout(this.#storage.operationTimeoutMs);
-    try { await once(stream, "open", { signal: lease.disconnected === undefined ? openDeadline : AbortSignal.any([openDeadline, lease.disconnected]) }); }
-    catch (error) { stream.destroy(); release(true); throw error; }
+    try { await once(stream, "open", { signal: AbortSignal.any([openDeadline,...(lease.disconnected?[lease.disconnected]:[]),...(options.signal?[options.signal]:[])]) }); }
+    catch (error) { proof.reject(error instanceof Error ? error : new Error("SFTP open failed")); stream.destroy(); release(true); throw error; }
     // Opening a handle does not prove later reads can make progress. Bound an
     // SFTP server that continues answering SSH keepalives but stalls file reads.
     // A Transform preserves bytes before the consumer attaches; a data listener
@@ -139,34 +154,55 @@ export class SftpStorageAdapter implements StorageAdapter {
     const fail = (error: Error): void => {
       // ssh2's remote stream may wait forever for its CLOSE callback after
       // disconnect. Fail the caller independently and retire the connection.
-      clear();
+      cleanup();
+      failed = true;
+      proof.reject(error);
       release(true);
       bounded.destroy(error);
       stream.destroy(error);
     };
     const reset = (): void => {
       clear();
-      timer = setTimeout(() => fail(new Error("SFTP read idle timeout")), this.#storage.operationTimeoutMs);
+      timer = setTimeout(() => fail(new Error(awaitingClose ? "SFTP read close timeout" : "SFTP read idle timeout")), this.#storage.operationTimeoutMs);
     };
-    const bounded = new Transform({
+    class ProgressTransform extends Transform {
+      override read(size?: number): Buffer | null {
+        const chunk = super.read(size) as Buffer | null;
+        // Backpressure can stop raw SFTP reads while the recipient continues
+        // draining this bounded buffer. Count that progress without entering
+        // flowing mode before the caller attaches. Physical CLOSE keeps its
+        // independent deadline even if buffered bytes are still consumed.
+        if (chunk !== null && chunk.length > 0 && !remoteClosed && !failed && !awaitingClose && !this.destroyed) reset();
+        return chunk;
+      }
+    }
+    const bounded = new ProgressTransform({
       highWaterMark: 256 * 1024,
       transform(chunk: Buffer, _encoding, callback) { reset(); callback(null, chunk); },
+      destroy(error, callback) {
+        // Initiate raw CLOSE without injecting a synthetic cancellation error.
+        // ssh2 can then acknowledge a successful close independently of the
+        // caller-facing error. pipeline's later destroy is idempotent.
+        stream.destroy(); callback(error);
+      },
     });
     // A caller may not yet have attached its error handler when remote I/O fails.
     // The error remains observable to pipeline/async iteration and is not success.
     bounded.on("error", () => undefined);
     const disconnected = () => fail(new Error("SFTP transport disconnected"));
-    const detach = () => lease.disconnected?.removeEventListener("abort", disconnected);
+    const cancelled=()=>bounded.destroy(Object.assign(new Error('cancelled'),{code:'cancelled'}));
+    const detach = () => {lease.disconnected?.removeEventListener("abort", disconnected);options.signal?.removeEventListener('abort',cancelled);};
+    cleanup = () => { clear(); detach(); };
     lease.disconnected?.addEventListener("abort", disconnected, { once: true });
     if (lease.disconnected?.aborted) disconnected();
-    stream.once("end", detach);
+    options.signal?.addEventListener('abort',cancelled,{once:true});if(options.signal?.aborted)cancelled();
     stream.once("close", detach);
-    bounded.once("close", () => { clear(); detach(); if (!stream.readableEnded) release(true); });
-    stream.once("end", clear);
+    bounded.once("close", () => { if (!remoteClosed && !failed) { awaitingClose = true; reset(); } });
+    stream.once("end", () => { awaitingClose = true; if (!remoteClosed) reset(); });
     stream.once("close", clear);
     reset();
-    void pipeline(stream, bounded).catch(() => undefined).finally(clear);
-    return bounded;
+    void pipeline(stream, bounded).catch(() => undefined);
+    return bindStorageReadClosure(bounded, proof.closed);
   }
 
   async write(storagePath: string, source: Readable, options: StorageWriteOptions): Promise<number> {
@@ -237,7 +273,7 @@ export class SftpStorageAdapter implements StorageAdapter {
 
   async mkdir(storagePath: string): Promise<void> {
     await this.#operation(async (lease) => {
-      await callSftp(lease.sftp, "mkdir", this.#storage.operationTimeoutMs, this.#remote(normalizeStoragePath(storagePath, false)), { mode: 0o700 });
+      await callSftp(lease.sftp, "mkdir", this.#storage.operationTimeoutMs, this.#remote(this.#path(storagePath,false)), { mode: 0o700 });
     });
   }
 

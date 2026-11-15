@@ -1,4 +1,5 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { requireTestValue } from "../../contracts/src/test-support.js";
+import { link, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { Readable } from "node:stream";
@@ -41,5 +42,20 @@ describe("DropBufferStore", () => {
   it("rejects paths outside the UUID staging namespace", async () => {
     const store = await fixture();
     await expect(store.create("../outside.part")).rejects.toThrow(/path is invalid/);
+  });
+
+  it("reopens only the original empty reservation without truncating received data", async () => {
+    const store=await fixture(),relative=store.relativePath("00000000-0000-7000-8000-000000000098");
+    await store.createReserved(relative);await store.createReserved(relative);
+    await store.append(relative,0,4,Readable.from([Buffer.from("kept")]));
+    await expect(store.createReserved(relative)).rejects.toThrow("retain it");
+    await expect(store.digest(relative)).resolves.toMatchObject({bytes:4});
+  });
+
+  it("refuses linked reservation paths without following or changing their targets", async () => {
+    const store=await fixture(),root=requireTestValue(directories.at(-1)),hard=store.relativePath("00000000-0000-7000-8000-000000000097"),symbolic=store.relativePath("00000000-0000-7000-8000-000000000096");
+    const target=path.join(root,"retained-empty-file"),directory=path.join(root,"retained-directory");
+    await writeFile(target,"");await link(target,path.join(root,hard));await mkdir(directory);await symlink(directory,path.join(root,symbolic),"junction");
+    await expect(store.createReserved(hard)).rejects.toThrow("private file");await expect(store.createReserved(symbolic)).rejects.toThrow("private file");
   });
 });

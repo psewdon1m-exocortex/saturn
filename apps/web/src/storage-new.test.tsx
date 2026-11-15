@@ -27,6 +27,10 @@ function fixture(path = "/storage-new") {
   vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ status: "ready" }), { headers: { "Content-Type": "application/json" } })));
   const resolve = vi.spyOn(api, "resolveFolder").mockImplementation(async (_root, segments) => segments.length ? [root, folder] : [root]);
   vi.spyOn(api, "children").mockImplementation(async (id) => id === root.id ? [folder] : [file, other]);
+  vi.spyOn(api, "childrenPage").mockImplementation(async (id, offset = 0) => {
+    const children = await api.children(id), items = children.slice(offset, offset + 500);
+    return { items, nextOffset: items.length === 500 ? offset + 500 : null };
+  });
   vi.spyOn(api, "resource").mockImplementation(async (id) => id === folder.id ? folder : root);
   vi.spyOn(api, "archiveJobs").mockResolvedValue([]);
   vi.spyOn(api, "shares").mockResolvedValue([]);
@@ -163,8 +167,31 @@ describe("Storage new", () => {
     const chosen = new File(["important"], "important.conf");
     if (source === "input") fireEvent.change(screen.getByLabelText("Choose files to upload"), { target: { files: [chosen] } });
     else { const workspace = document.querySelector(".storage-new"); if (workspace) fireEvent.drop(workspace, { dataTransfer: { types: ["Files"], items: [], files: [chosen] } }); }
-    await waitFor(() => expect(upload).toHaveBeenCalledWith(chosen, folder.id, undefined, expect.any(Function)));
+    await waitFor(() => expect(upload).toHaveBeenCalledWith(chosen, folder.id, undefined, expect.any(Function), { signal: expect.any(AbortSignal) as unknown }));
     expect(await screen.findByText("Upload committed and verified.")).toBeTruthy();
+  });
+
+  it("admits four uploads and stops queued files without claiming committed peers were removed", async () => {
+    fixture(`/storage-new/${encodeURIComponent(folder.name)}`);
+    const finish: Array<() => void> = [];
+    const signals: AbortSignal[] = [];
+    const upload = vi.mocked(uploadFile).mockImplementation(async (_file, _parent, _overwrite, _progress, options) => {
+      if (options?.signal !== undefined) signals.push(options.signal);
+      return new Promise(resolve => finish.push(() => resolve(file)));
+    });
+    render(<App />);
+    await screen.findByRole("article", { name: file.name });
+    fireEvent.change(screen.getByLabelText("Choose files to upload"), { target: { files: Array.from({ length: 6 }, (_, i) => new File(["content"], `item-${String(i)}.txt`)) } });
+    await waitFor(() => expect(upload).toHaveBeenCalledTimes(4));
+    expect(screen.getByText("0 of 6 committed · 4 active · 2 queued")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Stop uploads" }));
+    expect(signals).toHaveLength(4);
+    expect(signals.every(signal => signal.aborted)).toBe(true);
+    expect(screen.getByRole("button", { name: "Stopping uploads…" }).hasAttribute("disabled")).toBe(true);
+    finish.forEach(resolve => resolve());
+    expect(await screen.findByText("Upload stopped. Files already committed remain available; check Transfers to resume unfinished files.")).toBeTruthy();
+    expect(upload).toHaveBeenCalledTimes(4);
+    expect(screen.queryByText("Upload committed and verified.")).toBeNull();
   });
 
   it("requires confirmation for trash and does not trash on cancel", async () => {
@@ -218,7 +245,7 @@ describe("Storage new", () => {
     fireEvent.contextMenu(screen.getByRole("article", { name: file.name }));
     fireEvent.click(screen.getByRole("menuitem", { name: "Overwrite" }));
     fireEvent.change(screen.getByLabelText("Choose replacement file"), { target: { files: [replacement] } });
-    await waitFor(() => expect(uploadFile).toHaveBeenCalledWith(replacement, folder.id, file.id, expect.any(Function)));
+    await waitFor(() => expect(uploadFile).toHaveBeenCalledWith(replacement, folder.id, file.id, expect.any(Function), { signal: expect.any(AbortSignal) as unknown }));
     expect(await screen.findByText("File overwritten; the previous version is retained.")).toBeTruthy();
     Reflect.deleteProperty(navigator, "clipboard");
   });
@@ -327,7 +354,7 @@ describe("Storage new", () => {
     fireEvent.click(screen.getByRole("menuitem", { name: "Overwrite" }));
     const replacement = new File(["replacement"], other.name);
     fireEvent.change(screen.getByLabelText("Choose replacement file"), { target: { files: [replacement] } });
-    await waitFor(() => expect(uploadFile).toHaveBeenCalledWith(replacement, folder.id, other.id, expect.any(Function)));
+    await waitFor(() => expect(uploadFile).toHaveBeenCalledWith(replacement, folder.id, other.id, expect.any(Function), { signal: expect.any(AbortSignal) as unknown }));
   });
 
   it("keeps group trash confirmation and clipboard paste available without a toolbar", async () => {
@@ -384,3 +411,4 @@ describe("Storage new", () => {
     expect(document.activeElement).toBe(card);
   });
 });
+vi.mock("./upload-recovery-durable.js", async () => (await import("./upload-recovery-test-backend.js")).recoveryUnitBackend());

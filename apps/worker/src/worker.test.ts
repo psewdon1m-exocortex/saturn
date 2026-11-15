@@ -24,6 +24,29 @@ function database(overrides: Partial<WorkerDatabasePort> = {}): WorkerDatabasePo
 }
 
 describe("worker health", () => {
+  it("cancels reconciliation on close, joins its in-flight item, and starts no later maintenance step", async () => {
+    let enter!: () => void, release!: () => void, observed: AbortSignal | undefined;
+    const entered = new Promise<void>(resolve => { enter = resolve; }), held = new Promise<void>(resolve => { release = resolve; });
+    const closed = vi.fn(async () => undefined), scrub = vi.fn(async () => undefined), purge = vi.fn(async () => undefined);
+    const runtime = buildWorker({ ...config, worker: { ...config.worker, reconciliationIntervalMs: 5 } }, database({ close: closed }),
+      { check: async () => ({ state: "pass" }) }, { reconcile: async signal => { observed = signal;enter();await held;signal?.throwIfAborted(); }, scrub, purge });
+    await runtime.app.ready();runtime.startBackgroundJobs();await entered;
+    const closing = runtime.app.close();
+    try { await vi.waitFor(() => expect(observed?.aborted).toBe(true));expect(closed).not.toHaveBeenCalled(); }
+    finally { release();await closing; }
+    expect(closed).toHaveBeenCalledOnce();expect(scrub).not.toHaveBeenCalled();expect(purge).not.toHaveBeenCalled();
+  });
+
+  it("still joins an accepted transfer instead of aborting it when reconciliation is cancelled", async () => {
+    let release!: () => void;const held = new Promise<void>(resolve => { release = resolve; });
+    const closed = vi.fn(async () => undefined);let completed = false;
+    const runtime = buildWorker({ ...config, worker: { ...config.worker, reconciliationIntervalMs: 60000 }, drop: { drainIntervalMs: 60000 } as SaturnConfig["drop"] },
+      database({ close: closed }), { check: async () => ({ state: "pass" }) }, { reconcile: async () => undefined, drain: async () => { await held;completed = true; } });
+    await runtime.app.ready();runtime.startBackgroundJobs();await Promise.resolve();const closing = runtime.app.close();
+    try { await new Promise(resolve => setTimeout(resolve, 20));expect(completed).toBe(false);expect(closed).not.toHaveBeenCalled(); }
+    finally { release();await closing; }
+    expect(completed).toBe(true);expect(closed).toHaveBeenCalledOnce();
+  });
   it("continues independent maintenance steps after a reconciliation or scrub failure", async () => {
     const purge = vi.fn(async () => undefined), maintain = vi.fn(async () => undefined);
     const scrub = vi.fn(async () => { throw new Error("storage unavailable"); });

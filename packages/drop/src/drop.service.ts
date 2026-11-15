@@ -23,7 +23,7 @@ import type {
 const CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
 export class DropServiceError extends Error {
-  readonly code: "invalid_code" | "rate_limited" | "invalid_session" | "csrf_rejected" | "not_bound" | "not_found" | "quota_exhausted";
+  readonly code: "invalid_code" | "rate_limited" | "invalid_session" | "csrf_rejected" | "not_bound" | "not_found" | "payload_too_large" | "quota_exhausted";
 
   constructor(code: DropServiceError["code"]) {
     super(code === "rate_limited"
@@ -253,16 +253,15 @@ export class DropService {
     const filename = normalizeStorageName(input.filename);
     const expectedSha256 = input.expectedSha256?.toLowerCase();
     const limits = await this.#files.getUploadLimits();
-    if (!Number.isSafeInteger(input.expectedSize) || input.expectedSize < 0
-      || input.expectedSize > Math.min(this.#options.maxBytes, limits.maximumFileBytes)) {
-      throw new Error("Drop upload size is invalid");
-    }
+    if (!Number.isSafeInteger(input.expectedSize) || input.expectedSize < 0) throw new Error("Drop upload size is invalid");
+    if (input.expectedSize > Math.min(this.#options.maxBytes, limits.maximumFileBytes)) throw new DropServiceError("payload_too_large");
     if (expectedSha256 !== undefined && !/^[a-f0-9]{64}$/.test(expectedSha256)) throw new Error("Drop upload checksum is invalid");
     const now = input.now ?? new Date();
+    let refuseNewReservation = false;
     if (this.#buffer !== undefined && this.#repository.bufferReservedBytes !== undefined) {
       await this.#buffer.initialize();
       const capacity = await this.#buffer.capacity(await this.#repository.bufferReservedBytes(), input.expectedSize);
-      if (capacity.state === "refusing") throw new DropServiceError("quota_exhausted");
+      refuseNewReservation = capacity.state === "refusing";
     }
     const reservation = await this.#repository.reserveUpload({
       id: uuidv7(),
@@ -273,6 +272,7 @@ export class DropService {
       expectedSize: input.expectedSize,
       ...(expectedSha256 === undefined ? {} : { expectedSha256 }),
       now,
+      refuseNewReservation,
       ...(this.#buffer === undefined ? {} : {
         continuationUntil: new Date(now.getTime() + (this.#options.continuationTtlMs ?? 24 * 60 * 60 * 1_000)),
         globalMaxBytes: await this.#buffer.reservationLimitBytes(),
@@ -281,38 +281,36 @@ export class DropService {
       if (error instanceof Error && /quota/i.test(error.message)) throw new DropServiceError("quota_exhausted");
       throw error;
     });
-    let mapping = reservation.value;
-    try {
+    // Serialize admission with append/cancel/replay across processes. A lost
+    // reply is not proof that core creation or buffer initialization rolled back.
+    // Keep the original ID and quota until explicit, safe cancellation.
+    return this.#withUploadLock(reservation.value.id, async () => {
+      let mapping = await this.#mapped(session.channelId, reservation.value.id);
+      if (mapping.state !== "reserved") return this.#buffer === undefined ? this.#status(mapping) : this.#bufferStatus(mapping, session.expiresAt);
       if (this.#buffer !== undefined && this.#repository.initializeBufferedUpload !== undefined) {
         const localPath = this.#buffer.relativePath(mapping.id);
-        if (reservation.created) await this.#buffer.create(localPath);
+        await this.#buffer.createReserved(localPath);
         mapping = await this.#repository.initializeBufferedUpload(
           session.channelId,
           mapping.id,
           localPath,
-          new Date(now.getTime() + (this.#options.continuationTtlMs ?? 24 * 60 * 60 * 1_000)),
+          mapping.continuationUntil ?? new Date(mapping.createdAt.getTime() + (this.#options.continuationTtlMs ?? 24 * 60 * 60 * 1_000)),
           now,
         );
         return this.#bufferStatus(mapping, session.expiresAt);
       }
-      const parentId = await this.#dateFolder(now, session.id);
+      const parentId = await this.#dateFolder(mapping.createdAt, mapping.sessionId);
       const core = await this.#files.createUpload({
         parentId,
         filename,
         expectedSize: input.expectedSize,
         ...(expectedSha256 === undefined ? {} : { expectedSha256 }),
         idempotencyKey: `drop:${mapping.id}`,
-        auditActor: { type: "drop_session", id: session.id },
+        auditActor: { type: "drop_session", id: mapping.sessionId },
       });
       mapping = await this.#repository.attachUpload(session.channelId, mapping.id, core.id);
       return await this.#status(mapping);
-    } catch (error) {
-      if (reservation.created && mapping.uploadId === undefined) {
-        await this.#repository.releaseUploadReservation(session.channelId, mapping.id).catch(() => undefined);
-        if (this.#buffer !== undefined) await this.#buffer.delete(this.#buffer.relativePath(mapping.id)).catch(() => undefined);
-      }
-      throw error;
-    }
+    });
   }
 
   async inspectUpload(session: DropSession, id: string): Promise<DropUploadStatus> {

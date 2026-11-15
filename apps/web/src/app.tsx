@@ -1,4 +1,12 @@
 import { PlutoPipelineCard } from "./pluto-pipeline-card.js";
+import { runUploadQueue, type UploadQueueState } from "./upload-queue.js";
+import { DropRecoveryAccessHint, UploadRecoveryPanel } from "./upload-recovery-panel.js";
+import { UploadTreePanel } from "./upload-tree-panel.js";
+import { hydrateUploadRecovery } from "./upload-recovery-durable.js";
+import { DropUploadJobs, type DropUploadJob } from "./drop-upload-jobs.js";
+import { useShareChildrenPage } from "./use-share-children-page.js";
+import { useOwnerChildrenPage } from "./use-owner-children-page.js";
+import "./owner-folder-page.css";
 import { displayOpaqueKey, editOpaqueKey, pasteOpaqueKey, OpaqueKeyInput } from "./opaque-key-input.js";
 import { ServiceLogsPanel } from "./ServiceLogsPanel";
 import { StorageAnalysisPanel } from "./storage-analysis-panel.js";
@@ -538,6 +546,10 @@ function ResourceContextMenu({ state, canPaste, canCompress, canExtract, protect
       { id: "move", label: "Move", disabled: protectedRoot },
       { id: "copy-to", label: "Copy to folder", disabled: protectedRoot },
     ] as const : []),
+    ...(!modern && state.resource?.type === "file" ? [
+      { id: "versions", label: "Versions", disabled: pending },
+      { id: "overwrite", label: "Overwrite", disabled: pending },
+    ] as const : []),
     { id: "copy", label: "Copy", disabled: state.resource === undefined || protectedRoot },
     { id: "cut", label: "Cut", disabled: state.resource === undefined || protectedRoot },
     { id: "paste", label: "Paste", disabled: !canPaste },
@@ -811,10 +823,13 @@ function rememberDropChannel(channelId: string): void {
 function DropView({ health }: { readonly health: GatewayState }) {
   const [state, setState] = useState<"checking" | "redeem" | "active">("checking");
   const [session, setSession] = useState<DropSessionInfo | undefined>();
+  const activeChannel = useRef<string | undefined>(undefined);
   const [code, setCode] = useState("");
   const [pending, setPending] = useState(false);
   const [message, setMessage] = useState("");
-  const [jobs, setJobs] = useState<Array<{ readonly id: string; readonly name: string; readonly progress: number; readonly state: DropUploadStatus["state"] }>>([]);
+  const [jobs, setJobs] = useState<DropUploadJob[]>([]);
+  const batchController = useRef<AbortController | undefined>(undefined);
+  const [queue, setQueue] = useState<UploadQueueState | undefined>();
   const [draggingFiles, setDraggingFiles] = useState(false);
   const [countdownDeadline, setCountdownDeadline] = useState<number | undefined>();
   const [now, setNow] = useState(() => performance.now());
@@ -822,20 +837,21 @@ function DropView({ health }: { readonly health: GatewayState }) {
   const dragDepth = useRef(0);
   const uploadControllers = useRef(new Map<string, AbortController>());
   const [cancelling, setCancelling] = useState<ReadonlySet<string>>(new Set());
-  useEffect(() => () => { for (const controller of uploadControllers.current.values()) controller.abort(); }, []);
+  useEffect(() => () => { batchController.current?.abort(); for (const controller of uploadControllers.current.values()) controller.abort(); }, []);
   const activateSession = useCallback((value: DropSessionInfo) => {
     const localNow = performance.now();
+    activeChannel.current = value.channelId;
     setSession(value);
     setCountdownDeadline(localNow + dropSessionRemainingMs(value));
     setNow(localNow);
     setState("active");
   }, []);
-  const applyUploads = useCallback((uploads: readonly DropUploadStatus[]) => setJobs((current) => uploads.map((upload) => ({
-    id: upload.id,
-    name: upload.filename ?? current.find((job) => job.id === upload.id)?.name ?? "Upload",
-    progress: upload.expectedSize === 0 ? 1 : upload.receivedSize / upload.expectedSize,
-    state: upload.state,
-  }))), []);
+  const applyUploads = useCallback((uploads: readonly DropUploadStatus[]) => setJobs((current) => {
+    const previous = new Map(current.map(job => [job.id, job]));
+    const received = new Set(uploads.map(upload => upload.id));
+    return [...uploads.map(upload => ({ id: upload.id, name: upload.filename ?? previous.get(upload.id)?.name ?? "Upload", progress: upload.expectedSize === 0 ? 1 : upload.receivedSize / upload.expectedSize, state: upload.state })),
+      ...current.filter(job => !received.has(job.id) && (job.state === "creating" || job.state === "unknown" || uploadControllers.current.has(job.id)))];
+  }), []);
 
   useEffect(() => {
     const expectedChannelId = expectedDropChannelId();
@@ -847,7 +863,7 @@ function DropView({ health }: { readonly health: GatewayState }) {
       rememberDropChannel(value.channelId);
       activateSession(value);
       const uploads = await dropApi.uploads().catch(() => []);
-      applyUploads(uploads);
+      if (activeChannel.current === value.channelId) applyUploads(uploads);
     }).catch(() => { setJobs([]); setSession(undefined); setCountdownDeadline(undefined); if (expectedChannelId !== undefined) setMessage("This Drop session has expired. Enter a code to continue."); setState("redeem"); });
   }, [activateSession, applyUploads]);
   useEffect(() => {
@@ -860,25 +876,38 @@ function DropView({ health }: { readonly health: GatewayState }) {
   const dropBlocked = pending || expired || session?.buffer?.state === "refusing";
   useEffect(() => {
     if (state !== "active" || expired) return;
-    const unsubscribe = dropApi.subscribeUploads(applyUploads);
-    if (unsubscribe !== undefined) return unsubscribe;
-    const poll = window.setInterval(() => { void dropApi.uploads().then(applyUploads).catch(() => undefined); }, 1_500);
-    return () => window.clearInterval(poll);
+    let subscribed = true;
+    const unsubscribe = dropApi.subscribeUploads(uploads => { if (subscribed) applyUploads(uploads); });
+    if (unsubscribe !== undefined) return () => { subscribed = false; unsubscribe(); };
+    const controller = new AbortController();
+    let inFlight = false;
+    const poll = window.setInterval(() => {
+      if (inFlight) return;
+      inFlight = true;
+      void dropApi.uploads(AbortSignal.any([controller.signal, AbortSignal.timeout(5_000)])).then(value => { if (!controller.signal.aborted) applyUploads(value); }).catch(() => undefined).finally(() => { inFlight = false; });
+    }, 1_500);
+    return () => { controller.abort(); window.clearInterval(poll); };
   }, [state, expired, applyUploads]);
   const continuationKey = jobs
-    .filter((job) => !["stored", "completed", "failed", "cancelled"].includes(job.state))
+    .filter((job) => !job.id.startsWith("local-") && !["stored", "completed", "failed", "cancelled"].includes(job.state))
     .map((job) => job.id)
     .sort()
     .join("|");
   useEffect(() => {
     if (state !== "active" || !expired || continuationKey === "") return;
     const ids = continuationKey.split("|");
-    let stopped = false;
+    let stopped = false, inFlight = false;
+    const controller = new AbortController();
     const refresh = async () => {
-      const results = await Promise.all(ids.map((id) => dropApi.status(id).catch(() => undefined)));
+      if (inFlight) return;
+      inFlight = true;
+      const results = await runUploadQueue(ids, (id, _index, signal) => dropApi.status(id, AbortSignal.any([signal, AbortSignal.timeout(5_000)])).catch(() => undefined), { signal: controller.signal }).catch(() => []);
+      inFlight = false;
       if (stopped) return;
+      const byId = new Map<string, DropUploadStatus>();
+      for (const upload of results) if (upload !== undefined) byId.set(upload.id, upload);
       setJobs((current) => current.map((job) => {
-        const upload = results.find((candidate) => candidate?.id === job.id);
+        const upload = byId.get(job.id);
         return upload === undefined ? job : {
           ...job,
           name: upload.filename ?? job.name,
@@ -889,7 +918,7 @@ function DropView({ health }: { readonly health: GatewayState }) {
     };
     void refresh();
     const poll = window.setInterval(() => { void refresh(); }, 1_500);
-    return () => { stopped = true; window.clearInterval(poll); };
+    return () => { stopped = true; controller.abort(); window.clearInterval(poll); };
   }, [state, expired, continuationKey]);
 
   const redeem = async (event: SyntheticEvent<HTMLFormElement>) => {
@@ -900,31 +929,38 @@ function DropView({ health }: { readonly health: GatewayState }) {
   };
 
   const upload = async (files: readonly File[], initialMessage = "") => {
-    if (files.length === 0 || pending || expired) return;
+    if (files.length === 0 || pending || expired || batchController.current !== undefined) return;
+    const batch = new AbortController();
+    batchController.current = batch;
     setPending(true); setMessage(initialMessage);
-    for (const file of files) {
-      const localId = crypto.randomUUID();
+    try { await runUploadQueue(files, async (file, _index, queueSignal) => {
+      const localId = `local-${crypto.randomUUID()}`;
       let uploadId: string = localId;
       const controller = new AbortController();
-      setJobs((current) => [...current, { id: localId, name: file.name, progress: 0, state: "uploading" }]);
+      uploadControllers.current.set(localId, controller);
+      setJobs((current) => [...current, { id: localId, name: file.name, progress: 0, state: "creating" }]);
       try {
         const result = await uploadDropFile(file, (progress) => setJobs((current) => current.map((job) => job.id === uploadId ? { ...job, progress } : job)), {
-          signal: controller.signal,
+          ...(session?.channelId === undefined ? {} : { channelId: session.channelId }),
+          signal: AbortSignal.any([controller.signal, queueSignal]),
           onCreated: (created) => {
             uploadId = created.id;
+            uploadControllers.current.delete(localId);
             uploadControllers.current.set(uploadId, controller);
             setJobs((current) => current.some((job) => job.id === uploadId) ? current.filter((job) => job.id !== localId) : current.map((job) => job.id === localId ? { ...job, id: uploadId, state: created.state } : job));
           },
         });
         setJobs((current) => current.map((job) => job.id === uploadId && !["stored", "cancelled"].includes(job.state) ? { ...job, progress: 1, state: result.state } : job));
       } catch (error) {
-        if (controller.signal.aborted) continue;
+        const remote = uploadId === localId ? undefined : await dropApi.status(uploadId, AbortSignal.timeout(5_000)).catch(() => undefined);
+        setJobs((current) => current.map(job => job.id === uploadId ? { ...job, state: remote?.state ?? "unknown" } : job));
+        if (controller.signal.aborted && !queueSignal.aborted) return;
         if (error instanceof ApiError && error.status === 401) { setState("redeem"); setSession(undefined); setCountdownDeadline(undefined); }
-        setJobs((current) => current.map((job) => job.id === uploadId ? { ...job, state: "failed" } : job));
-        setMessage("An upload stopped before entering the verified buffer. No partial file is visible in Drop Point.");
-      } finally { uploadControllers.current.delete(uploadId); }
-    }
-    setPending(false); if (input.current !== null) input.current.value = "";
+        throw error;
+      } finally { uploadControllers.current.delete(localId); uploadControllers.current.delete(uploadId); }
+    }, { signal: batch.signal, onState: setQueue }); }
+    catch { setMessage("Uploads stopped. Stored files remain available; buffered files may still reach storage. Unknown results need a server status check before retrying."); }
+    finally { batchController.current = undefined; setQueue(undefined); setPending(false); if (input.current !== null) input.current.value = ""; }
   };
 
   const acceptDrop = (dataTransfer: DataTransfer) => {
@@ -954,7 +990,7 @@ function DropView({ health }: { readonly health: GatewayState }) {
       onDragEnter={(event) => { if (state !== "active" || !event.dataTransfer.types.includes("Files")) return; event.preventDefault(); dragDepth.current += 1; setDraggingFiles(true); }}
       onDragLeave={() => { dragDepth.current = Math.max(0, dragDepth.current - 1); if (dragDepth.current === 0) setDraggingFiles(false); }}
       onDragOver={(event) => { if (!event.dataTransfer.types.includes("Files")) return; event.preventDefault(); event.dataTransfer.dropEffect = state === "active" && !dropBlocked && dropContainsUploadableFiles(event.dataTransfer) ? "copy" : "none"; }}
-      onDrop={(event) => { if (!event.dataTransfer.types.includes("Files")) return; event.preventDefault(); dragDepth.current = 0; setDraggingFiles(false); if (state === "active" && !dropBlocked) acceptDrop(event.dataTransfer); }}
+      onDropCapture={() => { dragDepth.current = 0; setDraggingFiles(false); }} onDrop={(event) => { if (!event.dataTransfer.types.includes("Files")) return; event.preventDefault(); dragDepth.current = 0; setDraggingFiles(false); if (state === "active" && !dropBlocked) acceptDrop(event.dataTransfer); }}
     >
       {state === "redeem" ? <div className="drop-closed-composition">
         <form className="drop-code-gate" aria-labelledby="drop-code-title" onSubmit={(event) => void redeem(event)}>
@@ -963,12 +999,20 @@ function DropView({ health }: { readonly health: GatewayState }) {
           <input id="drop-code" value={code} onChange={(event) => setCode(event.target.value.toUpperCase())} autoComplete="one-time-code" inputMode="text" maxLength={9} placeholder="Code..." required autoFocus />
           <button className="drop-code-submit" type="submit" disabled={pending}>{pending ? "Checking..." : "Enter"}</button>
           <p className="drop-code-error" role="alert">{message}</p>
+          <DropRecoveryAccessHint />
         </form>
         <DropReachability state={health} />
       </div> : <div className="drop-opened-composition">
         <h1 id="drop-title" className="drop-public-title">saturn drop point</h1>
         <section className="drop-opened-panel" aria-labelledby="drop-title">
           <div className="drop-public-notice"><strong>Upload only Gateway</strong><p>This page cannot list Saturn contents. Files uploaded through this Drop code appear here on every connected device.</p></div>
+          <DropRecoveryAccessHint channelId={session?.channelId} />
+          <button type="button" className="button" disabled={pending || cancelling.size > 0} onClick={() => {
+            if (pending || cancelling.size > 0) return;
+            activeChannel.current = undefined;
+            setSession(undefined); setJobs([]); setCode(""); setMessage(""); setQueue(undefined);
+            setCountdownDeadline(undefined); setDraggingFiles(false); dragDepth.current = 0; setState("redeem");
+          }}>Enter another Drop code</button>
           <div className={`drop-session-status ${expired ? "drop-session-status--expired" : ""}`}><span>Drop code status:</span><strong>{formatDropCountdown(remainingMs)}</strong></div>
           <DropReachability state={health} />
           <div className={`drop-upload-stage ${jobs.length > 0 ? "drop-upload-stage--with-jobs" : ""}`}>
@@ -976,9 +1020,10 @@ function DropView({ health }: { readonly health: GatewayState }) {
               <span>Drop and drag files here</span><small>or choose files - up to {formatStorageBytes(session?.maxFileBytes ?? session?.maxBytes ?? 0)}</small>
             </button>
             <input ref={input} aria-label="Choose files for Drop" className="visually-hidden-input" type="file" multiple onChange={(event) => void upload([...event.target.files ?? []])} />
-            {jobs.length === 0 ? null : <div className="drop-jobs" role="region" aria-live="polite" aria-label="Shared Drop upload queue">
-              {jobs.map((job) => <div className={`drop-job ${job.state === "stored" ? "drop-job--stored" : ""}`} key={job.id}><span>{job.name}</span><progress max={1} value={job.progress} /><strong>{job.state}</strong>{!expired && ["reserved", "uploading", "buffered"].includes(job.state) ? <button type="button" onClick={() => void cancel(job.id)} disabled={cancelling.has(job.id) || (pending && !uploadControllers.current.has(job.id) && job.state !== "buffered")}>Remove</button> : null}</div>)}
-            </div>}
+            {queue === undefined ? null : <p role="status">{queue.active} active · {queue.queued} queued <button type="button" onClick={() => batchController.current?.abort()}>Stop uploads</button></p>}
+            <DropUploadJobs jobs={jobs} label="Shared Drop upload queue" cancelling={cancelling} canRemove={job => !expired && ["reserved", "uploading", "buffered"].includes(job.state) && (!pending || uploadControllers.current.has(job.id) || job.state === "buffered")} onRemove={id => void cancel(id)} />
+            {session === undefined ? null : <UploadRecoveryPanel channel="drop" scopeId={session.channelId} disabled={pending} onBusy={setPending} onRecovered={() => { void dropApi.uploads().then(applyUploads).catch(() => undefined); }} />}
+            {session === undefined ? null : <UploadTreePanel scope={{kind:"drop",channelId:session.channelId}} disabled={pending||expired} onBusy={setPending} onStored={() => { void dropApi.uploads().then(applyUploads).catch(() => undefined); }} />}
           </div>
           {session?.buffer === undefined || session.buffer.state === "available" ? null : <p className={`buffer-state buffer-state--${session.buffer.state}`}>Local buffer {session.buffer.state.toUpperCase()} · {formatBytes(session.buffer.reservedBytes)} reserved of {formatBytes(session.buffer.maxBytes)}</p>}
           {message ? <p className="drop-message" role="alert">{message}</p> : null}
@@ -1022,13 +1067,20 @@ function FilesView({ initialFolderId, title, routeSegments, onPathChange, shareC
   const [folderId, setFolderId] = useState(initialFolderId);
   const [folder, setFolder] = useState<Resource | undefined>();
   const [breadcrumbs, setBreadcrumbs] = useState<Array<{ readonly id: string; readonly name: string; readonly segments: readonly string[] }>>([]);
-  const [items, setItems] = useState<readonly Resource[]>([]);
+  const childPage = useOwnerChildrenPage(JSON.stringify([initialFolderId, routeSegments, refreshKey, pathAttempt]));
+  const items = childPage.items;
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [search, setSearch] = useState("");
   const [sort, setSort] = useState<{ readonly field: SortField; readonly direction: SortDirection }>({ field: "name", direction: "ascending" });
-  const [loading, setLoading] = useState(true);
+  const [folderLoading, setLoading] = useState(true);
+  const loading = folderLoading || childPage.loading;
+  const folderLoad = useRef<AbortController | undefined>(undefined);
   const [pending, setPending] = useState(false);
   const [uploadProgress, setUploadProgress] = useState<number | undefined>();
+  const [uploadQueue, setUploadQueue] = useState<UploadQueueState | undefined>();
+  const [uploadStopping, setUploadStopping] = useState(false);
+  const uploadController = useRef<AbortController | undefined>(undefined);
+  useEffect(() => () => uploadController.current?.abort(), []);
   const [form, setForm] = useState<"folder" | "rename" | "move" | "copy" | undefined>();
   const [formName, setFormName] = useState("");
   const modernFolderForm = modern && form === "folder";
@@ -1062,19 +1114,29 @@ function FilesView({ initialFolderId, title, routeSegments, onPathChange, shareC
   };
 
   const reload = async () => {
+    folderLoad.current?.abort();
+    const controller = new AbortController(); folderLoad.current = controller;
     setLoading(true);
     try {
-      const [resource, children] = await Promise.all([api.resource(folderId), api.children(folderId)]);
+      const [resource, loaded] = await Promise.all([api.resource(folderId, controller.signal), childPage.load(folderId, 0, controller.signal)]);
+      if (controller.signal.aborted || !loaded) return;
       setFolder(resource);
-      setItems(children);
       setSelected(new Set());
       selectionAnchor.current = undefined;
       setPathError("");
     } catch (error) {
+      if (controller.signal.aborted) return;
       handleError(error, "The folder could not be loaded.");
     } finally {
-      setLoading(false);
+      if (folderLoad.current === controller) setLoading(false);
     }
+  };
+
+  const changePage = async (direction: "next" | "previous") => {
+    if (loading || pending) return;
+    setSelected(new Set()); selectionAnchor.current = undefined; setContextMenu(undefined);
+    try { await childPage[direction](); }
+    catch (error) { handleError(error, "The folder page could not be loaded."); }
   };
 
   const loadShares = async () => {
@@ -1084,22 +1146,22 @@ function FilesView({ initialFolderId, title, routeSegments, onPathChange, shareC
 
   const routeKey = JSON.stringify(routeSegments);
   useEffect(() => {
-    const controller = new AbortController();
+    folderLoad.current?.abort();
+    const controller = new AbortController(); folderLoad.current = controller;
     setLoading(true);
     setPathError("");
     setSelected(new Set());
     selectionAnchor.current = undefined;
     void (async () => {
       try {
-        const chain = await api.resolveFolder(initialFolderId, routeSegments);
+        const chain = await api.resolveFolder(initialFolderId, routeSegments, controller.signal);
         const current = chain.at(-1);
         if (current === undefined) throw new Error("Folder path could not be resolved");
-        const [children, currentShares] = await Promise.all([api.children(current.id), api.shares()]);
-        if (controller.signal.aborted) return;
+        const [loaded, currentShares] = await Promise.all([childPage.load(current.id, 0, controller.signal), api.shares()]);
+        if (controller.signal.aborted || !loaded) return;
         const canonicalSegments = chain.slice(1).map((resource) => resource.name);
         setFolderId(current.id);
         setFolder(current);
-        setItems(children);
         setShares(Array.isArray(currentShares) ? currentShares : []);
         setBreadcrumbs(chain.slice(0, -1).map((resource, index) => ({
           id: resource.id,
@@ -1110,7 +1172,6 @@ function FilesView({ initialFolderId, title, routeSegments, onPathChange, shareC
       } catch (error) {
         if (controller.signal.aborted) return;
         setFolder(undefined);
-        setItems([]);
         setBreadcrumbs([]);
         const message = error instanceof ApiError && error.status === 404
           ? "The folder in this URL does not exist."
@@ -1118,7 +1179,7 @@ function FilesView({ initialFolderId, title, routeSegments, onPathChange, shareC
         setPathError(message);
         handleError(error, message);
       } finally {
-        if (!controller.signal.aborted) setLoading(false);
+        if (!controller.signal.aborted && folderLoad.current === controller) setLoading(false);
       }
     })();
     return () => controller.abort();
@@ -1140,12 +1201,13 @@ function FilesView({ initialFolderId, title, routeSegments, onPathChange, shareC
   const activeArchiveJobs = archiveJobs.filter((job) => !["completed", "failed", "cancelled"].includes(job.state));
 
   useEffect(() => {
-    let active = true;
+    const lifecycle = { active: true };
+    const active = () => lifecycle.active;
     archiveStates.current.clear();
     const poll = async () => {
       try {
         const jobs = await api.archiveJobs(folderId);
-        if (!active) return;
+        if (!active()) return;
         let refreshFolder = false;
         for (const job of jobs) {
           const previous = archiveStates.current.get(job.id);
@@ -1159,14 +1221,14 @@ function FilesView({ initialFolderId, title, routeSegments, onPathChange, shareC
           archiveStates.current.set(job.id, job.state);
         }
         setArchiveJobs(jobs);
-        if (refreshFolder) setItems(await api.children(folderId));
+        if (refreshFolder && active()) await reload();
       } catch (error) {
         if (error instanceof ApiError && error.status === 401) onUnauthorized();
       }
     };
     void poll();
     const timer = window.setInterval(() => void poll(), 1_000);
-    return () => { active = false; window.clearInterval(timer); };
+    return () => { lifecycle.active = false; window.clearInterval(timer); };
   }, [folderId]);
 
   useEffect(() => {
@@ -1238,28 +1300,40 @@ function FilesView({ initialFolderId, title, routeSegments, onPathChange, shareC
   };
 
   const performUpload = async (files: readonly File[], overwrite?: Resource) => {
-    if (files.length === 0 || pending) return;
+    if (files.length === 0 || pending || uploadController.current !== undefined) return;
     if (atStorageRoot) {
       addNotice("error", "Create or open a folder first. Files cannot be stored directly in the Saturn root.");
       return;
     }
+    if (overwrite !== undefined && files.some((file) => file.name !== overwrite.name)) {
+      addNotice("error", `Overwrite file must be named ${overwrite.name}.`);
+      return;
+    }
+    const controller = new AbortController();
+    uploadController.current = controller;
+    const progress = new Map<number, number>();
+    let completed = 0;
+    const reportProgress = () => setUploadProgress((completed + [...progress.values()].reduce((sum, value) => sum + value, 0)) / files.length);
     setPending(true);
+    setUploadStopping(false);
+    setUploadProgress(0);
     try {
-      for (const file of files) {
-        if (overwrite !== undefined && file.name !== overwrite.name) {
-          addNotice("error", `Overwrite file must be named ${overwrite.name}.`);
-          continue;
-        }
-        setUploadProgress(0);
-        await uploadFile(file, folderId, overwrite?.id, setUploadProgress);
-      }
+      await runUploadQueue(files, async (file, index, signal) => {
+        try {
+          return await uploadFile(file, folderId, overwrite?.id, value => { progress.set(index, Math.max(0, Math.min(1, value))); reportProgress(); }, { signal });
+        } finally { progress.delete(index); }
+      }, { concurrency: overwrite === undefined ? 4 : 1, signal: controller.signal, onState: state => { completed = state.completed; setUploadQueue(state); reportProgress(); } });
       addNotice("success", overwrite === undefined ? "Upload committed and verified." : "File overwritten; the previous version is retained.");
       await reload();
     } catch (error) {
-      handleError(error, "Upload failed before a visible commit.");
+      handleError(error, "Upload stopped. Files already committed remain available; check Transfers to resume unfinished files.");
+      await reload();
     } finally {
+      uploadController.current = undefined;
       setPending(false);
       setUploadProgress(undefined);
+      setUploadQueue(undefined);
+      setUploadStopping(false);
       if (uploadInput.current !== null) uploadInput.current.value = "";
       if (overwriteInput.current !== null) overwriteInput.current.value = "";
     }
@@ -1490,7 +1564,7 @@ function FilesView({ initialFolderId, title, routeSegments, onPathChange, shareC
   };
 
   return (
-    <section className={`workspace ${modern ? "storage-new" : "storage-workspace"} ${embeddedInHouse ? "storage-workspace--in-house" : ""} ${draggingFiles ? "storage-workspace--drop" : ""}`} aria-labelledby={embeddedInHouse ? undefined : "workspace-title"} aria-label={embeddedInHouse ? "Drop Point storage" : undefined} onDragEnter={(event) => { if (!event.dataTransfer.types.includes("Files")) return; event.preventDefault(); dragDepth.current += 1; setDraggingFiles(true); }} onDragLeave={() => { dragDepth.current = Math.max(0, dragDepth.current - 1); if (dragDepth.current === 0) setDraggingFiles(false); }} onDragOver={(event) => { if (event.dataTransfer.types.includes("Files")) { event.preventDefault(); event.dataTransfer.dropEffect = atStorageRoot || modern && (loading || folderUnavailable) || !dropContainsUploadableFiles(event.dataTransfer) ? "none" : "copy"; } }} onDrop={drop}>
+    <section className={`workspace ${modern ? "storage-new" : "storage-workspace"} ${embeddedInHouse ? "storage-workspace--in-house" : ""} ${draggingFiles ? "storage-workspace--drop" : ""}`} aria-labelledby={embeddedInHouse ? undefined : "workspace-title"} aria-label={embeddedInHouse ? "Drop Point storage" : undefined} onDragEnter={(event) => { if (!event.dataTransfer.types.includes("Files")) return; event.preventDefault(); dragDepth.current += 1; setDraggingFiles(true); }} onDragLeave={() => { dragDepth.current = Math.max(0, dragDepth.current - 1); if (dragDepth.current === 0) setDraggingFiles(false); }} onDragOver={(event) => { if (event.dataTransfer.types.includes("Files")) { event.preventDefault(); event.dataTransfer.dropEffect = atStorageRoot || modern && (loading || folderUnavailable) || !dropContainsUploadableFiles(event.dataTransfer) ? "none" : "copy"; } }} onDropCapture={() => { dragDepth.current = 0; setDraggingFiles(false); }} onDrop={drop}>
       {modern ? <header className="storage-new-head">
         <div><p className="storage-new-kicker">Storage new · {routeSegments.length === 0 ? "All folders" : "Folder"}</p><h1 id="workspace-title">{routeSegments.length === 0 ? "Your storage" : folder?.name ?? routeSegments.at(-1) ?? "Storage"}</h1><p>Files, backups and synchronized folders in one place.</p></div>
         <div className="storage-new-actions"><button type="button" onClick={() => { setForm("folder"); setFormName(""); }} disabled={pending || folderUnavailable || loading}>New folder</button><button className="storage-new-primary" type="button" onClick={() => uploadInput.current?.click()} disabled={pending || atStorageRoot || folderUnavailable || loading}>{uploadProgress === undefined ? "Upload files" : `Uploading ${String(Math.round(uploadProgress * 100))}%`}</button></div>
@@ -1502,6 +1576,7 @@ function FilesView({ initialFolderId, title, routeSegments, onPathChange, shareC
         </div>
         {uploadProgress === undefined ? null : <div className="upload-progress" role="status">Uploading {Math.round(uploadProgress * 100)}%</div>}
       </header>}
+      {uploadQueue === undefined ? null : <div role="status" className="upload-queue-status"><span>{uploadQueue.completed} of {uploadQueue.total} committed · {uploadQueue.active} active · {uploadQueue.queued} queued</span><button type="button" disabled={uploadStopping} onClick={() => { setUploadStopping(true); uploadController.current?.abort(); }}>{uploadStopping ? "Stopping uploads…" : "Stop uploads"}</button></div>}
       <div className="storage-browserbar">
         <div className="storage-path-summary">
           {modern && storageHistory !== undefined ? <div className="storage-new-location">
@@ -1520,12 +1595,16 @@ function FilesView({ initialFolderId, title, routeSegments, onPathChange, shareC
         </div>
         <label className="search-control storage-search">
           <span className="sr-only">Search storage</span>
-          <input type="search" aria-label={modern ? "Search storage" : undefined} value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search" />
+          <input type="search" aria-label={modern ? "Search storage" : undefined} value={search} onChange={(event) => setSearch(event.target.value)} placeholder={childPage.nextOffset !== null || childPage.offset > 0 ? "Search this page" : "Search"} />
         </label>
         {embeddedInHouse || modern ? null : <button className="button storage-upload" type="button" onClick={() => uploadInput.current?.click()} disabled={pending || atStorageRoot || folderUnavailable || loading}>Upload here</button>}
         <input ref={uploadInput} aria-label="Choose files to upload" className="visually-hidden-input" type="file" multiple onChange={(event) => void performUpload([...event.target.files ?? []])} />
       </div>
+      <div className="storage-folder-content">
+      <nav aria-label="Folder pages" className="storage-folder-pages"><button type="button" disabled={pending || loading || childPage.offset === 0} onClick={() => void changePage("previous")}>Previous page</button><span>Page {Math.floor(childPage.offset / 500) + 1} · {items.length} items shown</span><button type="button" disabled={pending || loading || childPage.nextOffset === null} onClick={() => void changePage("next")}>Next page</button>{childPage.nextOffset !== null || childPage.offset > 0 ? <small>Search and sorting apply to this page.</small> : null}</nav>
       <input ref={overwriteInput} aria-label="Choose replacement file" className="visually-hidden-input" type="file" onChange={(event) => { if (single !== undefined) void performUpload([...event.target.files ?? []], single); }} />
+      <UploadRecoveryPanel channel="owner" scopeId={folderId} disabled={pending || loading || folderUnavailable} onBusy={setPending} onRecovered={() => { void reload(); }} />
+      <UploadTreePanel scope={{kind:"owner",rootId:folderId}} disabled={pending || loading || folderUnavailable} onBusy={setPending} onStored={() => { void reload(); }} />
       {modern ? null : <div className="selection-bar storage-selection-bar" role="toolbar" aria-label="Selection actions">
         <span>{clipboard === undefined ? selectedItems.length === 0 ? "No selection" : `${String(selectedItems.length)} selected` : `${clipboard.operation === "copy" ? "Copy" : "Cut"}: ${clipboard.resource.name}`}</span>
         <button type="button" disabled={single === undefined} onClick={() => { if (single?.type === "folder") openFolder(single); }}>Open</button>
@@ -1569,6 +1648,7 @@ function FilesView({ initialFolderId, title, routeSegments, onPathChange, shareC
           </div>
         ))}
       </div>}
+      </div>
       {activeArchiveJobs.length === 0 ? null : <div className="storage-archive-jobs" role="status">{activeArchiveJobs.map((job) => <span key={job.id}>{job.kind === "extract" ? "Extracting" : "Compressing"} {job.outputName} · {job.state}</span>)}</div>}
       <p className="drop-hint">{modern && folderUnavailable ? "File actions will be available when this folder has loaded." : atStorageRoot ? "Create arbitrary folders here, then open one to upload files. Preinstalled system folders cannot be renamed, copied, moved or deleted." : "Drag and drop files anywhere in this workspace to upload into the current folder."}</p>
       {draggingFiles ? <div className={`storage-drop-overlay ${atStorageRoot ? "storage-drop-overlay--blocked" : ""}`} aria-hidden="true"><strong>{atStorageRoot ? "OPEN A FOLDER" : "UPLOAD HERE"}</strong><span>{atStorageRoot ? "Files cannot be stored directly in root" : folder?.name ?? title}</span></div> : null}
@@ -1619,70 +1699,107 @@ function FilesView({ initialFolderId, title, routeSegments, onPathChange, shareC
 }
 
 function InternalDropUploader({ health, addNotice, onUnauthorized, onStored }: { readonly health: GatewayState; readonly addNotice: (kind: Notice["kind"], message: string) => void; readonly onUnauthorized: () => void; readonly onStored: () => void }) {
-  const [jobs, setJobs] = useState<Array<{ readonly id: string; readonly name: string; readonly progress: number; readonly state: DropUploadStatus["state"] }>>([]);
+  const [jobs, setJobs] = useState<DropUploadJob[]>([]);
+  const batchController = useRef<AbortController | undefined>(undefined);
+  const [queue, setQueue] = useState<UploadQueueState | undefined>();
   const [session, setSession] = useState<DropSessionInfo | undefined>();
   const [pending, setPending] = useState(false);
   const [dragging, setDragging] = useState(false);
   const input = useRef<HTMLInputElement>(null);
   const sessionExpiresAt = useRef(0);
+  const sessionChannelId = useRef<string | undefined>(undefined);
   const dragDepth = useRef(0);
   const uploadControllers = useRef(new Map<string, AbortController>());
   const [cancelling, setCancelling] = useState<ReadonlySet<string>>(new Set());
   const mounted = useRef(true);
-  useEffect(() => { mounted.current = true; return () => { mounted.current = false; for (const controller of uploadControllers.current.values()) controller.abort(); }; }, []);
-  const monitor = async (id: string) => {
-    for (;;) {
-      await new Promise((resolve) => window.setTimeout(resolve, 1_000));
-      if (!mounted.current) return;
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; batchController.current?.abort(); for (const controller of uploadControllers.current.values()) controller.abort(); }; }, []);
+  useEffect(() => {
+    const expected = expectedDropChannelId();
+    if (expected === undefined) return;
+    const lifecycle = { stopped: false };
+    const stopped = () => lifecycle.stopped;
+    void dropApi.session().then(async value => {
+      if (stopped() || value.channelId !== expected) return;
+      sessionChannelId.current = value.channelId; sessionExpiresAt.current = new Date(value.expiresAt).getTime(); setSession(value);
+      const uploads = await dropApi.uploads(undefined, value.channelId);
+      if (!stopped()) setJobs(uploads.map(upload => ({ id: upload.id, name: upload.filename ?? "Upload", progress: upload.expectedSize === 0 ? 1 : upload.receivedSize / upload.expectedSize, state: upload.state })));
+    }).catch(() => undefined);
+    return () => { lifecycle.stopped = true; };
+  }, []);
+  const waitingForStorage = jobs.some(job => ["buffered", "transferring", "verifying", "unknown"].includes(job.state));
+  const storedCallback = useRef(onStored);
+  storedCallback.current = onStored;
+  const seenStored = useRef(new Set<string>());
+  useEffect(() => {
+    if (!waitingForStorage) return;
+    const lifecycle = { stopped: false, inFlight: false };
+    const stopped = () => lifecycle.stopped;
+    const refresh = async () => {
+      if (lifecycle.inFlight || stopped()) return;
+      lifecycle.inFlight = true;
       try {
-        const status = await dropApi.status(id);
-        setJobs((current) => current.map((job) => job.id === id ? { ...job, progress: status.expectedSize === 0 ? 1 : status.receivedSize / status.expectedSize, state: status.state } : job));
-        if (status.state === "stored") onStored();
-        if (["stored", "failed", "cancelled"].includes(status.state)) return;
-      } catch { return; }
-    }
-  };
+        const uploads = await dropApi.uploads(AbortSignal.timeout(5_000));
+        if (stopped()) return;
+        const statuses = new Map(uploads.map(upload => [upload.id, upload]));
+        setJobs(current => current.map(job => { const status = statuses.get(job.id); return status === undefined ? job : { ...job, progress: status.expectedSize === 0 ? 1 : status.receivedSize / status.expectedSize, state: status.state }; }));
+        const newlyStored = uploads.filter(upload => upload.state === "stored" && !seenStored.current.has(upload.id));
+        newlyStored.forEach(upload => seenStored.current.add(upload.id));
+        if (newlyStored.length > 0) storedCallback.current();
+      } catch { /* Keep known receipts; a later refresh can reconcile unknown state. */ }
+      finally { lifecycle.inFlight = false; }
+    };
+    const timer = window.setInterval(() => { void refresh(); }, 1_000);
+    return () => { lifecycle.stopped = true; window.clearInterval(timer); };
+  }, [waitingForStorage]);
   const upload = async (files: readonly File[]) => {
-    if (files.length === 0 || pending) return;
+    if (files.length === 0 || pending || batchController.current !== undefined) return;
+    const batch = new AbortController();
+    batchController.current = batch;
     setPending(true);
     try {
       if (sessionExpiresAt.current <= Date.now() + 5_000) {
         const openedSession = await api.openInternalDropSession();
         sessionExpiresAt.current = new Date(openedSession.expiresAt).getTime();
+        sessionChannelId.current = openedSession.channelId;
+        rememberDropChannel(openedSession.channelId);
         setSession(openedSession);
       }
     } catch (error) {
       if (error instanceof ApiError && error.status === 401) onUnauthorized();
       else addNotice("error", "The in-house Drop buffer could not be opened.");
       setPending(false);
+      batchController.current = undefined;
       return;
     }
     let failed = 0;
     let accepted = 0;
-    for (const file of files) {
-      const id = crypto.randomUUID();
+    try { await runUploadQueue(files, async (file, _index, queueSignal) => {
+      const id = `local-${crypto.randomUUID()}`;
       let uploadId: string = id;
       const controller = new AbortController();
-      setJobs((current) => [...current, { id, name: file.name, progress: 0, state: "uploading" }]);
+      uploadControllers.current.set(id, controller);
+      setJobs((current) => [...current, { id, name: file.name, progress: 0, state: "creating" }]);
       try {
         const result = await uploadDropFile(file, (progress) => setJobs((current) => current.map((job) => job.id === uploadId ? { ...job, progress } : job)), {
-          signal: controller.signal,
-          onCreated: (created) => { uploadId = created.id; uploadControllers.current.set(uploadId, controller); setJobs((current) => current.map((job) => job.id === id ? { ...job, id: uploadId, state: created.state } : job)); },
+          ...(sessionChannelId.current === undefined ? {} : { channelId: sessionChannelId.current }),
+          signal: AbortSignal.any([controller.signal, queueSignal]),
+          onCreated: (created) => { uploadId = created.id; uploadControllers.current.delete(id); uploadControllers.current.set(uploadId, controller); setJobs((current) => current.map((job) => job.id === id ? { ...job, id: uploadId, state: created.state } : job)); },
         });
         accepted += 1;
-        setJobs((current) => current.map((job) => job.id === uploadId ? { ...job, progress: 1, state: result.state } : job));
-        if (result.state === "stored") onStored();
-        if (!["stored", "failed", "cancelled"].includes(result.state)) void monitor(result.id);
+        setJobs((current) => current.map((job) => job.id === uploadId && !["stored", "cancelled"].includes(job.state) ? { ...job, progress: 1, state: result.state } : job));
+        if (result.state === "stored") { seenStored.current.add(result.id); onStored(); }
       } catch (error) {
-        if (controller.signal.aborted) continue;
+        const remote = uploadId === id ? undefined : await dropApi.status(uploadId, AbortSignal.timeout(5_000)).catch(() => undefined);
+        setJobs(current => current.map(job => job.id === uploadId ? { ...job, state: remote?.state ?? "unknown" } : job));
+        if (controller.signal.aborted && !queueSignal.aborted) return;
         failed += 1;
         if (error instanceof ApiError && error.status === 401) onUnauthorized();
-        setJobs((current) => current.map((job) => job.id === uploadId ? { ...job, state: "failed" } : job));
-      } finally { uploadControllers.current.delete(uploadId); }
-    }
-    setPending(false);
-    if (input.current !== null) input.current.value = "";
-    if (failed > 0) addNotice("error", `${String(failed)} file(s) could not enter the verified Drop buffer.`);
+        throw error;
+      } finally { uploadControllers.current.delete(id); uploadControllers.current.delete(uploadId); }
+    }, { signal: batch.signal, onState: setQueue }); }
+    catch { addNotice("error", "Uploads stopped. Stored files remain available; buffered files may still reach storage. Check unknown results before retrying."); }
+    finally { batchController.current = undefined; setQueue(undefined); setPending(false); if (input.current !== null) input.current.value = ""; }
+    if (failed > 0) addNotice("error", `${String(failed)} upload result(s) require a server status check.`);
     if (accepted > 0) addNotice("success", `${String(accepted)} file(s) entered the in-house Drop buffer.`);
   };
   const cancel = async (id: string) => {
@@ -1701,7 +1818,7 @@ function InternalDropUploader({ health, addNotice, onUnauthorized, onStored }: {
     if (dropped.directoryCount > 0) addNotice("info", skippedDirectoryMessage(dropped.directoryCount));
     if (dropped.files.length > 0) void upload(dropped.files);
   };
-  return <aside className={`internal-drop ${dragging ? "internal-drop--dragging" : ""}`} aria-labelledby="internal-drop-title" onDragEnter={(event) => { if (!event.dataTransfer.types.includes("Files")) return; event.preventDefault(); event.stopPropagation(); dragDepth.current += 1; setDragging(true); }} onDragLeave={(event) => { event.stopPropagation(); dragDepth.current = Math.max(0, dragDepth.current - 1); if (dragDepth.current === 0) setDragging(false); }} onDragOver={(event) => { if (event.dataTransfer.types.includes("Files")) { event.preventDefault(); event.stopPropagation(); event.dataTransfer.dropEffect = dropContainsUploadableFiles(event.dataTransfer) ? "copy" : "none"; } }} onDrop={(event) => { event.preventDefault(); event.stopPropagation(); dragDepth.current = 0; setDragging(false); acceptDrop(event.dataTransfer); }}>
+  return <aside className={`internal-drop ${dragging ? "internal-drop--dragging" : ""}`} aria-labelledby="internal-drop-title" onDragEnter={(event) => { if (!event.dataTransfer.types.includes("Files")) return; event.preventDefault(); event.stopPropagation(); dragDepth.current += 1; setDragging(true); }} onDragLeave={(event) => { event.stopPropagation(); dragDepth.current = Math.max(0, dragDepth.current - 1); if (dragDepth.current === 0) setDragging(false); }} onDragOver={(event) => { if (event.dataTransfer.types.includes("Files")) { event.preventDefault(); event.stopPropagation(); event.dataTransfer.dropEffect = dropContainsUploadableFiles(event.dataTransfer) ? "copy" : "none"; } }} onDropCapture={() => { dragDepth.current = 0; setDragging(false); }} onDrop={(event) => { event.preventDefault(); event.stopPropagation(); dragDepth.current = 0; setDragging(false); acceptDrop(event.dataTransfer); }}>
     <h2 id="internal-drop-title" className="internal-drop__title">saturn drop point</h2>
     <div className="drop-public-notice"><strong>Upload only Gateway</strong><p>This page cannot list Saturn contents. Only files selected in this session appear here.</p></div>
     <div className="drop-session-status"><span>Drop code status:</span><strong>none</strong></div>
@@ -1709,7 +1826,10 @@ function InternalDropUploader({ health, addNotice, onUnauthorized, onStored }: {
     <div className={`drop-upload-stage ${jobs.length > 0 ? "drop-upload-stage--with-jobs" : ""}`}>
       <button className="drop-target" type="button" disabled={pending} onClick={() => input.current?.click()}><span>{dragging ? "Release to upload" : "Drop and drag files here"}</span><small>or choose files - up to {formatStorageBytes(session?.maxFileBytes ?? session?.maxBytes ?? 20 * 1024 ** 3).replace(".0 ", " ")}</small></button>
       <input ref={input} className="visually-hidden-input" type="file" multiple aria-label="Choose files for in-house Drop" onChange={(event) => void upload([...event.target.files ?? []])} />
-      {jobs.length === 0 ? null : <div className="drop-jobs" role="region" aria-live="polite" aria-label="In-house upload queue">{jobs.map((job) => <div className={`drop-job ${job.state === "stored" ? "drop-job--stored" : ""}`} key={job.id}><span>{job.name}</span><progress max={1} value={job.progress} /><strong>{job.state}</strong>{["reserved", "uploading", "buffered"].includes(job.state) ? <button type="button" onClick={() => void cancel(job.id)} disabled={cancelling.has(job.id) || (pending && !uploadControllers.current.has(job.id) && job.state !== "buffered")}>Remove</button> : null}</div>)}</div>}
+      {queue === undefined ? null : <p role="status">{queue.active} active · {queue.queued} queued <button type="button" onClick={() => batchController.current?.abort()}>Stop uploads</button></p>}
+      <DropUploadJobs jobs={jobs} label="In-house upload queue" cancelling={cancelling} canRemove={job => ["reserved", "uploading", "buffered"].includes(job.state) && (!pending || uploadControllers.current.has(job.id) || job.state === "buffered")} onRemove={id => void cancel(id)} />
+      {session === undefined ? null : <UploadRecoveryPanel channel="drop" scopeId={session.channelId} disabled={pending} onBusy={setPending} onRecovered={onStored} />}
+      {session === undefined ? null : <UploadTreePanel scope={{kind:"drop",channelId:session.channelId}} disabled={pending} onBusy={setPending} onStored={onStored} />}
     </div>
   </aside>;
 }
@@ -1980,16 +2100,19 @@ function PublicShareView({ token }: { readonly token: string }) {
   const health = useGatewayHealth();
   const [share, setShare] = useState<ShareInfo | undefined>();
   const [password, setPassword] = useState("");
-  const [children, setChildren] = useState<readonly ShareChild[]>([]);
-  const [folderId, setFolderId] = useState<string | undefined>();
+  const childPage = useShareChildrenPage(token);
+  const children = childPage.items, folderId = childPage.parentId;
   const [history, setHistory] = useState<readonly string[]>([]);
   const [message, setMessage] = useState("");
   const [pending, setPending] = useState(false);
   const [unavailable, setUnavailable] = useState(false);
   const [sort, setSort] = useState<{ readonly field: "name" | "size"; readonly direction: SortDirection }>({ field: "name", direction: "ascending" });
-  const loadChildren = async (parentId?: string) => { setChildren(await publicShareApi.children(token, parentId)); setFolderId(parentId); };
+  const loadChildren = childPage.load;
   useEffect(() => {
-    void publicShareApi.metadata(token).then((value) => { setShare(value); setUnavailable(false); if (!value.locked && value.resourceType === "folder") void loadChildren(); }).catch(() => { setUnavailable(true); setMessage("This share is unavailable."); });
+    let active = true;
+    setShare(undefined); setHistory([]); setMessage("");
+    void publicShareApi.metadata(token).then(async (value) => { if (!active) return; setShare(value); setUnavailable(false); if (!value.locked && value.resourceType === "folder") await loadChildren(); }).catch(() => { if (active) { setUnavailable(true); setMessage("This share is unavailable."); } });
+    return () => { active = false; };
   }, [token]);
   const unlock = async (event: SyntheticEvent<HTMLFormElement>) => {
     event.preventDefault(); setPending(true); setMessage("");
@@ -1997,8 +2120,9 @@ function PublicShareView({ token }: { readonly token: string }) {
     catch (error) { setPassword(""); setMessage(error instanceof ApiError && error.status === 429 ? "Too many attempts. Try later." : "The share password was not accepted."); }
     finally { setPending(false); }
   };
-  const openFolder = async (id: string) => { setPending(true); try { setHistory((current) => [...current, folderId ?? ""]); await loadChildren(id); } catch { setMessage("That folder is outside this share."); } finally { setPending(false); } };
-  const back = async () => { const next = history.at(-1); if (next === undefined) return; setHistory((current) => current.slice(0, -1)); await loadChildren(next || undefined); };
+  const openFolder = async (id: string) => { if (pending || childPage.loading) return; setPending(true); try { if (await loadChildren(id)) setHistory(current => [...current, folderId ?? ""]); } catch { setMessage("That folder is outside this share."); } finally { setPending(false); } };
+  const back = async () => { const next = history.at(-1); if (next === undefined || pending || childPage.loading) return; setPending(true); try { if (await loadChildren(next || undefined)) setHistory(current => current.slice(0, -1)); } catch { setMessage("That folder could not be loaded."); } finally { setPending(false); } };
+  const changePage = async (direction: "next" | "previous") => { if (pending || childPage.loading) return; setMessage(""); try { await childPage[direction](); } catch { setMessage("This page could not be loaded. Try again."); } };
   const prepareAndDownload = async () => {
     setPending(true);
     setMessage("");
@@ -2045,6 +2169,8 @@ function PublicShareView({ token }: { readonly token: string }) {
   const expiry = share?.expiresAt === undefined ? "none" : new Date(share.expiresAt).toLocaleString();
   const modeLabel = share?.mode === "view" ? "View only Gateway" : share?.mode === "browse" ? "Browse Gateway" : "Download only Gateway";
   const bulkSize = share?.resourceSize ?? knownTotal;
+  const emptyListing = childPage.loading ? "Loading shared folder…" : childPage.nextOffset !== null || childPage.offset > 0 ? "No visible items on this page." : "This shared folder is empty.";
+  const pagination = share?.resourceType !== "folder" ? null : <nav aria-label="Shared folder pages"><button type="button" disabled={pending || childPage.loading || childPage.previousOffsets.length === 0} onClick={() => void changePage("previous")}>Previous page</button><span>Page {childPage.previousOffsets.length + 1} · {children.length} items shown</span><button type="button" disabled={pending || childPage.loading || childPage.nextOffset === null} onClick={() => void changePage("next")}>Next page</button></nav>;
   const legacyMode = new URLSearchParams(window.location.search).get("legacy") === "1";
   if (legacyMode) return (
     <main className={`share-public-view ${share?.locked === true ? "share-public-view--locked" : "share-public-view--opened"}`}>
@@ -2071,7 +2197,7 @@ function PublicShareView({ token }: { readonly token: string }) {
                 <span role="columnheader"><SortButton field="size" activeField={sort.field} direction={sort.direction} onChange={changeSort}>Size</SortButton></span>
                 <span className="sr-only" role="columnheader">Action</span>
               </div>
-              {entries.length === 0 ? <p className="share-browser__empty">This shared folder is empty.</p> : entries.map((child) => <div className="share-browser__row" role="row" key={child.id}>
+              {entries.length === 0 ? <p className="share-browser__empty">{emptyListing}</p> : entries.map((child) => <div className="share-browser__row" role="row" key={child.id}>
                 <span role="cell">{child.type === "folder" ? <button className="share-browser__name share-browser__name--folder" type="button" onClick={() => void openFolder(child.id)} disabled={pending}>{child.name}</button> : <span className="share-browser__name share-browser__name--file">{child.name}</span>}</span>
                 <span role="cell">{formatBytes(child.sizeBytes)}</span>
                 <span role="cell">{child.type === "file" && share.mode !== "browse" ? <a className="share-browser__download" aria-label={`${share.mode === "view" ? "Open" : "Download"} ${child.name}`} href={publicShareApi.contentUrl(token, share.resourceType === "file" ? undefined : child.id, share.mode !== "view")} onClick={(event) => { if (share.mode !== "view") event.currentTarget.href = publicShareApi.contentUrl(token, share.resourceType === "file" ? undefined : child.id, true); }}>{share.mode === "view" ? "↗" : "↓"}</a> : null}</span>
@@ -2079,6 +2205,8 @@ function PublicShareView({ token }: { readonly token: string }) {
             </div>
           </div>
           {share.resourceType === "file" ? <a className="share-public-download-all" href={publicShareApi.contentUrl(token, undefined, share.mode !== "view")} onClick={(event) => { if (share.mode !== "view") event.currentTarget.href = publicShareApi.contentUrl(token, undefined, true); }}>{share.mode === "view" ? "Open file" : "Download all"} - {formatBytes(share.resourceSize)}</a> : share.mode === "download_folder" ? <button className="share-public-download-all" type="button" onClick={() => void prepareAndDownload()} disabled={pending}>{pending ? "Preparing..." : `Download all - ${formatBytes(bulkSize)}`}</button> : share.mode === "browse" ? <button className="share-public-download-all" type="button" disabled>{`Download all - ${formatBytes(bulkSize)}`}</button> : null}
+          {pagination}
+          {share.mode === "download_folder" ? <p>Download all includes the entire shared folder, including other pages.</p> : null}
           <p className="share-public-error" role="alert">{message}</p>
         </section>
       </div>}
@@ -2086,7 +2214,7 @@ function PublicShareView({ token }: { readonly token: string }) {
   );
   const accessLabel = share?.mode === "view" ? "View only" : share?.mode === "browse" ? "Browse only" : "Download allowed";
   const expiryLabel = share?.expiresAt === undefined ? "No expiration" : `Available until ${new Date(share.expiresAt).toLocaleString()}`;
-  const itemLabel = `${String(entries.length)} ${entries.length === 1 ? "item" : "items"}`;
+  const itemLabel = `${String(entries.length)} ${entries.length === 1 ? "item" : "items"}${share?.resourceType === "folder" ? " on this page" : ""}`;
   const primaryAction = share === undefined || share.locked ? null
     : share.resourceType === "file"
       ? <a className="share-client-primary-action" href={publicShareApi.contentUrl(token, undefined, share.mode !== "view")} onClick={(event) => { if (share.mode !== "view") event.currentTarget.href = publicShareApi.contentUrl(token, undefined, true); }}>{share.mode === "view" ? "Open file" : "Download"}</a>
@@ -2127,17 +2255,17 @@ function PublicShareView({ token }: { readonly token: string }) {
             <div>
               <p className="share-client-kicker">Shared {share.resourceType}</p>
               <h1 id="public-share-title">{share.resourceName}</h1>
-              <span>{itemLabel} · {formatBytes(bulkSize)}</span>
+              <span>{itemLabel} · {formatBytes(bulkSize)}{share.resourceType === "folder" ? " total shared size" : ""}</span>
             </div>
             {primaryAction}
           </header>
           {health.gateway === "degraded" ? <div className="share-client-service-error" role="status">Saturn is temporarily unavailable. Some actions may not work.</div> : null}
           <div className="share-client-toolbar">
             <div>{history.length > 0 ? <button className="share-client-back" type="button" onClick={() => void back()} disabled={pending}>← Back</button> : <span>{share.resourceType === "folder" ? "Files and folders" : "Shared file"}</span>}</div>
-            <div className="share-client-sort" aria-label="Sort shared content"><SortButton field="name" activeField={sort.field} direction={sort.direction} onChange={changeSort}>Name</SortButton><SortButton field="size" activeField={sort.field} direction={sort.direction} onChange={changeSort}>Size</SortButton></div>
+            <div className="share-client-sort" aria-label="Sort this page"><SortButton field="name" activeField={sort.field} direction={sort.direction} onChange={changeSort}>Name</SortButton><SortButton field="size" activeField={sort.field} direction={sort.direction} onChange={changeSort}>Size</SortButton></div>
           </div>
           <div className="share-client-grid" aria-label={`Shared files in ${share.resourceName}`}>
-            {entries.length === 0 ? <p className="share-client-empty">This shared folder is empty.</p> : entries.map((child) => {
+            {entries.length === 0 ? <p className="share-client-empty">{emptyListing}</p> : entries.map((child) => {
               const kind = resourceKind(child);
               const hasThumbnail = child.type === "file" && ["image", "video", "pdf"].includes(kind);
               return <article className="share-client-file" key={child.id}>
@@ -2147,6 +2275,8 @@ function PublicShareView({ token }: { readonly token: string }) {
               </article>;
             })}
           </div>
+          {pagination}
+          {share.mode === "download_folder" ? <p>Download all includes the entire shared folder, including other pages.</p> : null}
           <details className="share-client-about"><summary>About access</summary><p>Any content displayed in a browser can still be copied. Saturn does not promise impossible download prevention.{share.mode === "browse" ? " Download permission is not granted for this link." : ""}</p></details>
           <p className="share-client-error" role="alert">{message}</p>
         </section>
@@ -2417,7 +2547,7 @@ function DashboardView({ preferences, setPreferences, addNotice }: {
     setControllingTaskId(task.id);
     try {
       await api.controlTransferTask(task.id, action);
-      if (action === "cancel") forgetRecoverableOwnerUpload(task.id);
+      if (action === "cancel") await forgetRecoverableOwnerUpload(task.id);
       addNotice("success", `Task ${action === "pause" ? "paused" : action === "resume" ? "resumed" : "cancelled"}.`);
       await load();
     } catch {
@@ -2866,6 +2996,7 @@ function SettingsView({ preferences, setPreferences, addNotice, onAnonymous }: {
     finally { setPending(false); }
   };
   const openStorageDialog = () => {
+    if (storage?.backend === "local") return;
     setStorageDraft({ host: storage?.host ?? "", port: storage?.port ?? 22, username: storage?.username ?? "", root: storage?.root ?? ".", hostFingerprint: storage?.hostFingerprint ?? "", authMode: storage?.authMode ?? "password_file", credential: "" });
     setStorageTested(false); setStorageConfirmed(false); setStorageStage("idle"); setStorageDialog(true);
   };
@@ -3023,7 +3154,7 @@ function SettingsView({ preferences, setPreferences, addNotice, onAnonymous }: {
       <section className="settings-group"><h3>Trash retention</h3><p>Sets how many days a newly trashed file or folder remains recoverable before automatic permanent deletion.</p><form className="reauth-form trash-retention-form" onSubmit={(event) => void applyTrashRetention(event)}><label>Retention period, days<input aria-label="Trash retention, days" type="number" min={1} max={365} step={1} value={trashRetentionDraft} onChange={(event) => setTrashRetentionDraft(Number(event.target.value))} required /></label><button className="button" type="submit" disabled={pending || trashRetentionDraft === preferences.trashRetentionDays}>Save retention</button></form><p className="setting-meta">Applies to items moved to Trash after saving. Existing deletion deadlines remain unchanged.</p></section>
     </div>,
     storage: <div className="settings-groups">
-      <section className="settings-group storage-connection"><h3>Active SFTP profile</h3><p>The active SFTP profile is Gateway-only. Credentials are write-only and are never returned to this page.</p><StatusRow label={storage === undefined ? "Storage profile" : `${storage.username}@${storage.host}:${String(storage.port)} · ${storage.root}`} state={storage === undefined ? "busy" : storage.reachability === "ready" ? "ready" : "unavailable"} detail={storage === undefined ? "Checking" : `${storage.source} · revision ${String(storage.revision)}`} /><p className="setting-meta">Changing this profile does not migrate files. Saturn validates and indexes the target as an independent file set.</p><button className="button settings-action" type="button" disabled={pending} onClick={openStorageDialog}>Configure storage</button></section>
+      <section className="settings-group storage-connection"><h3>{storage?.backend === "local" ? "Local storage" : "Active SFTP profile"}</h3>{storage?.backend === "local" ? <><StatusRow label={storage.root} state={storage.reachability === "ready" ? "ready" : "unavailable"} detail="Managed by the server operator" /><p className="setting-meta">Contact the server operator to change the local storage location.</p></> : <><p>The active SFTP profile is Gateway-only. Credentials are write-only and are never returned to this page.</p><StatusRow label={storage === undefined ? "Storage profile" : `${storage.username}@${storage.host}:${String(storage.port)} · ${storage.root}`} state={storage === undefined ? "busy" : storage.reachability === "ready" ? "ready" : "unavailable"} detail={storage === undefined ? "Checking" : `${storage.source} · revision ${String(storage.revision)}`} /><p className="setting-meta">Changing this profile does not migrate files. Saturn validates and indexes the target as an independent file set.</p><button className="button settings-action" type="button" disabled={pending} onClick={openStorageDialog}>Configure storage</button></>}</section>
       <StorageAnalysisPanel profileId={storage?.profileId} profileRevision={storage?.revision} disabled={pending || storage?.reachability !== "ready"} addNotice={addNotice} />
     </div>,
     backup: <div className="settings-groups backup-content">
@@ -3326,6 +3457,14 @@ function DropApp() {
 
 export function App() {
   const [initialAccentColor, setInitialAccentColor] = useState<string>();
+  const [recoveryStorage, setRecoveryStorage] = useState<"ready" | Error>();
+  useEffect(() => {
+    let active = true;
+    void hydrateUploadRecovery().then(() => { if (active) setRecoveryStorage("ready"); }).catch((error: unknown) => {
+      if (active) setRecoveryStorage(error instanceof Error ? error : new Error("Upload recovery storage is unavailable."));
+    });
+    return () => { active = false; };
+  }, []);
   useEffect(() => {
     let active = true;
     const controller = new AbortController();
@@ -3347,7 +3486,6 @@ export function App() {
   }, []);
   if (initialAccentColor === undefined) return <main className="boot-state" role="status">Opening Saturn…</main>;
   const route = window.location.pathname.replace(/\/+$/, "");
-  if (route === "/drop") return <DropApp />;
   const share = /^\/s\/([A-Za-z0-9_-]{43})$/.exec(route);
-  return share?.[1] === undefined ? <OwnerApp initialAccentColor={initialAccentColor} /> : <PublicShareView token={share[1]} />;
+  return <>{recoveryStorage instanceof Error ? <p role="alert">{recoveryStorage.message}</p> : null}{route === "/drop" ? <DropApp /> : share?.[1] === undefined ? <OwnerApp initialAccentColor={initialAccentColor} /> : <PublicShareView token={share[1]} />}</>;
 }

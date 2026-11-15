@@ -12,7 +12,7 @@ export class BackupApiExceptionFilter implements ExceptionFilter {
     if (exception instanceof HttpException) { reply.status(exception.getStatus()).send(exception.getResponse()); return; }
     if (exception instanceof ZodError) { reply.status(400).send({ code: "invalid_request" }); return; }
     if (exception instanceof BackupServiceError) {
-      const status = exception.code === "unauthorized" ? 401 : exception.code === "not_found" ? 404 : exception.code === "quota" ? 413 : exception.code === "conflict" ? 409 : exception.code === "disabled" ? 503 : 400;
+      const status = exception.code === "unauthorized" ? 401 : exception.code === "not_found" ? 404 : exception.code === "limit" || exception.code === "quota" ? 413 : exception.code === "conflict" ? 409 : exception.code === "disabled" ? 503 : 400;
       reply.status(status).send({ code: status === 404 ? "not_found" : exception.code }); return;
     }
     if (exception instanceof Error && /cancelled|not paused|client disconnected/i.test(exception.message)) { reply.status(409).send({ code: "task_controlled" }); return; }

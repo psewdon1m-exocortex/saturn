@@ -20,8 +20,8 @@ import type {
 } from "./types.js";
 
 export class BackupServiceError extends Error {
-  constructor(readonly code: "disabled" | "unauthorized" | "not_found" | "invalid" | "quota" | "conflict") {
-    super(code === "quota" ? "Backup quota is exhausted" : code === "conflict" ? "Backup operation conflicts with current state" : "Backup request was not accepted");
+  constructor(readonly code: "disabled" | "unauthorized" | "not_found" | "invalid" | "limit" | "quota" | "conflict") {
+    super(code === "limit" ? "Backup exceeds the configured maximum size" : code === "quota" ? "Backup quota is exhausted" : code === "conflict" ? "Backup operation conflicts with current state" : "Backup request was not accepted");
   }
 }
 
@@ -156,8 +156,9 @@ export class BackupIngestService {
     if (!context.service.archivePipeline) throw new BackupServiceError("unauthorized");
     this.assertSlug(context, slug); const filename = normalizeStorageName(value.filename); const sha256 = value.sha256.toLowerCase();
     if (!/^[a-f0-9]{64}$/.test(sha256) || !/^[a-z][a-z0-9_-]{0,31}$/.test(value.backupType) || !/^[A-Za-z0-9._:-]{8,128}$/.test(value.idempotencyKey)
-      || value.sourceVersion.length < 1 || value.sourceVersion.length > 200 || /[\r\n]/.test(value.sourceVersion) || !Number.isSafeInteger(value.expectedSize) || value.expectedSize < 1 || value.expectedSize > context.service.maxBackupBytes
+      || value.sourceVersion.length < 1 || value.sourceVersion.length > 200 || /[\r\n]/.test(value.sourceVersion) || !Number.isSafeInteger(value.expectedSize) || value.expectedSize < 1
       || !Number.isFinite(value.createdAt.getTime()) || value.createdAt.getTime() > now.getTime() + 86_400_000 || value.createdAt.getUTCFullYear() < 2000 || (context.service.requireEncryption && !value.encrypted)) throw new BackupServiceError("invalid");
+    if (value.expectedSize > context.service.maxBackupBytes) throw new BackupServiceError("limit");
     const id = uuidv7(); const date = value.createdAt.toISOString(); const parts = date.slice(0, 10).split("-"); const stamp = date.replace(/[:.]/g, "-");
     const backupRootPath = this.input.backupRootPath === undefined ? "# sync inner services" : await this.input.backupRootPath();
     const run: BackupRunRecord = { id, serviceId: context.service.id, clientKeyHash: this.hmac("backup-run-idempotency", value.idempotencyKey), filename,
@@ -173,6 +174,16 @@ export class BackupIngestService {
     return this.withRunLock(runId, async () => {
       const run = await this.requiredRun(context.service.id, runId);
       if (run.state === "failed") throw new BackupServiceError("conflict");
+      if (run.state === "appending") {
+        // The exclusive run lock excludes a live append. A crashed writer may
+        // have left bytes beyond the last durable database acknowledgement.
+        if (run.receivedSize === 0) {
+          if (await this.input.storage.exists(run.tempPath)) await this.input.storage.delete(run.tempPath);
+        } else {
+          await this.input.storage.truncate(run.tempPath, run.receivedSize);
+        }
+        await this.input.repository.releaseAppend(context.service.id, runId, "append_interrupted", false, now);
+      }
       await this.input.repository.touchRun(context.service.id, runId, now);
       return run.receivedSize;
     });
@@ -193,7 +204,12 @@ export class BackupIngestService {
       const current = await this.input.repository.getRun(context.service.id, runId).catch(() => undefined);
       if (current === undefined) throw error;
       if (current.receivedSize === offset + length && current.state !== "appending") return current.receivedSize;
-      if (current.receivedSize === 0) await this.input.storage.delete(claimed.tempPath).catch(() => undefined);
+      if (current.receivedSize === 0) {
+        // Parent admission can fail before a part exists. Do not enqueue a
+        // physical delete for an absent target: a guarded backend correctly
+        // preserves uncertain adapter failures as UNKNOWN.
+        if (await this.input.storage.exists(claimed.tempPath).catch(() => false)) await this.input.storage.delete(claimed.tempPath).catch(() => undefined);
+      }
       else await this.input.storage.truncate(claimed.tempPath, current.receivedSize).catch(() => undefined);
       await this.input.repository.releaseAppend(context.service.id, runId, "append_failed", false, new Date()).catch(() => undefined); throw error;
     }

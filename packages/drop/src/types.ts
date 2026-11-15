@@ -55,6 +55,8 @@ export interface DropUpload {
   readonly updatedAt?: Date;
   readonly continuationUntil?: Date;
   readonly transferStartedAt?: Date;
+  readonly transferLeaseToken?: string;
+  readonly transferLeaseUntil?: Date;
   readonly completedAt?: Date;
 }
 
@@ -109,7 +111,7 @@ export interface DropCompletion {
 }
 
 export interface DropRepository {
-  retryUpload?(id: string, failureCode: string, now: Date): Promise<void>;
+  retryUpload?(id: string, failureCode: string, now: Date, leaseToken?: string): Promise<void>;
   releaseBuffer?(id: string): Promise<void>;
   listBufferCleanup?(limit: number): Promise<readonly DropUpload[]>;
   withUploadLock?<T>(id: string, action: () => Promise<T>): Promise<T>;
@@ -121,7 +123,7 @@ export interface DropRepository {
   getContinuationSession?(tokenHash: string, userAgentHash: string, uploadId: string, now: Date): Promise<DropSession | undefined>;
   revokeDropSession(tokenHash: string, now: Date): Promise<void>;
   revokeDropAccess(identity: TelegramIdentity, now: Date): Promise<{ readonly sessions: number; readonly challenges: number }>;
-  reserveUpload(input: { readonly id: string; readonly sessionId: string; readonly channelId: string; readonly clientKeyHash: string; readonly filename: string; readonly expectedSize: number; readonly expectedSha256?: string; readonly now: Date; readonly continuationUntil?: Date; readonly globalMaxBytes?: number }): Promise<{ readonly value: DropUpload; readonly created: boolean }>;
+  reserveUpload(input: { readonly id: string; readonly sessionId: string; readonly channelId: string; readonly clientKeyHash: string; readonly filename: string; readonly expectedSize: number; readonly expectedSha256?: string; readonly now: Date; readonly continuationUntil?: Date; readonly globalMaxBytes?: number; readonly refuseNewReservation?: boolean }): Promise<{ readonly value: DropUpload; readonly created: boolean }>;
   attachUpload(channelId: string, id: string, uploadId: string): Promise<DropUpload>;
   releaseUploadReservation(channelId: string, id: string): Promise<void>;
   getDropUpload(channelId: string, id: string): Promise<DropUpload | undefined>;
@@ -133,9 +135,10 @@ export interface DropRepository {
   cancelDropUpload?(channelId: string, id: string, now: Date): Promise<DropUpload>;
   bufferReservedBytes?(): Promise<number>;
   claimBufferedUpload?(now: Date): Promise<DropUpload | undefined>;
-  markUploadVerifying?(id: string, uploadId: string, now: Date): Promise<DropUpload>;
-  markUploadStored?(id: string, resourceId: string, sha256: string, now: Date): Promise<DropUpload>;
-  markUploadFailed?(id: string, failureCode: string, now: Date): Promise<DropUpload>;
+  renewTransferLease?(id: string, leaseToken: string, now: Date): Promise<boolean>;
+  markUploadVerifying?(id: string, uploadId: string, now: Date, leaseToken?: string): Promise<DropUpload>;
+  markUploadStored?(id: string, resourceId: string, sha256: string, now: Date, leaseToken?: string): Promise<DropUpload>;
+  markUploadFailed?(id: string, failureCode: string, now: Date, leaseToken?: string): Promise<DropUpload>;
 }
 
 export interface DropNotificationSink {

@@ -31,12 +31,18 @@ try {
     const applied = await migrate(config.databaseUrl, migrationsDirectory);
     process.stdout.write(`${JSON.stringify({ direction: "up", applied, storageLayout })}\n`);
   } catch (error) {
-    // Database and physical paths are one release unit. Never leave the old
-    // catalog pointed at layout-v3 names when the SQL migration is rejected.
-    const rollback = await migrateStorageLayout(storage, "down").catch((rollbackError) => {
-      throw new AggregateError([error, rollbackError], "Database migration failed and storage layout rollback also failed");
-    });
-    process.stderr.write(`${JSON.stringify({ direction: "down", storageLayout: rollback, reason: "database_migration_failed" })}\n`);
+    // SQL files commit individually, and a lost COMMIT acknowledgement can hide
+    // a completed migration. Preserve physical paths until the actual ledger
+    // is inspected; the failed call cannot prove that a layout downgrade is safe.
+    process.stderr.write(`${JSON.stringify({
+      direction: "up",
+      state: "failed",
+      code: "migration_failed_state_preserved",
+      storageLayout,
+      storageRollback: "not_attempted",
+      databaseOutcome: "not_inferred",
+      requiredAction: "inspect_actual_ledger_and_resume_same_target",
+    })}\n`);
     throw error;
   }
 } finally {

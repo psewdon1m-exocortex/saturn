@@ -1,0 +1,52 @@
+.storage-folder-pages {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  padding: 10px 0;
+}
+.storage-folder-pages > span { font-variant-numeric: tabular-nums; }
+.storage-folder-pages > small { color: var(--text-muted); }
+
+/* Pagination and transfer panels share the list's region. They must not take
+   implicit tracks from the original three-row workspace grid. */
+.storage-workspace:not(.storage-workspace--in-house) {
+  display: flex;
+  flex-direction: column;
+  overflow: auto;
+}
+.storage-workspace:not(.storage-workspace--in-house) > * { flex-shrink: 0; }
+.storage-workspace > .storage-folder-content {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 280px;
+  overflow: auto;
+}
+.storage-folder-content > * { flex-shrink: 0; }
+.storage-workspace .storage-folder-content > .storage-collection {
+  flex: 1 1 280px;
+  min-height: 280px;
+}
+.storage-workspace .storage-folder-content > :is(.storage-folder-pages, .upload-tree-panel) {
+  margin-inline: 29px;
+}
+.storage-new > .storage-folder-content { display: contents; }
+.storage-workspace--in-house > .storage-folder-content { grid-column: 1; grid-row: 2; }
+.storage-workspace--in-house .storage-folder-content > .storage-collection { width: 100%; margin: 0; }
+.storage-workspace--in-house .storage-folder-content > :is(.storage-folder-pages, .upload-tree-panel) { margin-inline: 0; }
+
+@media (max-width: 1300px) {
+  .storage-workspace--in-house > .storage-folder-content { grid-row: 3; }
+}
+@media (max-width: 720px) {
+  .storage-workspace .storage-folder-content > .storage-collection { flex-basis: 420px; max-height: 70vh; }
+  .storage-workspace:not(.storage-workspace--in-house) .storage-folder-content > :is(.storage-folder-pages, .upload-tree-panel) { margin-inline: 18px; }
+}
+@media (max-width: 420px) {
+  .storage-workspace:not(.storage-workspace--in-house) .storage-folder-content > :is(.storage-folder-pages, .upload-tree-panel) { margin-inline: 12px; }
+}
+@media (max-width: 600px) {
+  .storage-folder-pages > small { flex-basis: 100%; }
+}

@@ -10,12 +10,29 @@ import { expect, it, vi } from 'vitest';
 import { FileService } from './file.service.js';
 import { PostgresFileRepository } from './postgres-file.repository.js';
 import { DROP_POINT_RESOURCE_ID, SYNC_RESOURCE_ID } from './models.js';
+import { checkpointUploadRecovery } from "../../protection/src/storage-catalog-checkpoint.fixture.js";
 
 const baseUrl = process.env.PIPELINE_TEST_DATABASE_URL;
+const evidence = process.env.SATURN_ABANDON_EVIDENCE_DIR;
+
+async function custody(name: string, directory: string, scenario: string) {
+  if (evidence === undefined) return undefined;
+  const root = await fs.realpath(os.tmpdir());
+  if (!path.isAbsolute(evidence) || path.dirname(await fs.realpath(evidence)) !== root
+    || path.dirname(await fs.realpath(directory)) !== root || !/^audit_[a-f0-9]{32}$/.test(name)) {
+    throw new Error("Abandon recovery fixture paths are not owned");
+  }
+  const proof = await fs.mkdtemp(path.join(root, "saturn-upload-proof-"));
+  const record = JSON.stringify({ name, directory, scenario, proof });
+  await fs.writeFile(path.join(proof, "ownership.json"), record, { flag: "wx" });
+  await fs.writeFile(path.join(evidence, scenario + ".json"), record, { flag: "wx" });
+  return proof;
+}
 it.skipIf(!baseUrl)('persists deferred cancellation cleanup across a worker restart', async () => {
   if (!baseUrl) throw new Error('PIPELINE_TEST_DATABASE_URL is required');
   const name = `audit_${randomUUID().replaceAll('-', '')}`, root = await fs.mkdtemp(path.join(os.tmpdir(), 'saturn-cancel-restart-'));
-  const admin = postgres(baseUrl, { max: 1, onnotice: () => undefined }), storage = new LocalStorageAdapter(root);
+  const proof = await custody(name, root, 'cancellation');
+  const admin = postgres(baseUrl, { max: 1, onnotice: () => undefined }), storage = new LocalStorageAdapter(proof === undefined ? root : path.join(root, 'storage'));
   let db: Database | undefined, created = false;
   try {
     await admin.unsafe(`CREATE DATABASE "${name}"`); created = true;
@@ -25,12 +42,14 @@ it.skipIf(!baseUrl)('persists deferred cancellation cleanup across a worker rest
     const service = new FileService(new PostgresFileRepository(db), storage); await service.initializeStorage();
     const upload = await service.createUpload({ parentId: SYNC_RESOURCE_ID, filename: 'cancelled.txt', expectedSize: 8, idempotencyKey: 'cancel-restart-file' });
     await service.appendUpload(upload.id, 0, 8, Readable.from('valuable'));
+    await checkpointUploadRecovery("before-cancellation", db, url.toString(), root, proof);
     vi.spyOn(storage, 'delete').mockRejectedValueOnce(new Error('Storage disconnected'));
     await service.abandonUpload(upload.id);
     expect(await storage.exists(upload.tempPath)).toBe(true);
     await db.close(); db = new Database(url.toString(), { max: 1, maintenanceBarrier: true });
     const restarted = new FileService(new PostgresFileRepository(db), storage);
     expect((await restarted.getUpload(upload.id)).status).toBe('abandoned');
+    await checkpointUploadRecovery("before-cleanup", db, url.toString(), root, proof);
     expect(await restarted.cleanupAbandonedUploads()).toEqual({ attempted: 1 });
     expect(await storage.exists(upload.tempPath)).toBe(false);
     await db.withSql(async sql => { expect(await sql`SELECT 1 FROM operation_journal WHERE upload_id=${upload.id} AND error_code='cleanup_pending'`).toHaveLength(0); });
@@ -86,6 +105,7 @@ it.skipIf(!baseUrl)('persists deferred cancellation cleanup across a worker rest
     await restarted.appendUpload(recovery.id,0,8,Readable.from('valuable'));
     await repository.setUploadState(recovery.id,'verifying',{errorCode:'verification_interrupted'});
     await db.withSql(sql=>sql`UPDATE upload_sessions SET expires_at=now()-interval '1 day' WHERE id=${recovery.id}`);
+    await checkpointUploadRecovery("before-expiry", db, url.toString(), root, proof);
     expect(await restarted.cleanupAbandonedUploads()).toEqual({attempted:1});
     expect((await restarted.getUpload(expired.id)).status).toBe('abandoned');
     expect(await storage.exists(expired.tempPath)).toBe(false);
@@ -93,7 +113,22 @@ it.skipIf(!baseUrl)('persists deferred cancellation cleanup across a worker rest
     await expect(restarted.abandonUpload(recovery.id)).rejects.toThrow('recovering');
     expect((await restarted.completeUpload(recovery.id)).resource.sha256).toBeDefined();
     expect(await restarted.cleanupAbandonedUploads()).toEqual({attempted:0});
-  } finally { await db?.close(); await storage.close(); if (created) await admin.unsafe(`DROP DATABASE "${name}" WITH (FORCE)`); await admin.end(); await fs.rm(root, { recursive: true, force: true }); }
+    if (proof !== undefined) {
+      await fs.writeFile(path.join(proof, "result.json"), JSON.stringify({
+        upload: upload.id, empty: empty.id, partial: partial.id, owner: owner.id, expired: expired.id,
+        buffered: buffered.id, delivery, cancelledDelivery: cancelledDelivery.id, recovery: recovery.id,
+      }), { flag: "wx" });
+    }
+  } finally {
+    await db?.close();
+    await storage.close();
+    try {
+      if (created && proof === undefined) await admin.unsafe(`DROP DATABASE "${name}"`);
+    } finally {
+      await admin.end();
+    }
+    if (proof === undefined) await fs.rm(root, { recursive: true, force: true });
+  }
 }, 20_000);
 
 it.skipIf(!baseUrl)('retires only dead one-shot DAV attempts and preserves recoverable payloads and newer acknowledged bytes', async () => {
@@ -101,7 +136,8 @@ it.skipIf(!baseUrl)('retires only dead one-shot DAV attempts and preserves recov
   const name = `audit_${randomUUID().replaceAll('-', '')}`;
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'saturn-dav-restart-'));
   const admin = postgres(baseUrl, { max: 1, onnotice: () => undefined });
-  const storage = new LocalStorageAdapter(root);
+  const proof = await custody(name, root, 'dav');
+  const storage = new LocalStorageAdapter(proof === undefined ? root : path.join(root, 'storage'));
   let db: Database | undefined, created = false;
   let release: () => void = () => undefined;
   const held = new Promise<void>(resolve => { release = resolve; });
@@ -144,6 +180,7 @@ it.skipIf(!baseUrl)('retires only dead one-shot DAV attempts and preserves recov
     await service.appendUpload(deletedRetry.id, 0, 5, Readable.from('stale'));
     await repository.setUploadState(deletedRetry.id, 'verifying');
     const trashed = await service.trashResource(removedResource.id, { idempotencyKey: 'fixture-trash-before-recovery' });
+    await checkpointUploadRecovery("before-startup", db, url.toString(), root, proof);
     // Startup recovery must wait for a live filesystem request, even with no
     // short chunk lease held at this instant.
     let entered: () => void = () => undefined;
@@ -167,6 +204,7 @@ it.skipIf(!baseUrl)('retires only dead one-shot DAV attempts and preserves recov
     expect(await storage.exists(owner.tempPath)).toBe(true);
     expect(await storage.exists(resumable.tempPath)).toBe(true);
     await db.withSql(sql => sql`UPDATE upload_sessions SET updated_at=now()-interval '3 minutes' WHERE id IN (${accepted.id},${obsolete.id},${deletedRetry.id})`);
+    await checkpointUploadRecovery("before-dav-recovery", db, url.toString(), root, proof);
     expect(await service.recoverInterruptedUploads()).toEqual({ recovered: 1, pending: 0 });
     expect((await service.getUpload(obsolete.id)).status).toBe('abandoned');
     expect((await service.getUpload(deletedRetry.id)).status).toBe('abandoned');
@@ -182,9 +220,20 @@ it.skipIf(!baseUrl)('retires only dead one-shot DAV attempts and preserves recov
     expect(versions).toHaveLength(2);
     await service.appendUpload(owner.id, 4, 4, Readable.from('more'));
     expect((await service.completeUpload(owner.id)).resource.sizeBytes).toBe(8);
+    if (proof !== undefined) {
+      await fs.writeFile(path.join(proof, "result.json"), JSON.stringify({
+        interrupted: interrupted.id, owner: owner.id, resumable: resumable.id, accepted: accepted.id, obsolete: obsolete.id,
+        deletedRetry: deletedRetry.id, acknowledged: acknowledged.id, expectedVersionId, currentVersion: acknowledged.currentVersionId,
+        trashed: removedResource.id, trashedPath: trashed.storagePath,
+      }), { flag: "wx" });
+    }
   } finally {
     release(); await Promise.allSettled(work); await db?.close(); await storage.close();
-    if (created) await admin.unsafe(`DROP DATABASE "${name}" WITH (FORCE)`);
-    await admin.end(); await fs.rm(root, { recursive: true, force: true });
+    try {
+      if (created && proof === undefined) await admin.unsafe(`DROP DATABASE "${name}"`);
+    } finally {
+      await admin.end();
+    }
+    if (proof === undefined) await fs.rm(root, { recursive: true, force: true });
   }
 }, 20_000);

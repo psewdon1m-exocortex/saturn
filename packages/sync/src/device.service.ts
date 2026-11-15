@@ -1,7 +1,9 @@
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { Readable } from "node:stream";
 import type { AuditSink } from "@saturn/audit";
-import { ROOT_RESOURCE_ID, OUTDOOR_CONNECTIONS_RESOURCE_ID, UploadPreconditionError, type FileService, type Resource } from "@saturn/file-core";
+import { ROOT_RESOURCE_ID, OUTDOOR_CONNECTIONS_RESOURCE_ID, UploadPreconditionError, SYNC_METADATA_MAX_ITEMS, SYNC_METADATA_MAX_BYTES, SYNC_METADATA_MAX_ANCESTOR_HOPS, validSyncMetadataIds, type FileService, type Resource } from "@saturn/file-core";
+import type { SyncMetadataBatchResponse } from "./sync-metadata.contract.js";
+import { sameUploadPublicationRequest, type UploadPublicationRequest } from "@saturn/file-core";
 import {logicalResourcePath, readerMetadata, readerRange} from "./resource-reader.js";
 import { v7 as uuidv7 } from "uuid";
 import {
@@ -28,7 +30,7 @@ const scopeAliases: ReadonlyMap<string, string> = new Map<string, string>([
 const idAliases: ReadonlyMap<string, string> = new Map<string, string>([...scopeAliases].map(([alias, id]) => [id, alias]));
 
 export class DeviceServiceError extends Error {
-  constructor(readonly code: "unauthorized" | "forbidden" | "not_found" | "precondition_required" | "precondition_failed" | "conflict" | "rate_limited" | "invalid_path" | "invalid_body" | "limit") {
+  constructor(readonly code: "unauthorized" | "forbidden" | "not_found" | "precondition_required" | "precondition_failed" | "conflict" | "rate_limited" | "invalid_path" | "invalid_body" | "limit" | "payload_too_large") {
     super(code);
   }
 }
@@ -77,6 +79,8 @@ function cleanName(value: string): string {
 }
 
 export class DeviceService {
+  // Per service instance/process admission only; no shared writer/backend budget.
+  #activeMetadataBatches = 0;
   readonly #pepper: Buffer;
 
   constructor(private readonly input: { readonly repository: DeviceRepository; readonly files: FileService; readonly pepper: string; readonly options: DeviceOptions; readonly audit?: AuditSink }) {
@@ -248,6 +252,14 @@ export class DeviceService {
   }
 
   async authenticate(authorization: string | undefined, now = new Date()): Promise<DeviceContext> {
+    const context = await this.authenticateSyncMetadata(authorization, now);
+    if (context.device.deviceKind === "windows_sync") await this.#windowsRoot(context.device);
+    if (context.device.deviceKind === "pluto") await this.#plutoRoot(context.device);
+    return context;
+  }
+
+  /** New read-only routes prove the root inside the scoped metadata statement. */
+  async authenticateSyncMetadata(authorization: string | undefined, now = new Date()): Promise<DeviceContext> {
     if (!this.input.options.enabled || authorization === undefined) throw new DeviceServiceError("unauthorized");
     let token = "";
     if (authorization.startsWith("Bearer ")) token = authorization.slice(7);
@@ -261,9 +273,64 @@ export class DeviceService {
     if (!/^[A-Za-z0-9_-]{43}$/.test(token)) throw new DeviceServiceError("unauthorized");
     const device = await this.input.repository.authenticate(this.#hash(token), now);
     if (device === undefined) throw new DeviceServiceError("unauthorized");
-    if (device.deviceKind === "windows_sync") await this.#windowsRoot(device);
-    if (device.deviceKind === "pluto") await this.#plutoRoot(device);
     return { device };
+  }
+
+  async #syncMetadataBinding(context: DeviceContext, rootId: string): Promise<string> {
+    const device = await this.input.repository.getById(context.device.id);
+    if (!this.input.options.enabled || device?.state !== "active" || device.tokenHash !== context.device.tokenHash
+      || (device.expiresAt !== undefined && device.expiresAt <= new Date())) throw new DeviceServiceError("unauthorized");
+    if ((device.deviceKind !== "windows_sync" && device.deviceKind !== "pluto") || !device.rights.read) {
+      throw new DeviceServiceError("forbidden");
+    }
+    if (device.syncRootId !== rootId || device.scopeIds.length !== 1 || device.scopeIds[0] !== rootId) {
+      throw new DeviceServiceError("not_found");
+    }
+    return device.deviceKind === "windows_sync" ? SYNC_RESOURCE_ID : OUTDOOR_CONNECTIONS_RESOURCE_ID;
+  }
+
+  async syncMetadataCapabilities(context: DeviceContext, rootId: string) {
+    const rootParentId = await this.#syncMetadataBinding(context, rootId);
+    if (this.input.files.supportsSyncMetadataBatch) {
+      const result = await this.#readSyncMetadata(rootId, rootParentId, [rootId]);
+      if (!result.rootActive) throw new DeviceServiceError("not_found");
+    } else {
+      const root = await this.input.files.getResource(rootId).catch(() => undefined);
+      if (root?.type !== "folder" || root.status !== "active" || root.parentId !== rootParentId) throw new DeviceServiceError("not_found");
+    }
+    return {
+      protocol: "saturn-sync-metadata/1", rootId, nameCodec: "legacy",
+      features: {
+        metadataBatch: this.input.files.supportsSyncMetadataBatch, stableNodeIds: true, snapshot: false,
+        deltaFeed: false, batchResolve: false, batchDirectories: false, smallFileBatches: false,
+        conditionalVersions: false, newSyncEngine: false, compressedMetadata: false, immutableUploadReceipt: false,
+      },
+      limits: { metadataItems: SYNC_METADATA_MAX_ITEMS, metadataUncompressedBytes: String(SYNC_METADATA_MAX_BYTES),
+        maxAncestorHops: SYNC_METADATA_MAX_ANCESTOR_HOPS, concurrentMetadataBatchesPerProcess: 4 },
+    };
+  }
+
+  async syncMetadataBatch(context: DeviceContext, rootId: string, nodeIds: readonly string[]): Promise<SyncMetadataBatchResponse> {
+    if (!validSyncMetadataIds(nodeIds)) throw new DeviceServiceError("invalid_body");
+    const rootParentId = await this.#syncMetadataBinding(context, rootId);
+    if (!this.input.files.supportsSyncMetadataBatch) throw new DeviceServiceError("forbidden");
+    const batch = await this.#readSyncMetadata(rootId, rootParentId, nodeIds);
+    if (!batch.rootActive) throw new DeviceServiceError("not_found");
+    const nodes = new Map(batch.nodes.map(node => [node.nodeId, node]));
+    const response: SyncMetadataBatchResponse = { rootId, results: nodeIds.map(nodeId => {
+      const metadata = nodes.get(nodeId.toLowerCase());
+      return metadata === undefined ? { nodeId, status: "not_found" } : { nodeId, status: "found", metadata };
+    }) };
+    if (Buffer.byteLength(JSON.stringify(response), "utf8") > SYNC_METADATA_MAX_BYTES) throw new DeviceServiceError("limit");
+    return response;
+  }
+
+  async #readSyncMetadata(rootId: string, rootParentId: string, nodeIds: readonly string[]) {
+    // No unbounded waiting queue: a fifth concurrent read receives retryable 429.
+    if (this.#activeMetadataBatches >= 4) throw new DeviceServiceError("rate_limited");
+    this.#activeMetadataBatches++;
+    try { return await this.input.files.readScopedSyncMetadata({ rootId, rootParentId, nodeIds }); }
+    finally { this.#activeMetadataBatches--; }
   }
 
   async propfind(context: DeviceContext, rawPath: string, depth: 0 | 1): Promise<readonly DavEntry[]> {
@@ -347,12 +414,22 @@ export class DeviceService {
     this.#right(context, "write");
     if (context.device.deviceKind !== "windows_sync") throw new DeviceServiceError("forbidden");
     if (!/^[a-f0-9]{64}$/.test(input.expectedSha256) || !/^[a-f0-9]{64}$/.test(input.idempotencyKey)) throw new DeviceServiceError("invalid_path");
+    if(input.ifNoneMatch !== undefined && input.ifNoneMatch !== "*")throw new DeviceServiceError("invalid_body");
     const segments = normalizeDavPath(input.path);
     if (segments.length < 3) throw new DeviceServiceError("forbidden");
-    const parent = (await this.#resolve(context, segments.slice(0, -1))).resource;
-    const filename = segments.at(-1) ?? "";
+    const device = await this.#publicationDevice(context);
+    const root = await this.#windowsRoot(device);
+    const request: UploadPublicationRequest = {deviceId:device.id,rootId:root.id,requestPath:segments.join("/"),
+      sizeBytes:String(input.expectedSize),sha256:input.expectedSha256,ifMatch:input.ifMatch ?? null,
+      ifNoneMatch:input.ifNoneMatch === "*" ? "*" : null};
     const key = `sync-resume-${createHmac("sha256", this.#pepper).update(context.device.id).update("\0").update(input.idempotencyKey).digest("hex")}`;
     const existing = await this.input.files.findUploadByIdempotencyKey(key);
+    if(existing?.publicationIntent !== undefined) {
+      if(!sameUploadPublicationRequest(existing.publicationIntent,request))throw new DeviceServiceError("conflict");
+      return this.inspectResumableUpload(context,existing.id);
+    }
+    const parent = (await this.#resolve({device}, segments.slice(0, -1))).resource;
+    const filename = segments.at(-1) ?? "";
     if (existing !== undefined) {
       if (existing.parentId !== parent.id || existing.filename !== filename || existing.expectedSize !== input.expectedSize || existing.expectedSha256 !== input.expectedSha256) throw new DeviceServiceError("conflict");
       return this.inspectResumableUpload(context, existing.id);
@@ -360,8 +437,17 @@ export class DeviceService {
     const current = await this.#child(parent.id, filename);
     if (current !== undefined && (current.type !== "file" || input.ifNoneMatch === "*" || input.ifMatch !== resourceEtag(current))) throw new DeviceServiceError("precondition_failed");
     if (current === undefined && input.ifMatch !== undefined) throw new DeviceServiceError("precondition_failed");
-    const upload = await this.input.files.createUpload({ parentId: parent.id, filename, expectedSize: input.expectedSize, expectedSha256: input.expectedSha256, idempotencyKey: key, requireAbsent: current === undefined,
-      ...(current === undefined ? {} : { overwriteResourceId: current.id, expectedVersionId: current.currentVersionId }), auditActor: this.#actor(context) });
+    let upload;
+    try {
+      upload = await this.input.files.createUpload({ parentId: parent.id, filename, expectedSize: input.expectedSize, expectedSha256: input.expectedSha256, idempotencyKey: key, requireAbsent: current === undefined,
+        ...(current === undefined ? {} : { overwriteResourceId: current.id, expectedVersionId: current.currentVersionId }), auditActor: this.#actor(context),
+        publicationIntent:{...request,schema:"saturn.upload-intent.v1",deviceKind:"windows_sync",idempotencyKey:key,parentId:parent.id,
+          name:current?.name ?? filename,targetId:current?.id ?? null,requireAbsent:current === undefined,
+          expectedVersionId:current?.currentVersionId ?? null} });
+    } catch (error) {
+      if (error instanceof Error && error.message === "payload_too_large") throw new DeviceServiceError("payload_too_large");
+      throw error;
+    }
     return this.inspectResumableUpload(context, upload.id);
   }
 
@@ -370,6 +456,14 @@ export class DeviceService {
     if (context.device.deviceKind !== "windows_sync") throw new DeviceServiceError("forbidden");
     const upload = await this.input.files.getUpload(id);
     if (upload.auditActorType !== "device_token" || upload.auditActorId !== context.device.id) throw new DeviceServiceError("not_found");
+    if(upload.publicationIntent !== undefined) {
+      const device = await this.#publicationDevice(context);
+      const root = await this.#windowsRoot(device);
+      if(upload.publicationIntent.deviceId !== device.id || upload.publicationIntent.rootId !== root.id)throw new DeviceServiceError("not_found");
+      // Historical success is authorized by the sealed root, not by claiming
+      // that its original parent/file is still present at the old path.
+      if(upload.status === "active" && upload.publicationReceipt !== undefined)return upload;
+    }
     const parent = await this.input.files.getResource(upload.parentId);
     if (parent.status !== "active") throw new DeviceServiceError("not_found");
     const root = await this.#windowsRoot(context.device);
@@ -389,7 +483,18 @@ export class DeviceService {
   async inspectResumableUpload(context: DeviceContext, id: string) {
     const upload = await this.#scopedUpload(context, id);
     return { id: upload.id, status: upload.status, receivedSize: upload.receivedSize, expectedSize: upload.expectedSize,
-      ...(upload.status === "active" && upload.resourceId !== undefined ? { etag: resourceEtag(await this.input.files.getResource(upload.resourceId)) } : {}) };
+      ...(upload.status === "active" && upload.resourceId !== undefined ? { etag: resourceEtag(await this.input.files.getResource(upload.resourceId)) } : {}),
+      receiptState:upload.publicationReceipt !== undefined ? "published" : upload.publicationIntent !== undefined ? "pending" : "legacy_unqualified",
+      ...(upload.intentHash === undefined ? {} : {intentHash:upload.intentHash}),
+      ...(upload.publicationReceipt === undefined ? {} : {publicationReceipt:upload.publicationReceipt}) };
+  }
+
+  async #publicationDevice(context: DeviceContext): Promise<DeviceRecord> {
+    const device = await this.input.repository.getById(context.device.id);
+    if(!this.input.options.enabled || device?.state !== "active" || device.tokenHash !== context.device.tokenHash
+      || (device.expiresAt !== undefined && device.expiresAt <= new Date()))throw new DeviceServiceError("unauthorized");
+    if(device.deviceKind !== "windows_sync" || !device.rights.write)throw new DeviceServiceError("forbidden");
+    return device;
   }
 
   async cancelResumableUpload(context: DeviceContext, idempotencyKey: string) {
@@ -417,7 +522,7 @@ export class DeviceService {
     await this.#scopedUpload(context, id);
     const fresh = await this.input.repository.getById(context.device.id);
     if (fresh?.state !== "active" || fresh.tokenHash !== context.device.tokenHash || (fresh.expiresAt !== undefined && fresh.expiresAt <= new Date())) throw new DeviceServiceError("unauthorized");
-    try { await this.input.files.completeUpload(id); }
+    try { await this.input.files.completeUpload(id,{deviceId:fresh.id,rootId:fresh.syncRootId ?? "",tokenHash:fresh.tokenHash}); }
     catch (error) { if (error instanceof UploadPreconditionError) throw new DeviceServiceError("precondition_failed"); throw error; }
     return this.inspectResumableUpload(context, id);
   }
@@ -485,17 +590,18 @@ export class DeviceService {
   }
 
   async #child(parentId: string, name: string): Promise<Resource | undefined> {
-    for (let offset = 0; ; offset += 500) {
-      const children = await this.input.files.listChildren(parentId, offset, 500);
-      const found = children.find((item) => item.name === name && item.status === "active");
-      if (found !== undefined) return found;
-      if (children.length < 500) return undefined;
-    }
+    return this.input.files.findChildExact(parentId, name);
   }
 
   async #upload(context: DeviceContext, parentId: string, filename: string, source: Readable, size: number, overwriteResourceId?: string, expectedSha256?: string, expectedVersionId?: string, requireAbsent = false): Promise<Resource> {
-    const upload = await this.input.files.createUpload({ parentId, filename, expectedSize: size, ...(expectedSha256 === undefined ? {} : { expectedSha256 }), idempotencyKey: `dav-upload-${uuidv7()}`, ...(overwriteResourceId === undefined ? {} : { overwriteResourceId }),
-      ...(expectedVersionId === undefined ? {} : { expectedVersionId }), requireAbsent, auditActor: this.#actor(context) });
+    let upload;
+    try {
+      upload = await this.input.files.createUpload({ parentId, filename, expectedSize: size, ...(expectedSha256 === undefined ? {} : { expectedSha256 }), idempotencyKey: `dav-upload-${uuidv7()}`, ...(overwriteResourceId === undefined ? {} : { overwriteResourceId }),
+        ...(expectedVersionId === undefined ? {} : { expectedVersionId }), requireAbsent, auditActor: this.#actor(context) });
+    } catch (error) {
+      if (error instanceof Error && error.message === "payload_too_large") throw new DeviceServiceError("payload_too_large");
+      throw error;
+    }
     let offset = 0;
     // Network chunks are commonly 16-64 KiB. Each storage append opens an SFTP
     // handle and commits a database offset: coalesce them into bounded writes.

@@ -1,5 +1,10 @@
 import type { Database } from "@saturn/database";
+import { randomUUID } from "node:crypto";
+import { DROP_TRANSFER_LEASE_MS } from "./transfer-lease.js";
 import type { DropRepository, DropSession, DropUpload, TelegramIdentity } from "./types.js";
+
+// Keep outage retries bounded without reviving terminal uploads or changing leases.
+const DROP_RETRY_MAX_DELAY_SECONDS = 30;
 
 interface SessionRow {
   id: string;
@@ -38,6 +43,8 @@ interface UploadRow {
   updated_at: Date;
   continuation_until: Date;
   transfer_started_at: Date | null;
+  transfer_lease_token: string | null;
+  transfer_lease_until: Date | null;
   completed_at: Date | null;
 }
 
@@ -93,6 +100,8 @@ function upload(row: UploadRow): DropUpload {
     updatedAt: row.updated_at,
     continuationUntil: row.continuation_until,
     ...(row.transfer_started_at === null ? {} : { transferStartedAt: row.transfer_started_at }),
+    ...(row.transfer_lease_token == null ? {} : { transferLeaseToken: row.transfer_lease_token }),
+    ...(row.transfer_lease_until == null ? {} : { transferLeaseUntil: row.transfer_lease_until }),
     ...(row.completed_at === null ? {} : { completedAt: row.completed_at }),
   };
 }
@@ -254,12 +263,10 @@ export class PostgresDropRepository implements DropRepository {
     });
   }
 
-  reserveUpload(input: { readonly id: string; readonly sessionId: string; readonly channelId: string; readonly clientKeyHash: string; readonly filename: string; readonly expectedSize: number; readonly expectedSha256?: string; readonly now: Date; readonly continuationUntil?: Date; readonly globalMaxBytes?: number }): Promise<{ readonly value: DropUpload; readonly created: boolean }> {
+  reserveUpload(input: { readonly id: string; readonly sessionId: string; readonly channelId: string; readonly clientKeyHash: string; readonly filename: string; readonly expectedSize: number; readonly expectedSha256?: string; readonly now: Date; readonly continuationUntil?: Date; readonly globalMaxBytes?: number; readonly refuseNewReservation?: boolean }): Promise<{ readonly value: DropUpload; readonly created: boolean }> {
     return this.#database.transaction(async (sql) => {
       if (input.globalMaxBytes !== undefined) {
         await sql`SELECT pg_advisory_xact_lock(hashtextextended('saturn-drop-buffer-reservation', 0))`;
-        const totals = await sql<{ bytes: string }[]>`SELECT COALESCE(sum(expected_size), 0)::text AS bytes FROM drop_uploads WHERE local_path IS NOT NULL OR state='reserved'`;
-        if (Number(totals[0]?.bytes ?? 0) + input.expectedSize > input.globalMaxBytes) throw new Error("Drop global buffer quota is exhausted");
       }
       const sessions = await sql<SessionRow[]>`SELECT * FROM drop_sessions WHERE id = ${input.sessionId} FOR UPDATE`;
       const active = sessions[0];
@@ -276,6 +283,11 @@ export class PostgresDropRepository implements DropRepository {
           throw new Error("Drop idempotency key was already used for different upload parameters");
         }
         return { value, created: false };
+      }
+      if (input.refuseNewReservation) throw new Error("Drop buffer quota is exhausted");
+      if (input.globalMaxBytes !== undefined) {
+        const totals = await sql<{ bytes: string }[]>`SELECT COALESCE(sum(expected_size), 0)::text AS bytes FROM drop_uploads WHERE local_path IS NOT NULL OR state='reserved'`;
+        if (Number(totals[0]?.bytes ?? 0) + input.expectedSize > input.globalMaxBytes) throw new Error("Drop global buffer quota is exhausted");
       }
       if (channel.reserved_files + 1 > channel.max_files || Number(channel.reserved_bytes) + input.expectedSize > Number(channel.max_bytes)) {
         throw new Error("Drop channel quota is exhausted");
@@ -437,14 +449,18 @@ export class PostgresDropRepository implements DropRepository {
   }
 
   claimBufferedUpload(now: Date): Promise<DropUpload | undefined> {
+    const token = randomUUID();
     return this.#database.transaction(async (sql) => {
       const rows = await sql<UploadRow[]>`
         WITH candidate AS (
           SELECT id FROM drop_uploads
-          WHERE (state = 'buffered' AND (next_attempt_at IS NULL OR next_attempt_at <= ${now})) OR (state IN ('transferring', 'verifying') AND updated_at < ${new Date(now.getTime() - 30 * 60 * 1_000)})
+          WHERE (state = 'buffered' AND (next_attempt_at IS NULL OR
+            LEAST(next_attempt_at, updated_at + ${DROP_RETRY_MAX_DELAY_SECONDS} * interval '1 second') <= ${now}))
+             OR (state IN ('transferring', 'verifying') AND transfer_lease_until <= ${now})
           ORDER BY created_at, id FOR UPDATE SKIP LOCKED LIMIT 1
         )
-        UPDATE drop_uploads SET state = 'transferring', transfer_started_at = ${now}, updated_at = ${now}, transfer_attempts=transfer_attempts+1
+        UPDATE drop_uploads SET state = 'transferring', transfer_started_at = ${now}, updated_at = ${now}, transfer_attempts=transfer_attempts+1,
+          transfer_lease_token = ${token}, transfer_lease_until = ${new Date(now.getTime() + DROP_TRANSFER_LEASE_MS)}
         WHERE id = (SELECT id FROM candidate)
         RETURNING *
       `;
@@ -452,32 +468,53 @@ export class PostgresDropRepository implements DropRepository {
     });
   }
 
-  markUploadVerifying(id: string, uploadId: string, now: Date): Promise<DropUpload> {
+  renewTransferLease(id: string, leaseToken: string, now: Date): Promise<boolean> {
+    return this.#database.withSql(async sql => (await sql`
+      UPDATE drop_uploads SET transfer_lease_until=${new Date(now.getTime() + DROP_TRANSFER_LEASE_MS)}, updated_at=${now}
+      WHERE id=${id} AND transfer_lease_token=${leaseToken} AND transfer_lease_until > ${now}
+        AND state IN ('transferring', 'verifying') RETURNING id
+    `).length === 1);
+  }
+
+  markUploadVerifying(id: string, uploadId: string, now: Date, leaseToken?: string): Promise<DropUpload> {
     return this.#database.withSql(async (sql) => {
-      const rows = await sql<UploadRow[]>`UPDATE drop_uploads SET upload_id = ${uploadId}, state = 'verifying', updated_at = ${now} WHERE id = ${id} AND state = 'transferring' RETURNING *`;
+      const rows = await sql<UploadRow[]>`UPDATE drop_uploads SET upload_id = ${uploadId}, state = 'verifying', updated_at = ${now}
+        WHERE id = ${id} AND state = 'transferring'
+          AND transfer_lease_token IS NOT DISTINCT FROM ${leaseToken ?? null}::uuid
+          AND (transfer_lease_token IS NULL OR transfer_lease_until > ${now}) RETURNING *`;
       const row = rows[0]; if (row === undefined) throw new Error("Drop upload could not enter verification"); return upload(row);
     });
   }
 
-  markUploadStored(id: string, resourceId: string, sha256: string, now: Date): Promise<DropUpload> {
+  markUploadStored(id: string, resourceId: string, sha256: string, now: Date, leaseToken?: string): Promise<DropUpload> {
     return this.#database.withSql(async (sql) => {
-      const rows = await sql<UploadRow[]>`UPDATE drop_uploads SET resource_id = ${resourceId}, actual_sha256 = ${sha256}, state = 'stored', completed_at = ${now}, updated_at = ${now} WHERE id = ${id} AND state = 'verifying' RETURNING *`;
+      const rows = await sql<UploadRow[]>`UPDATE drop_uploads SET resource_id = ${resourceId}, actual_sha256 = ${sha256}, state = 'stored', completed_at = ${now}, updated_at = ${now},
+        transfer_lease_token=NULL, transfer_lease_until=NULL, failure_code=NULL, next_attempt_at=NULL
+        WHERE id = ${id} AND state = 'verifying'
+          AND transfer_lease_token IS NOT DISTINCT FROM ${leaseToken ?? null}::uuid
+          AND (transfer_lease_token IS NULL OR transfer_lease_until > ${now}) RETURNING *`;
       const row = rows[0]; if (row === undefined) throw new Error("Drop upload could not be committed"); return upload(row);
     });
   }
 
-  markUploadFailed(id: string, failureCode: string, now: Date): Promise<DropUpload> {
+  markUploadFailed(id: string, failureCode: string, now: Date, leaseToken?: string): Promise<DropUpload> {
     return this.#database.withSql(async (sql) => {
-      const rows = await sql<UploadRow[]>`UPDATE drop_uploads SET state = 'failed', failure_code = ${failureCode.slice(0, 100)}, updated_at = ${now} WHERE id = ${id} AND state NOT IN ('stored', 'cancelled') RETURNING *`;
+      const rows = await sql<UploadRow[]>`UPDATE drop_uploads SET state = 'failed', failure_code = ${failureCode.slice(0, 100)}, updated_at = ${now}, transfer_lease_token=NULL, transfer_lease_until=NULL
+        WHERE id = ${id} AND state NOT IN ('stored', 'cancelled')
+          AND transfer_lease_token IS NOT DISTINCT FROM ${leaseToken ?? null}::uuid
+          AND (transfer_lease_token IS NULL OR transfer_lease_until > ${now}) RETURNING *`;
       const row = rows[0]; if (row === undefined) throw new Error("Drop upload could not be failed"); return upload(row);
     });
   }
 
-  async retryUpload(id: string, failureCode: string, now: Date): Promise<void> {
+  async retryUpload(id: string, failureCode: string, now: Date, leaseToken?: string): Promise<void> {
     await this.#database.withSql(async sql => { await sql`
       UPDATE drop_uploads SET state=CASE WHEN transfer_attempts >= 10 THEN 'failed' ELSE 'buffered' END,
-        failure_code=${failureCode}, next_attempt_at=${now} + LEAST(3600, 5 * power(2, LEAST(transfer_attempts, 10))) * interval '1 second', updated_at=${now}
+        failure_code=${failureCode}, next_attempt_at=${now} + LEAST(${DROP_RETRY_MAX_DELAY_SECONDS}, 5 * power(2, LEAST(transfer_attempts, 10))) * interval '1 second', updated_at=${now},
+        transfer_lease_token=NULL, transfer_lease_until=NULL
       WHERE id=${id} AND state IN ('transferring', 'verifying')
+        AND transfer_lease_token IS NOT DISTINCT FROM ${leaseToken ?? null}::uuid
+        AND (transfer_lease_token IS NULL OR transfer_lease_until > ${now})
     `; });
   }
 

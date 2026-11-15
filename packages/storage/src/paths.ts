@@ -1,5 +1,13 @@
 import path from "node:path";
 
+/** Guarded v3 paths are identities: validate, never trim or normalize bytes. */
+export function validateExactStoragePath(input:string,allowEmpty=true):string{
+  if(typeof input!=='string'||Buffer.byteLength(input)>4096||!allowEmpty&&!input||input.startsWith('/')||/^[A-Za-z]:/.test(input)||/[\\\p{Cc}\p{Cs}]/u.test(input))throw new Error('Storage path is invalid');
+  if(input==='')return input;
+  if(input.split('/').some(segment=>!segment||segment==='.'||segment==='..'||Array.from(segment).length>255||Buffer.byteLength(segment)>1020))throw new Error('Storage path is invalid');
+  return input;
+}
+
 export function normalizeStorageName(input: string): string {
   const value = input.normalize("NFC").trim();
   if (!value || value === "." || value === "..") throw new Error("Storage name is empty or reserved");
@@ -35,9 +43,9 @@ export function storageBasename(storagePath: string): string {
   return normalized.slice(normalized.lastIndexOf("/") + 1);
 }
 
-export function resolveLocalPath(root: string, storagePath: string): string {
+export function resolveLocalPath(root: string, storagePath: string,exact=false): string {
   const resolvedRoot = path.resolve(root);
-  const normalized = normalizeStoragePath(storagePath);
+  const normalized = exact?validateExactStoragePath(storagePath):normalizeStoragePath(storagePath);
   const resolved = path.resolve(resolvedRoot, ...normalized.split("/").filter(Boolean));
   const prefix = `${resolvedRoot}${path.sep}`;
   if (resolved !== resolvedRoot && !resolved.startsWith(prefix)) throw new Error("Resolved path escaped storage root");

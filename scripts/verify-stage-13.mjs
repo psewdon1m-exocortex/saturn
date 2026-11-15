@@ -1,72 +1,519 @@
 import { createHash, createPublicKey, generateKeyPairSync, randomBytes, randomUUID } from "node:crypto";
-import { spawnSync } from "node:child_process";
 import fs from "node:fs/promises";
-import https from "node:https";
+import nodeFs from "node:fs";
 import net from "node:net";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { chromium } from "@playwright/test";
+import { createIsolation, removeIsolation, OwnedDocker, startDependencies, offlineRegistryFixture } from "./stage13-runtime.mjs";
+import { assertCertificate, installProcessTrust, proveIngressRejection } from "./stage13-trust.mjs";
+import { runCommand } from "./stage13-command.mjs";
 import { prepareDevelopmentEnvironment } from "./prepare-dev.mjs";
-
-const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),"..");const docker=process.platform==="win32"?"docker.exe":"docker";const pnpm=path.join(root,"node_modules","pnpm","bin","pnpm.cjs");const project="vault-stage13";const network=`${project}_default`;const outsideNetwork=`${project}-outside`;const secretVolume=`${project}-runtime-secrets`;const postgresSecretVolume=`${project}-postgres-secrets`;const postgres=`${project}-postgres-1`;const sftp=`${project}-sftp-1`;const worker="vault-stage13-worker";const apiContainer="vault-stage13-api";const webContainer="vault-stage13-web";const ingress="vault-stage13-nginx";const badApi="vault-stage13-bad-api";const restoreDb="vault-stage13-restore-db";const nginxImage="nginx:1.29.4-alpine@sha256:4870c12cd2ca986de501a804b4f506ad3875a0b1874940ba0a2c7f763f1855b2";const nodeImage="node:24-alpine@sha256:d32cdf619f63fe0471182d08996dd516c6275bb5fd31ae06e55a570bd9e1ad43";const publicOrigin="https://localhost:4443";const reportPath=path.join(root,"artifacts","verification","stage-13-production-hardening.json");const prodEnvPath=path.join(root,"infra","production",".env.production");const report={schema:"vault.stage-verification.v1",stage:13,startedAt:new Date().toISOString(),success:false,checks:[]};const temporary=[];const knownSecrets=new Set();const updaterSigningKey=generateKeyPairSync("rsa",{modulusLength:3072}).privateKey.export({type:"pkcs8",format:"pem"}).toString();knownSecrets.add(updaterSigningKey.trim());process.env.RELEASE_SIGNING_KEY=updaterSigningKey;let browser;
-function pass(name,detail={}){report.checks.push({name,status:"pass",detail});process.stdout.write(`PASS ${name}\n`);}function sha(value){return createHash("sha256").update(value).digest("hex");}
-function run(command,args,environment=process.env,allowFailure=false,input){const result=spawnSync(command,args,{cwd:root,env:environment,input,encoding:"utf8",windowsHide:true,maxBuffer:64*1024*1024});if(!allowFailure&&result.status!==0)throw new Error(`${path.basename(command)} ${args.join(" ")} failed: ${`${result.stdout??""}\n${result.stderr??""}`.trim().slice(-8_000)}`);return result;}
-function runBinary(command,args,input){const result=spawnSync(command,args,{cwd:root,env:process.env,input,encoding:null,windowsHide:true,maxBuffer:128*1024*1024});if(result.status!==0)throw new Error(`${path.basename(command)} binary command failed: ${Buffer.from(result.stderr??[]).toString().slice(-2_000)}`);return Buffer.from(result.stdout??[]);}
-async function writeEnvironment(file,values){const lines=Object.entries(values).filter(([,value])=>value!==undefined).map(([name,value])=>`${name}=${String(value).replaceAll("\n","")}`);await fs.writeFile(file,`${lines.join("\n")}\n`,{encoding:"utf8",mode:0o600});}
-async function waitFor(url,status=200,timeout=90_000){const deadline=Date.now()+timeout;let last="no response";while(Date.now()<deadline){try{const response=await fetch(url,{signal:AbortSignal.timeout(4_000)});const body=await response.text();last=`${String(response.status)} ${body.slice(0,2_000)}`;if(response.status===status)return;}catch(error){last=error instanceof Error?error.message:String(error);}await new Promise((resolve)=>setTimeout(resolve,500));}throw new Error(`Timed out waiting for ${url} status ${String(status)}; last=${last}`);}
-async function waitExec(container,url,expected=200,timeout=90_000){const deadline=Date.now()+timeout;let last="";while(Date.now()<deadline){const result=run(docker,["exec",container,"node","-e",`fetch('${url}').then(async r=>{console.log(r.status,await r.text());process.exit(r.status===${String(expected)}?0:1)}).catch(e=>{console.error(e.message);process.exit(2)})`],process.env,true);last=`${result.stdout??""} ${result.stderr??""}`.trim();if(result.status===0)return;await new Promise((resolve)=>setTimeout(resolve,500));}const logs=run(docker,["logs","--tail","100",container],process.env,true);throw new Error(`Container ${container} did not reach ${String(expected)}: ${last.slice(-2_000)} ${`${logs.stdout??""} ${logs.stderr??""}`.slice(-4_000)}`);}
-async function waitRejectedCandidate(container,timeout=90_000){const deadline=Date.now()+timeout;let last="";while(Date.now()<deadline){const inspected=run(docker,["inspect","--format","{{json .State}}",container],process.env,true);if(inspected.status===0){const state=JSON.parse(inspected.stdout.trim());if(!state.Running){if(state.ExitCode===0)throw new Error("Rejected candidate exited successfully instead of failing closed");return{mode:"startup_exit",exitCode:state.ExitCode};}const probe=run(docker,["exec",container,"node","-e","fetch('http://127.0.0.1:3000/health/ready').then(r=>process.exit(r.status===503?0:1)).catch(()=>process.exit(2))"],process.env,true);last=`${probe.stdout??""} ${probe.stderr??""}`.trim();if(probe.status===0)return{mode:"readiness_503"};}await new Promise((resolve)=>setTimeout(resolve,500));}throw new Error(`Bad candidate was not rejected: ${last.slice(-2_000)}`);}
-function mount(source,target){return`${path.resolve(source)}:${target}:ro`;}
-function updateCookies(jar,response){for(const value of response.headers.getSetCookie()){const[pair]=value.split(";",1);const separator=pair.indexOf("=");if(separator<1)continue;if(/max-age=0/i.test(value))jar.delete(pair.slice(0,separator));else jar.set(pair.slice(0,separator),pair.slice(separator+1));}}
-function cookieHeader(jar){return[...jar].map(([name,value])=>`${name}=${value}`).join("; ");}
-async function gateway(relative,options={}){const{method="GET",json:inputJson,body,headers:inputHeaders,jar}=options;const headers=new Headers(inputHeaders??{});headers.set("User-Agent","vault-stage13-verifier/1");if(jar?.size)headers.set("Cookie",cookieHeader(jar));if(!["GET","HEAD","OPTIONS"].includes(method)){headers.set("Origin",publicOrigin);const csrf=jar?.get("__Host-vault_csrf");if(csrf)headers.set("X-Vault-CSRF",csrf);}let requestBody=body;if(inputJson!==undefined){headers.set("Content-Type","application/json");requestBody=JSON.stringify(inputJson);}const response=await fetch(`${publicOrigin}${relative}`,{method,headers,...(requestBody===undefined?{}:{body:requestBody}),signal:AbortSignal.timeout(120_000)});if(jar)updateCookies(jar,response);return response;}
-async function json(response){const text=await response.text();return text?JSON.parse(text):undefined;}
-function basicDevice(token){return`Basic ${Buffer.from(`device:${token}`).toString("base64")}`;}
-async function expectHttpsRejection(servername,hostHeader){await new Promise((resolve,reject)=>{const request=https.request({host:"127.0.0.1",port:4443,path:"/",method:"GET",servername,rejectUnauthorized:false,headers:{Host:hostHeader}},(response)=>{response.resume();reject(new Error(`Expected ${hostHeader}/${servername} to be rejected, received ${String(response.statusCode)}`));});request.setTimeout(10_000,()=>request.destroy(new Error("rejection timeout")));request.once("error",()=>resolve());request.end();});}
-async function upload(jar,parentId,filename,payload){const created=await gateway("/api/v1/uploads",{method:"POST",jar,headers:{"Idempotency-Key":`stage13-${randomUUID()}`},json:{parentId,filename,expectedSize:payload.length,expectedSha256:sha(payload)}});if(created.status!==201)throw new Error(`Production upload create failed: ${String(created.status)} ${await created.text()}`);const session=await json(created);const append=await gateway(`/api/v1/uploads/${session.id}`,{method:"PATCH",jar,headers:{"Content-Type":"application/offset+octet-stream","Upload-Offset":"0","Content-Length":String(payload.length)},body:payload});if(append.status!==204)throw new Error("Production upload append failed");const complete=await gateway(`/api/v1/uploads/${session.id}/complete`,{method:"POST",jar,json:{}});if(complete.status!==201)throw new Error("Production upload complete failed");return(await json(complete)).resource;}
-async function imageFiles(image,location){return run(docker,["run","--rm","--entrypoint","find",image,location,"-type","f"]).stdout.trim().split(/\r?\n/).filter(Boolean);}
-function imageDigestReference(name,image){const id=JSON.parse(run(docker,["image","inspect",image,"--format","{{json .Id}}"]).stdout.trim());return`${name}@${id}`;}
-async function scanBytes(files,secrets){for(const file of files){const bytes=await fs.readFile(file);for(const secret of secrets)if(secret.length>=8&&bytes.includes(Buffer.from(secret)))throw new Error("Known secret found in Stage 13 artifact");}}
-async function findFreeTcpPort(){return new Promise((resolve,reject)=>{const server=net.createServer();server.unref();server.once("error",reject);server.listen(0,"127.0.0.1",()=>{const address=server.address();if(address===null||typeof address==="string"){server.close();reject(new Error("Could not allocate an isolated Stage 13 port"));return;}const port=address.port;server.close((error)=>error?reject(error):resolve(port));});});}
-
-try{
-  run(docker,["run","--rm","-v",mount(root,"/workspace"),"-w","/workspace","python:3.13-bookworm","python","infra/production/dotenv-config.test.py"]);
-  run(process.execPath,[pnpm,"install","--frozen-lockfile"]);run(process.execPath,[pnpm,"lint"]);run(process.execPath,[pnpm,"typecheck"]);run(process.execPath,[pnpm,"build"]);run(process.execPath,[pnpm,"test"]);pass("workspace quality gates",{install:"frozen",lint:"pass",typecheck:"pass",build:"pass",tests:"pass"});
-  run(docker,["run","--rm","-v",mount(root,"/workspace"),"-w","/workspace","alpine:3.24","sh","-n","infra/production/bootstrap.sh","infra/production/install.sh"]);run(process.execPath,["--check",path.join(root,"infra","production","static-server.mjs")]);const prebuilt=process.env.VAULT_STAGE13_PREBUILT==="true";if(!prebuilt){run(docker,["build","--file","infra/production/Dockerfile","--target","app","--build-arg","VAULT_VERSION=0.1.3","--build-arg","VAULT_SOURCE_REVISION=stage13-verification","--tag","vault-app:stage13","."]);run(docker,["build","--file","infra/production/Dockerfile","--target","web","--build-arg","VAULT_VERSION=0.1.3","--build-arg","VAULT_SOURCE_REVISION=stage13-verification","--tag","vault-web:stage13","."]);}const appInspect=JSON.parse(run(docker,["image","inspect","vault-app:stage13"]).stdout)[0];const webInspect=JSON.parse(run(docker,["image","inspect","vault-web:stage13"]).stdout)[0];const appFiles=await imageFiles("vault-app:stage13","/app");const webFiles=await imageFiles("vault-web:stage13","/srv");const forbidden=(item)=>/\.map$|(^|\/)\.env|\.pem$|\.key$|server_password\.txt$/.test(item);if(appInspect.Config.User!=="node"||webInspect.Config.User!=="1000:1000"||appFiles.some(forbidden)||webFiles.some(forbidden)||!webFiles.includes("/srv/robots.txt"))throw new Error("Production image hardening scan failed");run(docker,["run","--rm","vault-web:stage13","node","--check","/app/static-server.mjs"]);pass("immutable non-root production images",{buildMode:prebuilt?"prebuilt-digest":"local-build",appUser:"node",webUser:"1000:1000",appFiles:appFiles.length,webFiles:webFiles.length,sourceMaps:0,secretFiles:0,embeddedReverseProxy:false});
-  const stageRoot=path.join(root,".tmp",`stage13-${randomUUID()}`);const secretRoot=path.join(stageRoot,"secrets");const tlsRoot=path.join(stageRoot,"tls");const nginxRuntimeConfig=path.join(stageRoot,"nginx.conf");const releaseRoot=path.join(stageRoot,"release");const exitRoot=path.join(stageRoot,"alternative-storage");const exitManifest=path.join(stageRoot,"storage-exit.json");const runtimeFile=path.join(stageRoot,"runtime.env");const policyFile=path.join(stageRoot,"policy.env");temporary.push(stageRoot);await fs.mkdir(secretRoot,{recursive:true,mode:0o700});await fs.mkdir(tlsRoot,{recursive:true,mode:0o700});run(docker,["run","--rm","-v",`${path.resolve(tlsRoot)}:/out`,"alpine:3.24","sh","-c","apk add --no-cache openssl >/dev/null && openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=localhost -keyout /out/saturn.key -out /out/saturn.crt >/dev/null 2>&1"]);run(docker,["run","--rm","-v",mount(path.join(root,"infra","production","nginx.saturn.conf.example"),"/etc/nginx/conf.d/default.conf"),"-v",mount(tlsRoot,"/etc/nginx/tls"),nginxImage,"nginx","-t"]);const postgresPort=await findFreeTcpPort();const sftpPort=await findFreeTcpPort();const prepared=await prepareDevelopmentEnvironment({postgresPort,sftpPort,runtimeNamespace:path.basename(stageRoot)});const actualPostgresPassword=decodeURIComponent(new URL(prepared.environment.DATABASE_URL).password);const secretNames=["database_password","owner_access_key","auth_pepper","drop_pepper","share_pepper","device_pepper","backup_pepper","laboratory_pepper","gryphon_service_token","kernel_service_token","neptune_control_token","neptune_export_token"];for(const[index,name]of secretNames.entries()){const value=name==="database_password"?actualPostgresPassword:randomBytes(48).toString("base64url")+String(index);knownSecrets.add(value);await fs.writeFile(path.join(secretRoot,name),`${value}\n`,{encoding:"utf8",mode:0o600});}await fs.copyFile(prepared.environment.STORAGE_PRIVATE_KEY_FILE,path.join(secretRoot,"storage_private_key"));await fs.chmod(path.join(secretRoot,"storage_private_key"),0o600);const ownerAccessKey=(await fs.readFile(path.join(secretRoot,"owner_access_key"),"utf8")).trim();const kernelServiceToken=(await fs.readFile(path.join(secretRoot,"kernel_service_token"),"utf8")).trim();
-  const appRef=imageDigestReference("registry.stage13.test/saturn-app","vault-app:stage13");const webRef=imageDigestReference("registry.stage13.test/saturn-web","vault-web:stage13");const baseSecrets={DATABASE_PASSWORD_FILE:"/run/secrets/database_password",OWNER_BOOTSTRAP_TOKEN_FILE:"/run/secrets/owner_access_key",AUTH_PEPPER_FILE:"/run/secrets/auth_pepper",DROP_PEPPER_FILE:"/run/secrets/drop_pepper",SHARE_PEPPER_FILE:"/run/secrets/share_pepper",DEVICE_PEPPER_FILE:"/run/secrets/device_pepper",BACKUP_PEPPER_FILE:"/run/secrets/backup_pepper",LABORATORY_PEPPER_FILE:"/run/secrets/laboratory_pepper",GRYPHON_SERVICE_TOKEN_FILE:"/run/secrets/gryphon_service_token",STORAGE_PRIVATE_KEY_FILE:"/run/secrets/storage_private_key",STORAGE_PASSWORD_FILE:""};const policyEnvironment={NODE_ENV:"production",PUBLIC_ORIGIN:"https://vault.stage13.test",API_HOST:"0.0.0.0",API_TRUSTED_PROXIES:"172.31.250.1",WORKER_HOST:"0.0.0.0",DATABASE_URL:"postgres://vault@postgres/vault",KERNEL_SERVICE_TOKEN:kernelServiceToken,...baseSecrets,STORAGE_HOST:"prod.storage.stage13.test",STORAGE_PORT:"22",STORAGE_USER:"stage13-prod",STORAGE_ROOT:".",STORAGE_HOST_FINGERPRINT:`SHA256:${"A".repeat(43)}`,STORAGE_AUTH_MODE:"private_key_file",LABORATORY_PUBLIC_ENABLED:"false",GRYPHON_ENABLED:"true",VAULT_VALIDATION_PROFILE:"verification",VAULT_DOMAIN:"vault.stage13.test",SATURN_API_BIND_ADDRESS:"127.0.0.1",SATURN_API_BIND_PORT:"3000",SATURN_WEB_BIND_ADDRESS:"127.0.0.1",SATURN_WEB_BIND_PORT:"8080",SATURN_INGRESS_SUBNET:"172.31.250.0/29",SATURN_WEB_CONTAINER_IP:"172.31.250.2",SATURN_API_CONTAINER_IP:"172.31.250.3",VAULT_DEPLOYMENT_ENVIRONMENT:"production",VAULT_STORAGE_ENVIRONMENT:"production",VAULT_SECRET_ROOT:secretRoot,VAULT_RPO_SECONDS:"21600",VAULT_RTO_SECONDS:"7200",VAULT_PUBLIC_LABORATORY_DECISION:"private",VAULT_RELEASE_VERSION:"0.1.3",VAULT_APP_IMAGE:appRef,VAULT_WEB_IMAGE:webRef,UPDATER_SOCKET_DIR:path.join(stageRoot,"updater"),UPDATER_SOCKET_GID:"1001",NEPTUNE_SOCKET_DIR:path.join(stageRoot,"neptune"),NEPTUNE_SOCKET_GID:"1002",GRYPHON_SOCKET_DIR:path.join(stageRoot,"gryphon"),GRYPHON_CLIENTS_GID:"1003",GRYPHON_SERVICE_TOKEN_HOST_FILE:path.join(secretRoot,"gryphon_service_token"),NEPTUNE_CONTROL_TOKEN_HOST_FILE:path.join(secretRoot,"neptune_control_token"),NEPTUNE_EXPORT_TOKEN_HOST_FILE:path.join(secretRoot,"neptune_export_token")};await writeEnvironment(policyFile,policyEnvironment);run(process.execPath,[path.join(root,"scripts","validate-production.mjs"),policyFile]);const deployment=await import(pathToFileURL(path.join(root,"packages","deployment","dist","index.js")));const parsedPolicy=deployment.validateProductionDeployment(policyEnvironment,root);let mutableRejected=false;try{deployment.validateProductionDeployment({...policyEnvironment,VAULT_APP_IMAGE:"registry.stage13.test/vault/app:latest"},root);}catch{mutableRejected=true;}let publicBindRejected=false;try{deployment.validateProductionDeployment({...policyEnvironment,SATURN_API_BIND_ADDRESS:"0.0.0.0"},root);}catch{publicBindRejected=true;}if(!mutableRejected||!publicBindRejected)throw new Error("Production config negative policy failed");pass("fail-closed production configuration",{https:true,keyOnly:true,fileSecrets:parsedPolicy.secretFiles,immutableImages:2,loopbackListeners:parsedPolicy.loopbackListeners,publicBindRejected,devRuntimeMetadataRequired:false,secondCopyRuntimeGate:false,rpoSeconds:parsedPolicy.rpoSeconds,rtoSeconds:parsedPolicy.rtoSeconds,laboratoryDecision:"private"});
-  await writeEnvironment(prodEnvPath,policyEnvironment);const composeJson=JSON.parse(run(docker,["compose","--env-file",prodEnvPath,"-f","compose.production.yaml","config","--format","json"]).stdout);const services=composeJson.services;const allowedLoopback=(name,port)=>name==="api"&&port.host_ip==="127.0.0.1"&&Number(port.published)===3000&&Number(port.target)===3000||name==="web"&&port.host_ip==="127.0.0.1"&&Number(port.published)===8080&&Number(port.target)===8080;const unexpectedPorts=Object.entries(services).flatMap(([name,value])=>(value.ports??[]).filter((port)=>!allowedLoopback(name,port)));const retiredProxy=["cad","dy"].join("");const bundledProxy=run("git",["grep","-n","-i",retiredProxy,"--",":(exclude)pnpm-lock.yaml"],process.env,true);if(!composeJson.networks.backend.internal||!composeJson.networks.ingress.internal||unexpectedPorts.length>0||services.edge!==undefined||!services.api.read_only||!services.worker.read_only||!services.web.read_only||Object.keys(composeJson.secrets).length!==10||bundledProxy.status===0)throw new Error(`Production Compose/ingress hardening contract failed: ${bundledProxy.stdout.trim()}`);const verifyWorkflow=await fs.readFile(path.join(root,".github","workflows","verify.yml"),"utf8");const releaseWorkflow=await fs.readFile(path.join(root,".github","workflows","release.yml"),"utf8");const actionReferences=[...`${verifyWorkflow}\n${releaseWorkflow}`.matchAll(/\buses:\s+[^\s@]+@([^\s#]+)/g)].map((match)=>match[1]);if(actionReferences.length<10||actionReferences.some((reference)=>!/[a-f0-9]{40}/.test(reference))||!/pull_request:/.test(verifyWorkflow)||!/pnpm verify:stage:13/.test(verifyWorkflow)||!/push:\s*\n\s*tags:/m.test(releaseWorkflow)||/workflow_dispatch:|pull_request:|\n\s*branches:/.test(releaseWorkflow)||!/VAULT_STAGE13_PREBUILT=true/.test(releaseWorkflow)||!(/provenance: mode=max/.test(releaseWorkflow)&&/sbom: true/.test(releaseWorkflow)))throw new Error("Pinned CI/release workflow contract failed");pass("production topology and shell contracts",{embeddedIngress:[],operatorIngress:"server-nginx",loopbackServices:["api","web"],loopbackPorts:[3000,8080],backendInternal:true,ingressInternal:true,unexpectedApplicationPorts:0,secrets:10,readOnly:["api","worker","web"],shellSyntax:"pass",nginxSyntax:"pass",ciActionPins:actionReferences.length,releaseTrigger:"tag-only",buildOnceDigestTest:true,ociProvenance:true,ociSbom:true});
-  const sourceFiles=[...new Set(run("git",["ls-files","--cached","--others","--exclude-standard","-z"]).stdout.split("\0").filter(Boolean))].filter((file)=>!file.toLowerCase().includes(retiredProxy)).sort();
-  const sourceRevision=sha(Buffer.concat(await Promise.all(sourceFiles.map(async(file)=>{
-    let content;try{content=Buffer.concat([Buffer.from("file\0"),await fs.readFile(path.join(root,file))]);}
-    catch(error){if(error.code!=="ENOENT")throw error;content=Buffer.from("deleted\0");}
-    return Buffer.concat([Buffer.from(file),Buffer.from([0]),content,Buffer.from([0])]);
-  }))));
-  const{privateKey,publicKey}=generateKeyPairSync("ed25519");
-  const privateKeyPath=path.join(stageRoot,"release-private.pem");const publicKeyPath=path.join(stageRoot,"release-public.pem");
-  await fs.writeFile(privateKeyPath,privateKey.export({type:"pkcs8",format:"pem"}),{mode:0o600});await fs.writeFile(publicKeyPath,publicKey.export({type:"spki",format:"pem"}),{mode:0o600});knownSecrets.add((await fs.readFile(privateKeyPath,"utf8")).trim());
-  const updaterBundle=path.join(stageRoot,"updater-bundle");
-  await fs.mkdir(path.join(updaterBundle,"systemd"),{recursive:true});await fs.mkdir(path.join(updaterBundle,"release-trust"),{recursive:true});
-  await fs.writeFile(path.join(updaterBundle,"install.sh"),"#!/bin/sh\n",{mode:0o700});await fs.writeFile(path.join(updaterBundle,"updater-linux-amd64"),"stage-13-updater-fixture\n",{mode:0o700});await fs.writeFile(path.join(updaterBundle,"systemd","updater.service"),"[Service]\n",{mode:0o600});
-  const updaterPublicKey=createPublicKey(updaterSigningKey).export({type:"spki",format:"pem"});for(const service of["updater","neptune","gryphon"])await fs.writeFile(path.join(updaterBundle,"release-trust",`${service}.pem`),updaterPublicKey,{mode:0o600});
-  const helperFixture=path.join(stageRoot,"host-helpers");for(const helper of["neptune","gryphon"]){const helperDir=path.join(helperFixture,helper);await fs.mkdir(helperDir,{recursive:true});await fs.writeFile(path.join(helperDir,`${helper}-linux-release-linux-x64.json`),"{}\n");await fs.writeFile(path.join(helperDir,`${helper}-linux-release-linux-x64.json.sig.json`),"{}\n");await fs.writeFile(path.join(helperDir,`${helper}-linux-fixture.tar.gz`),"signed helper fixture\n");}
-  const updaterVersion=(await fs.readFile(path.join(root,".release","updater.version"),"utf8")).trim();const releaseEnvironment={...process.env,SATURN_BUNDLE_URL:"https://releases.stage13.test/saturn-0.1.3.zip",UPDATER_BUNDLE_DIR:updaterBundle,UPDATER_BUNDLE_VERSION:updaterVersion,HOST_HELPER_BUNDLE_DIR:helperFixture};
-  run(process.execPath,[path.join(root,"scripts","release-bundle.mjs"),"build","0.1.3",sourceRevision,appRef,webRef,privateKeyPath,releaseRoot],releaseEnvironment);
-  const bundlePath=path.join(releaseRoot,"saturn-0.1.3.zip");const sbomPath=path.join(releaseRoot,"saturn-0.1.3.sbom.json");const manifestPath=path.join(releaseRoot,"release-manifest.json");run(process.execPath,[path.join(root,"scripts","release-bundle.mjs"),"verify",manifestPath,publicKeyPath,bundlePath,sbomPath]);
-  const bundle=await fs.readFile(bundlePath);for(const required of["updater/install.sh","updater/updater-linux-amd64","updater/systemd/updater.service","updater/release-trust/updater.pem","updater/release-trust/neptune.pem","updater/release-trust/gryphon.pem","helpers/neptune/neptune-linux-release-linux-x64.json.sig.json","helpers/gryphon/gryphon-linux-release-linux-x64.json.sig.json","infra/production/nginx.saturn.conf.example"])if(!bundle.includes(Buffer.from(required)))throw new Error(`Signed release bundle is missing ${required}`);
-  const tampered=path.join(stageRoot,"tampered.zip");await fs.writeFile(tampered,Buffer.concat([bundle,Buffer.from("tamper")]),{mode:0o600});const tamperResult=run(process.execPath,[path.join(root,"scripts","release-bundle.mjs"),"verify",manifestPath,publicKeyPath,tampered,sbomPath],process.env,true);if(tamperResult.status===0)throw new Error("Tampered signed release was accepted");const signed=JSON.parse(await fs.readFile(manifestPath,"utf8"));pass("signed build-once release, pinned updater and SBOM",{version:signed.payload.version,sourceRevision,appImage:appRef,webImage:webRef,bundleSha256:signed.payload.bundle.sha256,sbomSha256:signed.payload.sbom.sha256,updaterVersion,serverNginxConfig:true,tamperRejected:true});
-  run(docker,["rm","-f",worker,apiContainer,webContainer,ingress,badApi,restoreDb],process.env,true);run(docker,["network","rm",outsideNetwork],process.env,true);run(docker,["compose","-p",project,"down","--remove-orphans"],process.env,true);run(docker,["volume","rm",secretVolume,postgresSecretVolume],process.env,true);run(docker,["compose","-p",project,"up","-d","--wait"],{...process.env,...prepared.environment});run(docker,["volume","create",secretVolume]);run(docker,["volume","create",postgresSecretVolume]);run(docker,["run","--rm","-v",mount(secretRoot,"/source"),"-v",`${secretVolume}:/target`,`alpine:3.24`,`sh`,`-c`,`cp /source/* /target/ && chown 1000:1000 /target/* && chmod 0400 /target/*`]);run(docker,["run","--rm","-v",mount(secretRoot,"/source"),"-v",`${postgresSecretVolume}:/target`,`alpine:3.24`,`sh`,`-c`,`cp /source/database_password /target/database_password && chown 0:0 /target/database_password && chmod 0444 /target/database_password`]);const runtimeEnvironment={...prepared.environment,NODE_ENV:"production",PUBLIC_ORIGIN:publicOrigin,API_HOST:"0.0.0.0",API_PORT:"3000",API_TRUSTED_PROXIES:"172.16.0.0/12,192.168.0.0/16",WORKER_HOST:"0.0.0.0",WORKER_PORT:"3001",DATABASE_URL:"postgres://vault@postgres:5432/vault",...baseSecrets,STORAGE_HOST:"sftp",STORAGE_PORT:"22",STORAGE_USER:"vault",STORAGE_ROOT:"gateway",STORAGE_HOST_FINGERPRINT:prepared.environment.STORAGE_HOST_FINGERPRINT,STORAGE_AUTH_MODE:"private_key_file",STORAGE_RUNTIME_CONFIG_DIR:"/tmp/storage-runtime",GRYPHON_ENABLED:"false",LABORATORY_PUBLIC_ENABLED:"false",VAULT_VALIDATION_PROFILE:"verification",VAULT_STORAGE_ENVIRONMENT:"production",DROP_BUFFER_DIRECTORY:"/var/lib/vault/drop-buffer",RECOVERY_SPOOL_DIR:"/var/lib/vault/spool",RECOVERY_ARCHIVE_DIR:"/var/lib/vault/recovery",PG_DUMP_BIN:"/usr/bin/pg_dump",PG_RESTORE_BIN:"/usr/bin/pg_restore",LOG_LEVEL:"info"};await writeEnvironment(runtimeFile,runtimeEnvironment);const common=["--network",network,"--env-file",runtimeFile,"-v",`${secretVolume}:/run/secrets:ro`,"--read-only","--tmpfs","/tmp:rw,noexec,nosuid,size=64m,mode=1777","--security-opt","no-new-privileges","--cap-drop","ALL"];
-  run(docker,["run","--rm",...common,"vault-app:stage13","node","/app/scripts/migrate-runtime.mjs"]);const bootstrapResult=run(docker,["run","--rm",...common,"vault-app:stage13","node","/app/scripts/storage-bootstrap.mjs"]);const smokeResult=run(docker,["run","--rm",...common,"vault-app:stage13","node","/app/scripts/storage-smoke.mjs"]);const bootstrap=JSON.parse(bootstrapResult.stdout.trim());const smoke=JSON.parse(smokeResult.stdout.trim());const expectedBusinessRoots=["# drop point","# laboratory","# sync inner services","# mastermind","# volt","# sync windows","# sync outdoor connections","# references"];const layout=bootstrap.layout;const businessRootsExact=JSON.stringify(layout?.businessRoots)===JSON.stringify(expectedBusinessRoots);if(bootstrap.state!=="ready"||layout?.state!=="ready"||layout?.version!==3||!businessRootsExact||layout?.systemRoot!=="_system"||!smoke.deleted)throw new Error("Production storage bootstrap/smoke failed");pass("empty production storage bootstrap and exact cleanup",{businessRoots:layout.businessRoots,systemRoot:layout.systemRoot,created:layout.actions.filter((action)=>action.startsWith("mkdir:")).length,smokeBytes:smoke.bytes,sha256:smoke.sha256,rangeBytes:smoke.rangeBytes,deleted:true});
-  run(docker,["run","-d","--name",worker,...common,"--tmpfs","/var/lib/vault:rw,uid=1000,gid=1000,mode=700","vault-app:stage13","node","/app/worker/dist/main.js"]);await waitExec(worker,"http://127.0.0.1:3001/health/ready");run(docker,["run","-d","--name",apiContainer,...common,"--tmpfs","/var/lib/vault:rw,uid=1000,gid=1000,mode=700","vault-app:stage13","node","/app/api/dist/main.js"]);await waitExec(apiContainer,"http://127.0.0.1:3000/health/ready");run(docker,["run","-d","--name",webContainer,"--network",network,"--read-only","--tmpfs","/tmp:rw,noexec,nosuid,size=16m,mode=1777","--security-opt","no-new-privileges","--cap-drop","ALL","vault-web:stage13"]);await waitExec(webContainer,"http://127.0.0.1:8080/health/live");const nginxSource=await fs.readFile(path.join(root,"infra","production","nginx.saturn.conf.example"),"utf8");const nginxTest=nginxSource.replaceAll("drive.replace-me.example","localhost saturn.stage13.test").replace("server 127.0.0.1:8080;",`server ${webContainer}:8080;`).replace("server 127.0.0.1:3000;",`server ${apiContainer}:3000;`).replaceAll("allow 127.0.0.1;","allow 127.0.0.1;\n        allow 10.0.0.0/8;\n        allow 172.16.0.0/12;\n        allow 192.168.0.0/16;\n        allow 198.51.100.1;");await fs.writeFile(nginxRuntimeConfig,nginxTest,{encoding:"utf8",mode:0o600});run(docker,["run","-d","--name",ingress,"--network",network,"-p","127.0.0.1:4443:443","-v",mount(nginxRuntimeConfig,"/etc/nginx/conf.d/default.conf"),"-v",mount(tlsRoot,"/etc/nginx/tls"),nginxImage]);run(docker,["network","create","--subnet","198.51.100.0/24",outsideNetwork]);run(docker,["network","connect","--ip","198.51.100.3","--alias","saturn.stage13.test",outsideNetwork,ingress]);process.env.NODE_TLS_REJECT_UNAUTHORIZED="0";await waitFor(`${publicOrigin}/health/ready`);
-  const jar=new Map();const login=await gateway("/api/v1/auth/login",{method:"POST",jar,json:{accessKey:ownerAccessKey}});if(login.status!==201)throw new Error(`Production owner login failed ${String(login.status)}`);const payload=randomBytes(2*1024*1024+31);const resource=await upload(jar,"00000000-0000-7000-8000-000000000004","production-smoke.bin",payload);const metadata=await gateway(`/api/v1/resources/${resource.id}`,{jar});const range=await gateway(`/api/v1/files/${resource.id}/content`,{jar,headers:{Range:"bytes=131-4226"}});const downloaded=await gateway(`/api/v1/files/${resource.id}/content`,{jar});if(metadata.status!==200||range.status!==206||!Buffer.from(await range.arrayBuffer()).equals(payload.subarray(131,4227))||sha(Buffer.from(await downloaded.arrayBuffer()))!==sha(payload))throw new Error("Production Gateway read/Range/checksum failed");const trash=await gateway(`/api/v1/resources/${resource.id}`,{method:"DELETE",jar,headers:{"Idempotency-Key":`stage13-${randomUUID()}`}});if(trash.status!==200)throw new Error("Production Gateway cleanup transition failed");pass("production HTTPS Gateway functional smoke through server Nginx",{tls:true,ingress:"nginx",login:201,uploadBytes:payload.length,metadata:200,range:206,sha256:sha(payload),trash:200,storageCredentialsInClient:false});
-  const reauth=await gateway("/api/v1/auth/reauthenticate",{method:"POST",jar,json:{accessKey:ownerAccessKey}});if(reauth.status!==201)throw new Error(`Production owner reauthentication failed ${String(reauth.status)}`);const deviceResponse=await gateway("/api/v1/devices",{method:"POST",jar,json:{name:"Stage 13 large WebDAV PUT",scopeIds:["00000000-0000-7000-8000-000000000004"],rights:{read:true,write:true,move:true,delete:true}}});if(deviceResponse.status!==201)throw new Error(`Production device creation failed ${String(deviceResponse.status)} ${await deviceResponse.text()}`);const device=await json(deviceResponse);knownSecrets.add(device.token);const davAuthorization=basicDevice(device.token);const davPayload=randomBytes(17*1024*1024+4096);const davPath=`/dav/sync/stage13-large-${randomUUID()}.bin`;const davHeaders={Authorization:davAuthorization,"Content-Type":"application/octet-stream","Content-Length":String(davPayload.length)};const davPut=await gateway(davPath,{method:"PUT",headers:davHeaders,body:davPayload});const davGet=await gateway(davPath,{headers:{Authorization:davAuthorization}});const davDownloaded=Buffer.from(await davGet.arrayBuffer());const davDelete=await gateway(davPath,{method:"DELETE",headers:{Authorization:davAuthorization}});if(davPut.status!==201||davGet.status!==200||!davDownloaded.equals(davPayload)||davDelete.status!==204)throw new Error(`Large WebDAV PUT through Nginx failed: put=${String(davPut.status)} get=${String(davGet.status)} bytes=${String(davDownloaded.length)} delete=${String(davDelete.status)}`);pass("server Nginx streams WebDAV PUT above global body limit",{globalBodyLimitMiB:16,webdavBodyLimit:"Saturn",uploadBytes:davPayload.length,put:201,get:200,sha256:sha(davDownloaded),delete:204});
-  const rootResponse=await gateway("/");const unknown=await gateway("/unknown-probe-stage13");const envProbe=await gateway("/.env");const mapProbe=await gateway("/assets/index.js.map");const robots=await gateway("/robots.txt");const anonymous=await gateway(`/api/v1/resources/${resource.id}`);await expectHttpsRejection("localhost","unknown.invalid");await expectHttpsRejection("unknown.invalid","unknown.invalid");const outsideProbeScript=`process.env.NODE_TLS_REJECT_UNAUTHORIZED='0';Promise.all(['/','/api/v1/auth/session','/health/live'].map(path=>fetch('https://saturn.stage13.test'+path,{headers:{'X-Forwarded-For':'127.0.0.1','X-Real-IP':'127.0.0.1'}}))).then(responses=>{const statuses=responses.map(response=>response.status);console.log(JSON.stringify(statuses));process.exit(statuses[0]===200&&statuses[1]===401&&statuses[2]===403?0:1)}).catch(error=>{console.error(error);process.exit(2)})`;const outsideProbe=run(docker,["run","--rm","--network",outsideNetwork,"--ip","198.51.100.2",nodeImage,"node","-e",outsideProbeScript]);const outsideStatuses=JSON.parse(outsideProbe.stdout.trim());const ports={api:run(docker,["port",apiContainer]).stdout.trim(),web:run(docker,["port",webContainer]).stdout.trim(),worker:run(docker,["port",worker]).stdout.trim(),postgres:run(docker,["port",postgres]).stdout.trim(),nginx:run(docker,["port",ingress]).stdout.trim()};const postgresBindings=ports.postgres.split(/\r?\n/).filter(Boolean);const databaseLoopback=postgresBindings.length>0&&postgresBindings.every((binding)=>/-> 127\.0\.0\.1:\d+$/.test(binding));const exposure={root:rootResponse.status,unknown:unknown.status,env:envProbe.status,sourceMap:mapProbe.status,anonymous:anonymous.status,robots:robots.status,robotsTag:robots.headers.get("x-robots-tag"),ports,databaseLoopback,outsideStatuses};if(exposure.root!==200||exposure.unknown!==404||exposure.env!==404||exposure.sourceMap!==404||exposure.anonymous!==401||!exposure.robotsTag?.includes("noindex")||ports.api||ports.web||ports.worker||!databaseLoopback||!ports.nginx.includes("127.0.0.1:4443")||outsideStatuses[0]!==200||outsideStatuses[1]!==401||outsideStatuses[2]!==403)throw new Error(`Server Nginx exposure policy failed: ${JSON.stringify(exposure)}`);browser=await chromium.launch({headless:true});const context=await browser.newContext({ignoreHTTPSErrors:true,viewport:{width:1280,height:800}});const page=await context.newPage();await page.goto(publicOrigin,{waitUntil:"networkidle"});if(await page.getByLabel("Access Key").count()!==1||await page.evaluate(()=>localStorage.length+sessionStorage.length)!==0)throw new Error("Production web entry boundary failed");
-  const loginBrandLoaded=await page.locator(".login-brand__icon img").evaluate(async(image)=>{await image.decode();return image.complete&&image.naturalWidth>0&&image.naturalHeight>0;});
-  if(!loginBrandLoaded)throw new Error("Production login brand image failed to load");
-  await browser.close();browser=undefined;pass("server Nginx exposure and probe resistance",{serverNginxPorts:[443],saturnPublicPorts:[],apiPublished:false,webPublished:false,workerPublished:false,databaseLoopbackFixture:true,unknownPath:404,unknownHost:"rejected",unknownSni:"rejected",publicRootOutside:outsideStatuses[0],anonymousSessionOutside:outsideStatuses[1],spoofedHealthOutside:outsideStatuses[2],env:404,sourceMap:404,anonymous:401,robots:"deny",browserStorage:0,loginBrandImage:"decoded"});
-  run(docker,["stop",sftp]);await waitFor(`${publicOrigin}/health/ready`,503);if((await gateway("/health/live")).status!==200)throw new Error("Liveness failed during storage outage");run(docker,["start",sftp]);await waitFor(`${publicOrigin}/health/ready`,200);run(docker,["pause",postgres]);await waitFor(`${publicOrigin}/health/ready`,503);run(docker,["unpause",postgres]);await waitFor(`${publicOrigin}/health/ready`,200,120_000);const badEnvironment={...runtimeEnvironment,STORAGE_HOST_FINGERPRINT:`SHA256:${"Z".repeat(43)}`};const badFile=path.join(stageRoot,"bad.env");await writeEnvironment(badFile,badEnvironment);run(docker,["run","-d","--name",badApi,"--network",network,"--env-file",badFile,"-v",`${secretVolume}:/run/secrets:ro`,"--read-only","--tmpfs","/tmp:rw,noexec,nosuid,size=64m,mode=1777","--tmpfs","/var/lib/vault:rw,uid=1000,gid=1000,mode=700","--security-opt","no-new-privileges","--cap-drop","ALL","vault-app:stage13","node","/app/api/dist/main.js"]);const badCandidateRejection=await waitRejectedCandidate(badApi);if((await gateway("/health/ready")).status!==200)throw new Error("Bad candidate affected live server Nginx ingress");run(docker,["rm","-f",badApi]);pass("failure injection and pre-switch rollback",{storageOutage:{ready:503,live:200,recovered:200},databaseOutage:{injection:"process_pause",ready:503,recovered:200,dataPreserved:true},badCandidate:{rejected:true,...badCandidateRejection},liveReleaseStayed:200,trafficSwitch:false});
-  const drStarted=Date.now();const dump=runBinary(docker,["exec",postgres,"pg_dump","-U","vault","-d","vault","-Fc","--no-owner","--no-acl"]);run(docker,["run","-d","--name",restoreDb,"--network",network,"-e","POSTGRES_DB=vault_restore","-e","POSTGRES_USER=vault","-e","POSTGRES_PASSWORD_FILE=/run/secrets/database_password","-v",`${postgresSecretVolume}:/run/secrets:ro`,"postgres:18.1-alpine@sha256:aa6eb304ddb6dd26df23d05db4e5cb05af8951cda3e0dc57731b771e0ef4ab29"]);const restoreDeadline=Date.now()+60_000;let restoreReady=false;while(Date.now()<restoreDeadline){const logs=run(docker,["logs",restoreDb],process.env,true);const initializationComplete=`${logs.stdout??""}\n${logs.stderr??""}`.includes("PostgreSQL init process complete; ready for start up.");if(initializationComplete&&run(docker,["exec",restoreDb,"pg_isready","-U","vault","-d","vault_restore"],process.env,true).status===0){restoreReady=true;break;}await new Promise((resolve)=>setTimeout(resolve,500));}if(!restoreReady){const logs=run(docker,["logs","--tail","100",restoreDb],process.env,true);throw new Error(`Restore database did not become ready: ${`${logs.stdout??""}\n${logs.stderr??""}`.trim().slice(-4_000)}`);}runBinary(docker,["exec","-i",restoreDb,"pg_restore","-U","vault","-d","vault_restore","--no-owner","--no-acl"],dump);const sourceCounts=run(docker,["exec",postgres,"psql","-U","vault","-d","vault","-Atc","SELECT count(*) FROM resources; SELECT count(*) FROM audit_events;"]).stdout.trim();const restoredCounts=run(docker,["exec",restoreDb,"psql","-U","vault","-d","vault_restore","-Atc","SELECT count(*) FROM resources; SELECT count(*) FROM audit_events;"]).stdout.trim();if(sourceCounts!==restoredCounts)throw new Error("Clean database restore comparison failed");const recoverySeconds=(Date.now()-drStarted)/1000;run(docker,["rm","-f",restoreDb]);pass("clean-host database recovery drill",{dumpBytes:dump.length,countsExact:true,elapsedSeconds:recoverySeconds,rpoTargetSeconds:21600,rtoTargetSeconds:7200,rtoMet:recoverySeconds<7200});
-  const hostEnvironment={...runtimeEnvironment,DATABASE_URL:`postgres://vault@127.0.0.1:${prepared.environment.DEV_POSTGRES_BIND_PORT}/vault`,DATABASE_PASSWORD_FILE:path.join(secretRoot,"database_password"),OWNER_BOOTSTRAP_TOKEN_FILE:path.join(secretRoot,"owner_access_key"),AUTH_PEPPER_FILE:path.join(secretRoot,"auth_pepper"),DROP_PEPPER_FILE:path.join(secretRoot,"drop_pepper"),SHARE_PEPPER_FILE:path.join(secretRoot,"share_pepper"),DEVICE_PEPPER_FILE:path.join(secretRoot,"device_pepper"),BACKUP_PEPPER_FILE:path.join(secretRoot,"backup_pepper"),LABORATORY_PEPPER_FILE:path.join(secretRoot,"laboratory_pepper"),STORAGE_HOST:"127.0.0.1",STORAGE_PORT:prepared.environment.DEV_SFTP_BIND_PORT,STORAGE_PRIVATE_KEY_FILE:path.join(secretRoot,"storage_private_key"),VAULT_EXIT_QUIESCED:"true",VAULT_EXIT_MAX_BYTES:String(512*1024*1024)};const exitResult=run(process.execPath,[path.join(root,"scripts","storage-exit.mjs"),exitRoot,exitManifest],{...process.env,...hostEnvironment});const exitSummary=JSON.parse(exitResult.stdout.trim());const exitEvidence=JSON.parse(await fs.readFile(exitManifest,"utf8"));if(exitSummary.files<1||exitEvidence.files.some((item)=>!/^[a-f0-9]{64}$/.test(item.sha256)))throw new Error("Alternative backend exit evidence failed");pass("alternative StorageAdapter provider exit",{files:exitSummary.files,totalBytes:exitSummary.totalBytes,digestsExact:true,quiesceRequired:true,stableRelativePaths:true});
-  const runtimeLogs=[run(docker,["logs",apiContainer]).stdout,run(docker,["logs",worker]).stdout,run(docker,["logs",webContainer]).stdout,run(docker,["logs",ingress]).stdout].join("\n");const artifactFiles=[bundlePath,sbomPath,manifestPath,reportPath].filter((file)=>file!==reportPath);const secrets=[...knownSecrets];for(const secret of secrets)if(secret.length>=8&&runtimeLogs.includes(secret))throw new Error("Known secret found in production-like runtime logs");await scanBytes(artifactFiles,secrets);const productionFiles=await imageFiles("vault-app:stage13","/app");if(productionFiles.some(forbidden))throw new Error("Final production image rescan failed");pass("final runtime, release and secret scans",{knownValues:secrets.length,runtimeLogBytes:Buffer.byteLength(runtimeLogs),releaseArtifacts:artifactFiles.length,imageFiles:productionFiles.length,findings:0});report.success=true;
-}catch(error){report.error=error instanceof Error?error.message:String(error);throw error;}finally{delete process.env.NODE_TLS_REJECT_UNAUTHORIZED;await browser?.close().catch(()=>undefined);run(docker,["unpause",postgres],process.env,true);for(const container of[badApi,ingress,webContainer,apiContainer,worker,restoreDb])run(docker,["rm","-f",container],process.env,true);run(docker,["network","rm",outsideNetwork],process.env,true);run(docker,["compose","-p",project,"down","--remove-orphans"],process.env,true);run(docker,["volume","rm",secretVolume,postgresSecretVolume],process.env,true);await fs.rm(prodEnvPath,{force:true}).catch(()=>undefined);for(const target of temporary)await fs.rm(target,{recursive:true,force:true}).catch(()=>undefined);await fs.mkdir(path.dirname(reportPath),{recursive:true});report.finishedAt=new Date().toISOString();await fs.writeFile(reportPath,`${JSON.stringify(report,null,2)}\n`,"utf8");knownSecrets.clear();}
+import { parseStage13Mode, verifyRuntimeDiagnosticInput, runWorkspaceQuality, completedRuntimeGraph, finalizeStage13Report } from "./stage13-mode.mjs";
+import {collectWorkspaceAccounting,redactEvidence} from "./ci-workspace-accounting.mjs";
+const executionMode = parseStage13Mode(process.argv.slice(2));
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+// Ordinary CI owns its SQL/SFTP/K4 inputs. Operator qualification may instead
+// supply an explicitly owned manifest; absence never means silently skip SQL.
+if (executionMode === "FULL" && !process.env.STAGE3_CHAT_A_FIXTURE) {
+    const entry = await import("node:child_process");
+    const child = entry.spawn(process.execPath, [path.join(root,"scripts","ci-workspace-inputs.mjs"),"--",process.execPath,fileURLToPath(import.meta.url)], {cwd:root,env:process.env,windowsHide:true,stdio:"inherit"});
+    const actual = await new Promise((resolve,reject)=>{child.once("error",reject);child.once("close",(code,signal)=>resolve({code,signal}));});
+    process.exit(actual.signal || actual.code === null ? 1 : actual.code);
+}
+const input = process.env.VAULT_STAGE13_INPUT ? JSON.parse(await fs.readFile(process.env.VAULT_STAGE13_INPUT, "utf8")) : {};
+if (executionMode === "RUNTIME_DIAGNOSTIC" && !process.env.VAULT_STAGE13_INPUT) throw new Error("Runtime diagnostic requires an explicit bound input card");
+const diagnosticAdmission = executionMode === "RUNTIME_DIAGNOSTIC" ? await verifyRuntimeDiagnosticInput(input, root) : undefined;
+const isolation = createIsolation({ base: input.temporaryBase ?? process.env.VAULT_STAGE13_TEMP_BASE });
+const stageRoot = isolation.root, project = isolation.namespace;
+const owner = new OwnedDocker({ ...isolation, cwd: root, docker: process.env.DOCKER_BIN, expectedEngineId: input.dockerEngineId });
+if (executionMode === "FULL") { owner.budgets.wallClockMs = 90 * 60_000; owner.persist(); }
+const docker = owner.docker, pnpm = path.join(root, "node_modules", "pnpm", "bin", "pnpm.cjs");
+const network = project + "-default", outsideNetwork = project + "-outside";
+const secretVolume = project + "-runtime-secrets", postgresSecretVolume = project + "-postgres-secrets";
+const postgres = project + "-postgres", sftp = project + "-sftp", worker = project + "-worker", apiContainer = project + "-api", webContainer = project + "-web", ingress = project + "-nginx", badApi = project + "-bad-api", restoreDb = project + "-restore-db";
+const pgDataVolume = project + "-postgres-data", restoreDataVolume = project + "-restore-data";
+const nginxImage = "nginx:1.29.4-alpine@sha256:4870c12cd2ca986de501a804b4f506ad3875a0b1874940ba0a2c7f763f1855b2";
+const nodeImage = "node:24-alpine@sha256:d32cdf619f63fe0471182d08996dd516c6275bb5fd31ae06e55a570bd9e1ad43";
+const ingressPort = await findFreeTcpPort(), publicOrigin = "https://localhost:" + ingressPort;
+const octet = randomBytes(2), subnetBase = (octet[1] % 16) * 16, outsidePrefix = "198.18." + octet[0] + ".";
+const outsideSubnet = outsidePrefix + subnetBase + "/28", outsideGateway = outsidePrefix + (subnetBase + 1), outsideProbeIp = outsidePrefix + (subnetBase + 2), outsideIngressIp = outsidePrefix + (subnetBase + 3);
+const reportPath = process.env.VAULT_STAGE13_REPORT ?? path.join(root, "artifacts", "verification", "stage-13-production-hardening.json");
+const ownedReportPath = path.join(stageRoot, "report.json"), prodEnvPath = path.join(stageRoot, "production-policy.env");
+const version = JSON.parse(await fs.readFile(path.join(root, "package.json"), "utf8")).version;
+if (input.version && input.version !== version) throw new Error("Candidate version differs from current source");
+const candidateRevision = input.sourceRevision ?? process.env.VAULT_STAGE13_SOURCE_REVISION ?? run("git", ["rev-parse", "HEAD"]).stdout.trim();
+let appImage = input.appImage ?? process.env.VAULT_STAGE13_APP_IMAGE, webImage = input.webImage ?? process.env.VAULT_STAGE13_WEB_IMAGE;
+const report = { schema: "vault.stage-verification.v1", stage: 13, namespace: project, root: stageRoot, version, candidateRevision, startedAt: new Date().toISOString(), executionScope: executionMode, diagnosticAdmission, qualityAccepted: false, fullCiAccepted: false, runtimeChecksPassed: false, success: false, scope: "LOCAL_EXACT_ARTIFACT_COMPONENT_QUALIFICATION", readyToDeploy: false, checks: [] };
+if (executionMode === "RUNTIME_DIAGNOSTIC") {
+    report.quality = runWorkspaceQuality(executionMode, pnpm, () => { throw new Error("Diagnostic scope cannot execute workspace quality"); });
+    report.checks.push({ name: "workspace quality gates", status: "not_accepted", detail: report.quality });
+}
+const knownSecrets = new Set(), updaterSigningKey = generateKeyPairSync("rsa", { modulusLength: 3072 }).privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+knownSecrets.add(updaterSigningKey.trim());
+const previousReleaseSigningKey = process.env.RELEASE_SIGNING_KEY;
+process.env.RELEASE_SIGNING_KEY = updaterSigningKey;
+let restoreTrust;
+process.stdout.write("Stage13 private evidence root: " + stageRoot + "\n");
+function pass(name, detail = {}) { report.checks.push({ name, status: "pass", detail }); process.stdout.write(`PASS ${name}\n`); }
+function sha(value) { return createHash("sha256").update(value).digest("hex"); }
+function run(command, args, environment = process.env, allowFailure = false, input) {
+    if (command === docker) return owner.run(args, environment, allowFailure, input);
+    if (owner.pending || Date.now() - owner.started >= owner.budgets.wallClockMs) { owner.pending = true; owner.persist(); throw new Error("Stage13 wall-clock budget exhausted; admission closed"); }
+    const qualityOperation = args[0] === pnpm;
+    const result = runCommand(command, args, { root: stageRoot, cwd: root, env: { ...environment, NODE_OPTIONS: `--max-old-space-size=${qualityOperation ? 2048 : 512}` }, input, encoding: "utf8", timeout: Math.min(qualityOperation ? 2_700_000 : owner.budgets.operationMs, owner.budgets.wallClockMs - (Date.now() - owner.started)) });
+    const evidence = path.join(stageRoot, "commands", String(owner.commands.length).padStart(5, "0"));
+    recordOutput(evidence, result);
+    owner.commands.push({ executable: command, argv: args, exitCode: result.status, signal: result.signal ?? null, supervisorEvidence: result.evidence, actor: result.actor, stdout: `${evidence}.stdout`, stderr: `${evidence}.stderr` });
+    if (result.status === null || result.error) { owner.pending = true; owner.persist(); throw new Error("Helper command pending; resources retained"); }
+    owner.persist();
+    if (!allowFailure && result.status !== 0) throw new Error(path.basename(command) + " failed (exit " + result.status + "); output is private");
+    return result;
+}
+function recordOutput(evidence, result) { nodeFs.writeFileSync(`${evidence}.stdout`, result.stdout ?? "", { mode: 0o600 }); nodeFs.writeFileSync(`${evidence}.stderr`, result.stderr ?? "", { mode: 0o600 }); }
+function runBinary(command, args, input) { if (command !== docker) throw new Error("Unexpected binary executable"); return owner.binary(args, input); }
+async function writeEnvironment(file, values) { const lines = Object.entries(values).filter(([, value]) => value !== undefined).map(([name, value]) => `${name}=${String(value).replaceAll("\n", "")}`); await fs.writeFile(file, `${lines.join("\n")}\n`, { encoding: "utf8", mode: 0o600 }); }
+async function waitFor(url, status = 200, timeout = 90000) { const deadline = Date.now() + timeout; let last = "no response"; while (Date.now() < deadline) {
+    try {
+        const response = await fetch(url, { signal: AbortSignal.timeout(4000) });
+        const body = await response.text();
+        last = `${String(response.status)} ${body.slice(0, 2000)}`;
+        if (response.status === status)
+            return;
+    }
+    catch (error) {
+        last = error instanceof Error ? error.message : String(error);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500));
+} throw new Error(`Timed out waiting for ${url} status ${String(status)}; last=${last}`); }
+async function waitExec(container, url, expected = 200, timeout = 90000) { const deadline = Date.now() + timeout; let last = ""; while (Date.now() < deadline) {
+    const result = run(docker, ["exec", container, "node", "-e", `fetch('${url}').then(async r=>{console.log(r.status,await r.text());process.exit(r.status===${String(expected)}?0:1)}).catch(e=>{console.error(e.message);process.exit(2)})`], process.env, true);
+    last = `${result.stdout ?? ""} ${result.stderr ?? ""}`.trim();
+    if (result.status === 0)
+        return;
+    await new Promise((resolve) => setTimeout(resolve, 500));
+} const logs = run(docker, ["logs", "--tail", "100", container], process.env, true); throw new Error(`Container ${container} did not reach ${String(expected)}: ${last.slice(-2000)} ${`${logs.stdout ?? ""} ${logs.stderr ?? ""}`.slice(-4000)}`); }
+async function waitRejectedCandidate(container, timeout = 90000) { const deadline = Date.now() + timeout; let last = ""; while (Date.now() < deadline) {
+    const inspected = run(docker, ["inspect", "--format", "{{json .State}}", container], process.env, true);
+    if (inspected.status === 0) {
+        const state = JSON.parse(inspected.stdout.trim());
+        if (!state.Running) {
+            if (state.ExitCode === 0)
+                throw new Error("Rejected candidate exited successfully instead of failing closed");
+            return { mode: "startup_exit", exitCode: state.ExitCode };
+        }
+        const probe = run(docker, ["exec", container, "node", "-e", "fetch('http://127.0.0.1:3000/health/ready').then(r=>process.exit(r.status===503?0:1)).catch(()=>process.exit(2))"], process.env, true);
+        last = `${probe.stdout ?? ""} ${probe.stderr ?? ""}`.trim();
+        if (probe.status === 0)
+            return { mode: "readiness_503" };
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500));
+} throw new Error(`Bad candidate was not rejected: ${last.slice(-2000)}`); }
+function mount(source, target) { return `${path.resolve(source)}:${target}:ro`; }
+function updateCookies(jar, response) { for (const value of response.headers.getSetCookie()) {
+    const [pair] = value.split(";", 1);
+    const separator = pair.indexOf("=");
+    if (separator < 1)
+        continue;
+    if (/max-age=0/i.test(value))
+        jar.delete(pair.slice(0, separator));
+    else
+        jar.set(pair.slice(0, separator), pair.slice(separator + 1));
+} }
+function cookieHeader(jar) { return [...jar].map(([name, value]) => `${name}=${value}`).join("; "); }
+async function gateway(relative, options = {}) { const { method = "GET", json: inputJson, body, headers: inputHeaders, jar } = options; const headers = new Headers(inputHeaders ?? {}); headers.set("User-Agent", "vault-stage13-verifier/1"); if (jar?.size)
+    headers.set("Cookie", cookieHeader(jar)); if (!["GET", "HEAD", "OPTIONS"].includes(method)) {
+    headers.set("Origin", publicOrigin);
+    const csrf = jar?.get("__Host-vault_csrf");
+    if (csrf)
+        headers.set("X-Vault-CSRF", csrf);
+} let requestBody = body; if (inputJson !== undefined) {
+    headers.set("Content-Type", "application/json");
+    requestBody = JSON.stringify(inputJson);
+} const response = await fetch(`${publicOrigin}${relative}`, { method, headers, ...(requestBody === undefined ? {} : { body: requestBody }), signal: AbortSignal.timeout(120000) }); if (jar)
+    updateCookies(jar, response); return response; }
+async function json(response) { const text = await response.text(); return text ? JSON.parse(text) : undefined; }
+function basicDevice(token) { return `Basic ${Buffer.from(`device:${token}`).toString("base64")}`; }
+async function upload(jar, parentId, filename, payload) { const created = await gateway("/api/v1/uploads", { method: "POST", jar, headers: { "Idempotency-Key": `stage13-${randomUUID()}` }, json: { parentId, filename, expectedSize: payload.length, expectedSha256: sha(payload) } }); if (created.status !== 201)
+    throw new Error(`Production upload create failed: ${String(created.status)} ${await created.text()}`); const session = await json(created); const append = await gateway(`/api/v1/uploads/${session.id}`, { method: "PATCH", jar, headers: { "Content-Type": "application/offset+octet-stream", "Upload-Offset": "0", "Content-Length": String(payload.length) }, body: payload }); if (append.status !== 204)
+    throw new Error("Production upload append failed"); const complete = await gateway(`/api/v1/uploads/${session.id}/complete`, { method: "POST", jar, json: {} }); if (complete.status !== 201)
+    throw new Error("Production upload complete failed"); return (await json(complete)).resource; }
+async function imageFiles(image, location) { return run(docker, ["run", "--rm", "--entrypoint", "find", image, location, "-type", "f"]).stdout.trim().split(/\r?\n/).filter(Boolean); }
+async function scanBytes(files, secrets) { for (const file of files) {
+    const bytes = await fs.readFile(file);
+    for (const secret of secrets)
+        if (secret.length >= 8 && bytes.includes(Buffer.from(secret)))
+            throw new Error("Known secret found in Stage 13 artifact");
+} }
+async function findFreeTcpPort() { return new Promise((resolve, reject) => { const server = net.createServer(); server.unref(); server.once("error", reject); server.listen(0, "127.0.0.1", () => { const address = server.address(); if (address === null || typeof address === "string") {
+    server.close();
+    reject(new Error("Could not allocate an isolated Stage 13 port"));
+    return;
+} const port = address.port; server.close((error) => error ? reject(error) : resolve(port)); }); }); }
+try {
+    if (input.templateOnly === true) throw new Error("Stage13 input template must be populated and templateOnly removed before admission");
+    if (process.env.NODE_TLS_REJECT_UNAUTHORIZED !== undefined && process.env.NODE_TLS_REJECT_UNAUTHORIZED !== "1") throw new Error("Insecure inherited TLS configuration is refused");
+    const exactImage = (value) => /^sha256:[a-f0-9]{64}$/.test(value) || /@sha256:[a-f0-9]{64}$/.test(value);
+    if ((process.env.VAULT_STAGE13_PREBUILT === "true" || appImage || webImage) && (!appImage || !webImage || ![appImage, webImage].every(exactImage))) throw new Error("Prebuilt qualification requires explicit exact app and web image inputs");
+    if ((input.browserImage ?? process.env.VAULT_STAGE13_BROWSER_IMAGE) && !exactImage(input.browserImage ?? process.env.VAULT_STAGE13_BROWSER_IMAGE)) throw new Error("Browser input must be an exact local ID or registry manifest digest");
+    if (process.platform !== "linux" && !(input.browserImage ?? process.env.VAULT_STAGE13_BROWSER_IMAGE)) throw new Error("Non-Linux hosts require an exact Linux browser tool image (Node24, Playwright1.62.1, Chromium, certutil)");
+    run(docker, ["run", "--rm", "-v", mount(path.join(root, "infra", "production"), "/workspace/infra/production"), "-w", "/workspace", "python:3.13-bookworm", "python", "infra/production/dotenv-config.test.py"]);
+    if (executionMode === "FULL") {
+        const reportKey = project + "-workspace";
+        report.quality = runWorkspaceQuality(executionMode, pnpm, (args) => run(process.execPath, args), {
+            reportKey,
+            beforeTests: () => { if (process.env.SATURN_CI_INPUTS_MANAGED === "1") run(process.execPath,[pnpm,"--filter","@saturn/database","migrate"]); },
+            accounting: () => {
+                const accounting = collectWorkspaceAccounting(root,reportKey);
+                const secretValues = Object.entries(process.env).filter(([key])=>/PASSWORD|TOKEN|SECRET|SIGNING|CREDENTIAL|DATABASE_URL/.test(key)).map(([,value])=>value);
+                const safe = JSON.parse(redactEvidence(accounting,secretValues));
+                const destination=path.join(root,"artifacts","verification","workspace-ci-accounting.json");nodeFs.mkdirSync(path.dirname(destination),{recursive:true});nodeFs.writeFileSync(destination,JSON.stringify(safe,null,2)+"\n");
+                return safe;
+            },
+        });
+        report.qualityAccepted = report.quality.accepted;
+        pass("workspace quality gates", { install: "frozen", lint: "pass", typecheck: "pass", build: "pass", tests: "pass" });
+    }
+    run(docker, ["run", "--rm", "-v", mount(path.join(root, "infra", "production"), "/workspace/infra/production"), "-w", "/workspace", "alpine:3.24", "sh", "-n", "infra/production/bootstrap.sh", "infra/production/install.sh"]);
+    run(process.execPath, ["--check", path.join(root, "infra", "production", "static-server.mjs")]);
+    const prebuilt = process.env.VAULT_STAGE13_PREBUILT === "true" || Boolean(appImage || webImage);
+    if (prebuilt && (!appImage || !webImage)) throw new Error("Prebuilt qualification requires explicit app and web exact inputs");
+    if (prebuilt && [appImage, webImage].some((value) => !/^sha256:[a-f0-9]{64}$/.test(value) && !/@sha256:[a-f0-9]{64}$/.test(value))) throw new Error("Prebuilt inputs must be local config IDs or registry manifest-digest references");
+    appImage ??= project + "-app:candidate"; webImage ??= project + "-web:candidate";
+    if (!prebuilt) {
+        run(docker, ["build", "--file", "infra/production/Dockerfile", "--target", "app", "--build-arg", "VAULT_VERSION=" + version, "--build-arg", "VAULT_SOURCE_REVISION=" + candidateRevision, "--tag", appImage, "."]);
+        run(docker, ["build", "--file", "infra/production/Dockerfile", "--target", "web", "--build-arg", "VAULT_VERSION=" + version, "--build-arg", "VAULT_SOURCE_REVISION=" + candidateRevision, "--tag", webImage, "."]);
+    }
+    appImage = owner.image(appImage); webImage = owner.image(webImage);
+    report.artifacts = { appLocalConfigId: appImage, webLocalConfigId: webImage, registryManifestReferences: owner.images.filter((image) => image.id === appImage || image.id === webImage).flatMap((image) => image.repoDigests), registryInstallQualified: false };
+    const appInspect = JSON.parse(run(docker, ["image", "inspect", appImage]).stdout)[0];
+    const webInspect = JSON.parse(run(docker, ["image", "inspect", webImage]).stdout)[0];
+    for (const image of [appInspect, webInspect]) {
+        if (image.Config.Labels?.["org.opencontainers.image.version"] !== version || image.Config.Labels?.["org.opencontainers.image.revision"] !== candidateRevision) throw new Error("Candidate image version/revision labels do not match the declared source tuple");
+    }
+    const appFiles = await imageFiles(appImage, "/app");
+    const webFiles = await imageFiles(webImage, "/srv");
+    const forbidden = (item) => /\.map$|(^|\/)\.env|\.pem$|\.key$|server_password\.txt$/.test(item);
+    if (appInspect.Config.User !== "node" || webInspect.Config.User !== "1000:1000" || appFiles.some(forbidden) || webFiles.some(forbidden) || !webFiles.includes("/srv/robots.txt"))
+        throw new Error("Production image hardening scan failed");
+    run(docker, ["run", "--rm", webImage, "node", "--check", "/app/static-server.mjs"]);
+    pass("immutable non-root production images", { buildMode: prebuilt ? "prebuilt-digest" : "local-build", appUser: "node", webUser: "1000:1000", appFiles: appFiles.length, webFiles: webFiles.length, sourceMaps: 0, secretFiles: 0, embeddedReverseProxy: false });
+    const secretRoot = path.join(stageRoot, "secrets");
+    const tlsRoot = path.join(stageRoot, "tls");
+    const nginxRuntimeConfig = path.join(stageRoot, "nginx.conf");
+    const releaseRoot = path.join(stageRoot, "release");
+    const exitRoot = path.join(stageRoot, "alternative-storage");
+    const exitManifest = path.join(stageRoot, "storage-exit.json");
+    const runtimeFile = path.join(stageRoot, "runtime.env");
+    const policyFile = path.join(stageRoot, "policy.env");
+    await fs.mkdir(secretRoot, { recursive: true, mode: 0o700 });
+    await fs.mkdir(tlsRoot, { recursive: true, mode: 0o700 });
+    const caFile = path.join(tlsRoot, "ca.crt"), certificateFile = path.join(tlsRoot, "saturn.crt"), keyFile = path.join(tlsRoot, "saturn.key");
+    const tlsInputs = { ca: input.caFile ?? process.env.VAULT_STAGE13_CA_FILE, certificate: input.certificateFile ?? process.env.VAULT_STAGE13_CERT_FILE, key: input.keyFile ?? process.env.VAULT_STAGE13_KEY_FILE };
+    if (Object.values(tlsInputs).some(Boolean)) {
+        if (!Object.values(tlsInputs).every(Boolean)) throw new Error("CA, certificate and key inputs must be supplied together");
+        await fs.copyFile(tlsInputs.ca, caFile); await fs.copyFile(tlsInputs.certificate, certificateFile); await fs.copyFile(tlsInputs.key, keyFile); await fs.chmod(keyFile, 0o600);
+    } else {
+        const caKey = path.join(tlsRoot, "ca.key"), csr = path.join(tlsRoot, "server.csr"), extension = path.join(tlsRoot, "server.ext");
+        await fs.writeFile(extension, "subjectAltName=DNS:localhost,DNS:saturn.stage13.test,IP:127.0.0.1\nbasicConstraints=CA:FALSE\nextendedKeyUsage=serverAuth\n", { mode: 0o600 });
+        run("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1", "-subj", "/CN=Stage13 owned CA", "-addext", "basicConstraints=critical,CA:TRUE", "-keyout", caKey, "-out", caFile]);
+        run("openssl", ["req", "-new", "-newkey", "rsa:2048", "-nodes", "-subj", "/CN=localhost", "-keyout", keyFile, "-out", csr]);
+        run("openssl", ["x509", "-req", "-in", csr, "-CA", caFile, "-CAkey", caKey, "-CAcreateserial", "-days", "1", "-extfile", extension, "-out", certificateFile]);
+        await fs.chmod(caKey, 0o600); await fs.chmod(keyFile, 0o600);
+    }
+    report.tls = assertCertificate(await fs.readFile(certificateFile), await fs.readFile(caFile), "localhost");
+    assertCertificate(await fs.readFile(certificateFile), await fs.readFile(caFile), "saturn.stage13.test");
+    restoreTrust = installProcessTrust(await fs.readFile(caFile));
+    run(docker, ["run", "--rm", "-v", mount(path.join(root, "infra", "production", "nginx.saturn.conf.example"), "/etc/nginx/conf.d/default.conf"), "-v", mount(tlsRoot, "/etc/nginx/tls"), nginxImage, "nginx", "-t"]);
+    const postgresPort = await findFreeTcpPort();
+    const sftpPort = await findFreeTcpPort();
+    const prepared = await prepareDevelopmentEnvironment({ postgresPort, sftpPort, runtimeNamespace: project, isolatedRoot: stageRoot, execute: (command, args) => run(command, args).stdout.trim() });
+    const actualPostgresPassword = decodeURIComponent(new URL(prepared.environment.DATABASE_URL).password);
+    const secretNames = ["database_password", "owner_access_key", "auth_pepper", "drop_pepper", "share_pepper", "device_pepper", "backup_pepper", "laboratory_pepper", "gryphon_service_token", "kernel_service_token", "neptune_control_token", "neptune_export_token"];
+    for (const [index, name] of secretNames.entries()) {
+        const value = name === "database_password" ? actualPostgresPassword : randomBytes(48).toString("base64url") + String(index);
+        knownSecrets.add(value);
+        await fs.writeFile(path.join(secretRoot, name), `${value}\n`, { encoding: "utf8", mode: 0o600 });
+    }
+    await fs.copyFile(prepared.environment.STORAGE_PRIVATE_KEY_FILE, path.join(secretRoot, "storage_private_key"));
+    await fs.chmod(path.join(secretRoot, "storage_private_key"), 0o600);
+    const ownerAccessKey = (await fs.readFile(path.join(secretRoot, "owner_access_key"), "utf8")).trim();
+    const kernelServiceToken = (await fs.readFile(path.join(secretRoot, "kernel_service_token"), "utf8")).trim();
+    const appRef = offlineRegistryFixture("saturn-app");
+    const webRef = offlineRegistryFixture("saturn-web");
+    report.packaging = { scope: "OFFLINE_VALIDATOR_SIGNATURE_SBOM_FIXTURES", runnableRegistryImages: false, syntheticHostHelpers: true, appRef, webRef };
+    const baseSecrets = { DATABASE_PASSWORD_FILE: "/run/secrets/database_password", OWNER_BOOTSTRAP_TOKEN_FILE: "/run/secrets/owner_access_key", AUTH_PEPPER_FILE: "/run/secrets/auth_pepper", DROP_PEPPER_FILE: "/run/secrets/drop_pepper", SHARE_PEPPER_FILE: "/run/secrets/share_pepper", DEVICE_PEPPER_FILE: "/run/secrets/device_pepper", BACKUP_PEPPER_FILE: "/run/secrets/backup_pepper", LABORATORY_PEPPER_FILE: "/run/secrets/laboratory_pepper", GRYPHON_SERVICE_TOKEN_FILE: "/run/secrets/gryphon_service_token", STORAGE_PRIVATE_KEY_FILE: "/run/secrets/storage_private_key", STORAGE_PASSWORD_FILE: "" };
+    const policyEnvironment = { NODE_ENV: "production", PUBLIC_ORIGIN: "https://vault.stage13.test", API_HOST: "0.0.0.0", API_TRUSTED_PROXIES: "172.31.250.1", WORKER_HOST: "0.0.0.0", DATABASE_URL: "postgres://vault@postgres/vault", KERNEL_SERVICE_TOKEN: kernelServiceToken, ...baseSecrets, STORAGE_HOST: "prod.storage.stage13.test", STORAGE_PORT: "22", STORAGE_USER: "stage13-prod", STORAGE_ROOT: ".", STORAGE_HOST_FINGERPRINT: `SHA256:${"A".repeat(43)}`, STORAGE_AUTH_MODE: "private_key_file", LABORATORY_PUBLIC_ENABLED: "false", GRYPHON_ENABLED: "true", VAULT_VALIDATION_PROFILE: "verification", VAULT_DOMAIN: "vault.stage13.test", SATURN_API_BIND_ADDRESS: "127.0.0.1", SATURN_API_BIND_PORT: "3000", SATURN_WEB_BIND_ADDRESS: "127.0.0.1", SATURN_WEB_BIND_PORT: "8080", SATURN_INGRESS_SUBNET: "172.31.250.0/29", SATURN_WEB_CONTAINER_IP: "172.31.250.2", SATURN_API_CONTAINER_IP: "172.31.250.3", VAULT_DEPLOYMENT_ENVIRONMENT: "production", VAULT_STORAGE_ENVIRONMENT: "production", VAULT_SECRET_ROOT: secretRoot, VAULT_RPO_SECONDS: "21600", VAULT_RTO_SECONDS: "7200", VAULT_PUBLIC_LABORATORY_DECISION: "private", VAULT_RELEASE_VERSION: version, VAULT_APP_IMAGE: appRef, VAULT_WEB_IMAGE: webRef, UPDATER_SOCKET_DIR: path.join(stageRoot, "updater"), UPDATER_SOCKET_GID: "1001", NEPTUNE_SOCKET_DIR: path.join(stageRoot, "neptune"), NEPTUNE_SOCKET_GID: "1002", GRYPHON_SOCKET_DIR: path.join(stageRoot, "gryphon"), GRYPHON_CLIENTS_GID: "1003", GRYPHON_SERVICE_TOKEN_HOST_FILE: path.join(secretRoot, "gryphon_service_token"), NEPTUNE_CONTROL_TOKEN_HOST_FILE: path.join(secretRoot, "neptune_control_token"), NEPTUNE_EXPORT_TOKEN_HOST_FILE: path.join(secretRoot, "neptune_export_token") };
+    await writeEnvironment(policyFile, policyEnvironment);
+    run(process.execPath, [path.join(root, "scripts", "validate-production.mjs"), policyFile]);
+    const deployment = await import(pathToFileURL(path.join(root, "packages", "deployment", "dist", "index.js")));
+    const parsedPolicy = deployment.validateProductionDeployment(policyEnvironment, root);
+    let mutableRejected = false;
+    try {
+        deployment.validateProductionDeployment({ ...policyEnvironment, VAULT_APP_IMAGE: "registry.stage13.test/vault/app:latest" }, root);
+    }
+    catch {
+        mutableRejected = true;
+    }
+    let publicBindRejected = false;
+    try {
+        deployment.validateProductionDeployment({ ...policyEnvironment, SATURN_API_BIND_ADDRESS: "0.0.0.0" }, root);
+    }
+    catch {
+        publicBindRejected = true;
+    }
+    if (!mutableRejected || !publicBindRejected)
+        throw new Error("Production config negative policy failed");
+    pass("fail-closed production configuration", { https: true, keyOnly: true, fileSecrets: parsedPolicy.secretFiles, immutableImages: 2, loopbackListeners: parsedPolicy.loopbackListeners, publicBindRejected, devRuntimeMetadataRequired: false, secondCopyRuntimeGate: false, rpoSeconds: parsedPolicy.rpoSeconds, rtoSeconds: parsedPolicy.rtoSeconds, laboratoryDecision: "private" });
+    await writeEnvironment(prodEnvPath, policyEnvironment);
+    const composeJson = JSON.parse(run(docker, ["compose", "--env-file", prodEnvPath, "-f", "compose.production.yaml", "config", "--format", "json"], { ...process.env, VAULT_RUNTIME_ENV_FILE: prodEnvPath }).stdout);
+    const services = composeJson.services;
+    const allowedLoopback = (name, port) => name === "api" && port.host_ip === "127.0.0.1" && Number(port.published) === 3000 && Number(port.target) === 3000 || name === "web" && port.host_ip === "127.0.0.1" && Number(port.published) === 8080 && Number(port.target) === 8080;
+    const unexpectedPorts = Object.entries(services).flatMap(([name, value]) => (value.ports ?? []).filter((port) => !allowedLoopback(name, port)));
+    const retiredProxy = ["cad", "dy"].join("");
+    const bundledProxy = run("git", ["grep", "-n", "-i", retiredProxy, "--", ":(exclude)pnpm-lock.yaml"], process.env, true);
+    if (!composeJson.networks.backend.internal || !composeJson.networks.ingress.internal || unexpectedPorts.length > 0 || services.edge !== undefined || !services.api.read_only || !services.worker.read_only || !services.web.read_only || Object.keys(composeJson.secrets).length !== 10 || bundledProxy.status === 0)
+        throw new Error(`Production Compose/ingress hardening contract failed: ${bundledProxy.stdout.trim()}`);
+    const verifyWorkflow = await fs.readFile(path.join(root, ".github", "workflows", "verify.yml"), "utf8");
+    const releaseWorkflow = await fs.readFile(path.join(root, ".github", "workflows", "release.yml"), "utf8");
+    const actionReferences = [...`${verifyWorkflow}\n${releaseWorkflow}`.matchAll(/\buses:\s+[^\s@]+@([^\s#]+)/g)].map((match) => match[1]);
+    if (actionReferences.length < 10 || actionReferences.some((reference) => !/[a-f0-9]{40}/.test(reference)) || !/pull_request:/.test(verifyWorkflow) || !/pnpm verify:stage:13/.test(verifyWorkflow) || !/push:\s*\n\s*tags:/m.test(releaseWorkflow) || /workflow_dispatch:|pull_request:|\n\s*branches:/.test(releaseWorkflow) || !/VAULT_STAGE13_PREBUILT=true/.test(releaseWorkflow) || !(/provenance: mode=max/.test(releaseWorkflow) && /sbom: true/.test(releaseWorkflow)))
+        throw new Error("Pinned CI/release workflow contract failed");
+    pass("production topology and shell contracts", { embeddedIngress: [], operatorIngress: "server-nginx", loopbackServices: ["api", "web"], loopbackPorts: [3000, 8080], backendInternal: true, ingressInternal: true, unexpectedApplicationPorts: 0, secrets: 10, readOnly: ["api", "worker", "web"], shellSyntax: "pass", nginxSyntax: "pass", ciActionPins: actionReferences.length, releaseTrigger: "tag-only", buildOnceDigestTest: true, ociProvenance: true, ociSbom: true });
+    const sourceFiles = [...new Set(run("git", ["ls-files", "--cached", "--others", "--exclude-standard", "-z"]).stdout.split("\0").filter(Boolean))].filter((file) => !file.toLowerCase().includes(retiredProxy)).sort();
+    const sourceDigest = sha(Buffer.concat(await Promise.all(sourceFiles.map(async (file) => {
+        let content;
+        try {
+            content = Buffer.concat([Buffer.from("file\0"), await fs.readFile(path.join(root, file))]);
+        }
+        catch (error) {
+            if (error.code !== "ENOENT")
+                throw error;
+            content = Buffer.from("deleted\0");
+        }
+        return Buffer.concat([Buffer.from(file), Buffer.from([0]), content, Buffer.from([0])]);
+    }))));
+    const { privateKey, publicKey } = generateKeyPairSync("ed25519");
+    const privateKeyPath = path.join(stageRoot, "release-private.pem");
+    const publicKeyPath = path.join(stageRoot, "release-public.pem");
+    await fs.writeFile(privateKeyPath, privateKey.export({ type: "pkcs8", format: "pem" }), { mode: 0o600 });
+    await fs.writeFile(publicKeyPath, publicKey.export({ type: "spki", format: "pem" }), { mode: 0o600 });
+    knownSecrets.add((await fs.readFile(privateKeyPath, "utf8")).trim());
+    const updaterBundle = path.join(stageRoot, "updater-bundle");
+    await fs.mkdir(path.join(updaterBundle, "systemd"), { recursive: true });
+    await fs.mkdir(path.join(updaterBundle, "release-trust"), { recursive: true });
+    await fs.writeFile(path.join(updaterBundle, "install.sh"), "#!/bin/sh\n", { mode: 0o700 });
+    await fs.writeFile(path.join(updaterBundle, "updater-linux-amd64"), "stage-13-updater-fixture\n", { mode: 0o700 });
+    await fs.writeFile(path.join(updaterBundle, "systemd", "updater.service"), "[Service]\n", { mode: 0o600 });
+    const updaterPublicKey = createPublicKey(updaterSigningKey).export({ type: "spki", format: "pem" });
+    for (const service of ["updater", "neptune", "gryphon"])
+        await fs.writeFile(path.join(updaterBundle, "release-trust", `${service}.pem`), updaterPublicKey, { mode: 0o600 });
+    const helperFixture = path.join(stageRoot, "host-helpers");
+    for (const helper of ["neptune", "gryphon"]) {
+        const helperDir = path.join(helperFixture, helper);
+        await fs.mkdir(helperDir, { recursive: true });
+        await fs.writeFile(path.join(helperDir, `${helper}-linux-release-linux-x64.json`), "{}\n");
+        await fs.writeFile(path.join(helperDir, `${helper}-linux-release-linux-x64.json.sig.json`), "{}\n");
+        await fs.writeFile(path.join(helperDir, `${helper}-linux-fixture.tar.gz`), "signed helper fixture\n");
+    }
+    const updaterVersion = (await fs.readFile(path.join(root, ".release", "updater.version"), "utf8")).trim();
+    const releaseEnvironment = { ...process.env, SATURN_BUNDLE_URL: `https://releases.stage13.test/saturn-${version}.zip`, UPDATER_BUNDLE_DIR: updaterBundle, UPDATER_BUNDLE_VERSION: updaterVersion, HOST_HELPER_BUNDLE_DIR: helperFixture };
+    run(process.execPath, [path.join(root, "scripts", "release-bundle.mjs"), "build", version, candidateRevision, appRef, webRef, privateKeyPath, releaseRoot], releaseEnvironment);
+    const bundlePath = path.join(releaseRoot, `saturn-${version}.zip`);
+    const sbomPath = path.join(releaseRoot, `saturn-${version}.sbom.json`);
+    const manifestPath = path.join(releaseRoot, "release-manifest.json");
+    run(process.execPath, [path.join(root, "scripts", "release-bundle.mjs"), "verify", manifestPath, publicKeyPath, bundlePath, sbomPath]);
+    const bundle = await fs.readFile(bundlePath);
+    for (const required of ["updater/install.sh", "updater/updater-linux-amd64", "updater/systemd/updater.service", "updater/release-trust/updater.pem", "updater/release-trust/neptune.pem", "updater/release-trust/gryphon.pem", "helpers/neptune/neptune-linux-release-linux-x64.json.sig.json", "helpers/gryphon/gryphon-linux-release-linux-x64.json.sig.json", "infra/production/nginx.saturn.conf.example"])
+        if (!bundle.includes(Buffer.from(required)))
+            throw new Error(`Signed release bundle is missing ${required}`);
+    const tampered = path.join(stageRoot, "tampered.zip");
+    await fs.writeFile(tampered, Buffer.concat([bundle, Buffer.from("tamper")]), { mode: 0o600 });
+    const tamperResult = run(process.execPath, [path.join(root, "scripts", "release-bundle.mjs"), "verify", manifestPath, publicKeyPath, tampered, sbomPath], process.env, true);
+    if (tamperResult.status === 0)
+        throw new Error("Tampered signed release was accepted");
+    const signed = JSON.parse(await fs.readFile(manifestPath, "utf8"));
+    pass("offline signed release format, pinned updater contract and SBOM", { version: signed.payload.version, sourceRevision: candidateRevision, sourceDigest, scope: "synthetic helper/signature fixture; no registry install", appImage: appRef, webImage: webRef, bundleSha256: signed.payload.bundle.sha256, sbomSha256: signed.payload.sbom.sha256, updaterVersion, serverNginxConfig: true, tamperRejected: true });
+    startDependencies(owner, root, prepared, { network, postgres, sftp, dataVolume: pgDataVolume, subnet: input.internalSubnet });
+    run(docker, ["volume", "create", secretVolume]);
+    run(docker, ["volume", "create", postgresSecretVolume]);
+    run(docker, ["run", "--rm", "-v", mount(secretRoot, "/source"), "-v", `${secretVolume}:/target`, `alpine:3.24`, `sh`, `-c`, `cp /source/* /target/ && chown 1000:1000 /target/* && chmod 0400 /target/*`]);
+    run(docker, ["run", "--rm", "-v", mount(secretRoot, "/source"), "-v", `${postgresSecretVolume}:/target`, `alpine:3.24`, `sh`, `-c`, `cp /source/database_password /target/database_password && chown 0:0 /target/database_password && chmod 0444 /target/database_password`]);
+    const runtimeEnvironment = { ...prepared.environment, NODE_ENV: "production", PUBLIC_ORIGIN: publicOrigin, API_HOST: "0.0.0.0", API_PORT: "3000", API_TRUSTED_PROXIES: "172.16.0.0/12,192.168.0.0/16", WORKER_HOST: "0.0.0.0", WORKER_PORT: "3001", DATABASE_URL: "postgres://vault@postgres:5432/vault", ...baseSecrets, STORAGE_HOST: "sftp", STORAGE_PORT: "22", STORAGE_USER: "vault", STORAGE_ROOT: "gateway", STORAGE_HOST_FINGERPRINT: prepared.environment.STORAGE_HOST_FINGERPRINT, STORAGE_AUTH_MODE: "private_key_file", STORAGE_RUNTIME_CONFIG_DIR: "/tmp/storage-runtime", GRYPHON_ENABLED: "false", LABORATORY_PUBLIC_ENABLED: "false", VAULT_VALIDATION_PROFILE: "verification", VAULT_STORAGE_ENVIRONMENT: "production", DROP_BUFFER_DIRECTORY: "/var/lib/vault/drop-buffer", RECOVERY_SPOOL_DIR: "/var/lib/vault/spool", RECOVERY_ARCHIVE_DIR: "/var/lib/vault/recovery", PG_DUMP_BIN: "/usr/bin/pg_dump", PG_RESTORE_BIN: "/usr/bin/pg_restore", LOG_LEVEL: "info" };
+    await writeEnvironment(runtimeFile, runtimeEnvironment);
+    const common = ["--network", network, "--env-file", runtimeFile, "-v", `${secretVolume}:/run/secrets:ro`, "--read-only", "--tmpfs", "/tmp:rw,noexec,nosuid,size=64m,mode=1777", "--security-opt", "no-new-privileges", "--cap-drop", "ALL"];
+    run(docker, ["run", "--rm", ...common, appImage, "node", "/app/scripts/migrate-runtime.mjs"]);
+    const bootstrapResult = run(docker, ["run", "--rm", ...common, appImage, "node", "/app/scripts/storage-bootstrap.mjs"]);
+    const smokeResult = run(docker, ["run", "--rm", ...common, appImage, "node", "/app/scripts/storage-smoke.mjs"]);
+    const bootstrap = JSON.parse(bootstrapResult.stdout.trim());
+    const smoke = JSON.parse(smokeResult.stdout.trim());
+    const expectedBusinessRoots = ["# drop point", "# laboratory", "# sync inner services", "# mastermind", "# volt", "# sync windows", "# sync outdoor connections", "# references"];
+    const layout = bootstrap.layout;
+    const businessRootsExact = JSON.stringify(layout?.businessRoots) === JSON.stringify(expectedBusinessRoots);
+    if (bootstrap.state !== "ready" || layout?.state !== "ready" || layout?.version !== 3 || !businessRootsExact || layout?.systemRoot !== "_system" || !smoke.deleted)
+        throw new Error("Production storage bootstrap/smoke failed");
+    pass("empty production storage bootstrap and exact cleanup", { businessRoots: layout.businessRoots, systemRoot: layout.systemRoot, created: layout.actions.filter((action) => action.startsWith("mkdir:")).length, smokeBytes: smoke.bytes, sha256: smoke.sha256, rangeBytes: smoke.rangeBytes, deleted: true });
+    run(docker, ["run", "-d", "--name", worker, ...common, "--tmpfs", "/var/lib/vault:rw,uid=1000,gid=1000,mode=700", appImage, "node", "/app/worker/dist/main.js"]);
+    await waitExec(worker, "http://127.0.0.1:3001/health/ready");
+    run(docker, ["run", "-d", "--name", apiContainer, ...common, "--tmpfs", "/var/lib/vault:rw,uid=1000,gid=1000,mode=700", appImage, "node", "/app/api/dist/main.js"]);
+    await waitExec(apiContainer, "http://127.0.0.1:3000/health/ready");
+    run(docker, ["run", "-d", "--name", webContainer, "--network", network, "--read-only", "--tmpfs", "/tmp:rw,noexec,nosuid,size=16m,mode=1777", "--security-opt", "no-new-privileges", "--cap-drop", "ALL", webImage]);
+    await waitExec(webContainer, "http://127.0.0.1:8080/health/live");
+    const nginxSource = await fs.readFile(path.join(root, "infra", "production", "nginx.saturn.conf.example"), "utf8");
+    const nginxTest = nginxSource.replaceAll("drive.replace-me.example", "localhost saturn.stage13.test").replace("server 127.0.0.1:8080;", `server ${webContainer}:8080;`).replace("server 127.0.0.1:3000;", `server ${apiContainer}:3000;`).replaceAll("allow 127.0.0.1;", `allow 127.0.0.1;\n        allow 10.0.0.0/8;\n        allow 172.16.0.0/12;\n        allow 192.168.0.0/16;\n        allow ${outsideGateway};`);
+    await fs.writeFile(nginxRuntimeConfig, nginxTest, { encoding: "utf8", mode: 0o600 });
+    run(docker, ["run", "-d", "--name", ingress, "--network", network, "-p", `127.0.0.1:${ingressPort}:443`, "-v", mount(nginxRuntimeConfig, "/etc/nginx/conf.d/default.conf"), "-v", mount(tlsRoot, "/etc/nginx/tls"), nginxImage]);
+    run(docker, ["network", "create", "--subnet", outsideSubnet, outsideNetwork]);
+    run(docker, ["network", "connect", "--ip", outsideIngressIp, "--alias", "saturn.stage13.test", outsideNetwork, ingress]);
+    await waitFor(`${publicOrigin}/health/ready`);
+    const jar = new Map();
+    const login = await gateway("/api/v1/auth/login", { method: "POST", jar, json: { accessKey: ownerAccessKey } });
+    if (login.status !== 201)
+        throw new Error(`Production owner login failed ${String(login.status)}`);
+    const payload = randomBytes(2 * 1024 * 1024 + 31);
+    const resource = await upload(jar, "00000000-0000-7000-8000-000000000004", "production-smoke.bin", payload);
+    const metadata = await gateway(`/api/v1/resources/${resource.id}`, { jar });
+    const range = await gateway(`/api/v1/files/${resource.id}/content`, { jar, headers: { Range: "bytes=131-4226" } });
+    const downloaded = await gateway(`/api/v1/files/${resource.id}/content`, { jar });
+    if (metadata.status !== 200 || range.status !== 206 || !Buffer.from(await range.arrayBuffer()).equals(payload.subarray(131, 4227)) || sha(Buffer.from(await downloaded.arrayBuffer())) !== sha(payload))
+        throw new Error("Production Gateway read/Range/checksum failed");
+    const trash = await gateway(`/api/v1/resources/${resource.id}`, { method: "DELETE", jar, headers: { "Idempotency-Key": `stage13-${randomUUID()}` } });
+    if (trash.status !== 200)
+        throw new Error("Production Gateway cleanup transition failed");
+    pass("production HTTPS Gateway functional smoke through server Nginx", { tls: true, ingress: "nginx", login: 201, uploadBytes: payload.length, metadata: 200, range: 206, sha256: sha(payload), trash: 200, storageCredentialsInClient: false });
+    const reauth = await gateway("/api/v1/auth/reauthenticate", { method: "POST", jar, json: { accessKey: ownerAccessKey } });
+    if (reauth.status !== 201)
+        throw new Error(`Production owner reauthentication failed ${String(reauth.status)}`);
+    const deviceResponse = await gateway("/api/v1/devices", { method: "POST", jar, json: { name: "Stage 13 large WebDAV PUT", scopeIds: ["00000000-0000-7000-8000-000000000004"], rights: { read: true, write: true, move: true, delete: true } } });
+    if (deviceResponse.status !== 201)
+        throw new Error(`Production device creation failed ${String(deviceResponse.status)} ${await deviceResponse.text()}`);
+    const device = await json(deviceResponse);
+    knownSecrets.add(device.token);
+    const davAuthorization = basicDevice(device.token);
+    const davPayload = randomBytes(17 * 1024 * 1024 + 4096);
+    const davPath = `/dav/sync/stage13-large-${randomUUID()}.bin`;
+    const davHeaders = { Authorization: davAuthorization, "Content-Type": "application/octet-stream", "Content-Length": String(davPayload.length) };
+    const davPut = await gateway(davPath, { method: "PUT", headers: davHeaders, body: davPayload });
+    const davGet = await gateway(davPath, { headers: { Authorization: davAuthorization } });
+    const davDownloaded = Buffer.from(await davGet.arrayBuffer());
+    const davDelete = await gateway(davPath, { method: "DELETE", headers: { Authorization: davAuthorization } });
+    if (davPut.status !== 201 || davGet.status !== 200 || !davDownloaded.equals(davPayload) || davDelete.status !== 204)
+        throw new Error(`Large WebDAV PUT through Nginx failed: put=${String(davPut.status)} get=${String(davGet.status)} bytes=${String(davDownloaded.length)} delete=${String(davDelete.status)}`);
+    pass("server Nginx streams WebDAV PUT above global body limit", { globalBodyLimitMiB: 16, webdavBodyLimit: "Saturn", uploadBytes: davPayload.length, put: 201, get: 200, sha256: sha(davDownloaded), delete: 204 });
+    const rootResponse = await gateway("/");
+    const unknown = await gateway("/unknown-probe-stage13");
+    const envProbe = await gateway("/.env");
+    const mapProbe = await gateway("/assets/index.js.map");
+    const robots = await gateway("/robots.txt");
+    const anonymous = await gateway(`/api/v1/resources/${resource.id}`);
+    const rejectionEvidence = await proveIngressRejection({ port: ingressPort, readLogs: async () => { const value = run(docker, ["logs", ingress]); return `${value.stdout}\n${value.stderr}`; } });
+    const outsideProbeScript = `Promise.all(['/','/api/v1/auth/session','/health/live'].map(path=>fetch('https://saturn.stage13.test'+path,{headers:{'X-Forwarded-For':'127.0.0.1','X-Real-IP':'127.0.0.1'}}))).then(responses=>{const statuses=responses.map(response=>response.status);console.log(JSON.stringify(statuses));process.exit(statuses[0]===200&&statuses[1]===401&&statuses[2]===403?0:1)}).catch(error=>{console.error(error);process.exit(2)})`;
+    const outsideProbe = run(docker, ["run", "--rm", "--network", outsideNetwork, "--ip", outsideProbeIp, "-v", mount(caFile, "/stage13/ca.crt"), "-e", "NODE_EXTRA_CA_CERTS=/stage13/ca.crt", nodeImage, "node", "-e", outsideProbeScript]);
+    const outsideStatuses = JSON.parse(outsideProbe.stdout.trim());
+    const ports = { api: run(docker, ["port", apiContainer]).stdout.trim(), web: run(docker, ["port", webContainer]).stdout.trim(), worker: run(docker, ["port", worker]).stdout.trim(), postgres: run(docker, ["port", postgres]).stdout.trim(), nginx: run(docker, ["port", ingress]).stdout.trim() };
+    const postgresBindings = ports.postgres.split(/\r?\n/).filter(Boolean);
+    const databaseLoopback = postgresBindings.length > 0 && postgresBindings.every((binding) => /-> 127\.0\.0\.1:\d+$/.test(binding));
+    const exposure = { root: rootResponse.status, unknown: unknown.status, env: envProbe.status, sourceMap: mapProbe.status, anonymous: anonymous.status, robots: robots.status, robotsTag: robots.headers.get("x-robots-tag"), ports, databaseLoopback, outsideStatuses };
+    if (exposure.root !== 200 || exposure.unknown !== 404 || exposure.env !== 404 || exposure.sourceMap !== 404 || exposure.anonymous !== 401 || !exposure.robotsTag?.includes("noindex") || ports.api || ports.web || ports.worker || !databaseLoopback || !ports.nginx.includes(`127.0.0.1:${ingressPort}`) || outsideStatuses[0] !== 200 || outsideStatuses[1] !== 401 || outsideStatuses[2] !== 403)
+        throw new Error(`Server Nginx exposure policy failed: ${JSON.stringify(exposure)}`);
+    const browserImage = input.browserImage ?? process.env.VAULT_STAGE13_BROWSER_IMAGE;
+    let browserEvidence;
+    if (browserImage) {
+        if (!/^sha256:[a-f0-9]{64}$/.test(browserImage) && !/@sha256:[a-f0-9]{64}$/.test(browserImage)) throw new Error("Browser tool input must be an exact image ID/digest");
+        const result = run(docker, ["run", "--rm", "--network", outsideNetwork, "--tmpfs", "/tmp:rw,nosuid,size=256m,mode=1777", "--read-only", "--security-opt", "no-new-privileges", "--cap-drop", "ALL", "-v", mount(path.join(root, "scripts", "stage13-browser.mjs"), "/app/stage13-browser.mjs"), "-v", mount(path.join(root, "scripts", "stage13-trust.mjs"), "/app/stage13-trust.mjs"), "-v", mount(path.join(root, "scripts", "stage13-command.mjs"), "/app/stage13-command.mjs"), "-v", mount(caFile, "/stage13/ca.crt"), "-e", "STAGE13_BROWSER_CA=/stage13/ca.crt", "-e", "STAGE13_BROWSER_ORIGIN=https://saturn.stage13.test", browserImage, "node", "/app/stage13-browser.mjs"]);
+        browserEvidence = JSON.parse(result.stdout.trim());
+    } else browserEvidence = JSON.parse(run(process.execPath, [path.join(root, "scripts", "stage13-browser.mjs")], { ...process.env, STAGE13_BROWSER_ROOT: stageRoot, STAGE13_BROWSER_ORIGIN: publicOrigin, STAGE13_BROWSER_CA: caFile }).stdout.trim());
+    report.tls.rejectionEvidence = rejectionEvidence; report.browser = browserEvidence;
+    pass("server Nginx exposure and probe resistance", { serverNginxPorts: [443], saturnPublicPorts: [], apiPublished: false, webPublished: false, workerPublished: false, databaseLoopbackFixture: true, unknownPath: 404, unknownHost: "rejected", unknownSni: "rejected", publicRootOutside: outsideStatuses[0], anonymousSessionOutside: outsideStatuses[1], spoofedHealthOutside: outsideStatuses[2], env: 404, sourceMap: 404, anonymous: 401, robots: "deny", browserStorage: 0, loginBrandImage: "decoded" });
+    run(docker, ["stop", sftp]);
+    await waitFor(`${publicOrigin}/health/ready`, 503);
+    if ((await gateway("/health/live")).status !== 200)
+        throw new Error("Liveness failed during storage outage");
+    run(docker, ["start", sftp]);
+    await waitFor(`${publicOrigin}/health/ready`, 200);
+    run(docker, ["pause", postgres]);
+    await waitFor(`${publicOrigin}/health/ready`, 503);
+    run(docker, ["unpause", postgres]);
+    await waitFor(`${publicOrigin}/health/ready`, 200, 120000);
+    const badEnvironment = { ...runtimeEnvironment, STORAGE_HOST_FINGERPRINT: `SHA256:${"Z".repeat(43)}` };
+    const badFile = path.join(stageRoot, "bad.env");
+    await writeEnvironment(badFile, badEnvironment);
+    run(docker, ["run", "-d", "--name", badApi, "--network", network, "--env-file", badFile, "-v", `${secretVolume}:/run/secrets:ro`, "--read-only", "--tmpfs", "/tmp:rw,noexec,nosuid,size=64m,mode=1777", "--tmpfs", "/var/lib/vault:rw,uid=1000,gid=1000,mode=700", "--security-opt", "no-new-privileges", "--cap-drop", "ALL", appImage, "node", "/app/api/dist/main.js"]);
+    const badCandidateRejection = await waitRejectedCandidate(badApi);
+    if ((await gateway("/health/ready")).status !== 200)
+        throw new Error("Bad candidate affected live server Nginx ingress");
+    owner.stop(badApi);
+    pass("failure injection and pre-switch rollback", { storageOutage: { ready: 503, live: 200, recovered: 200 }, databaseOutage: { injection: "process_pause", ready: 503, recovered: 200, dataPreserved: true }, badCandidate: { rejected: true, ...badCandidateRejection }, liveReleaseStayed: 200, trafficSwitch: false });
+    const drStarted = Date.now();
+    const dump = runBinary(docker, ["exec", postgres, "pg_dump", "-U", "vault", "-d", "vault", "-Fc", "--no-owner", "--no-acl"]);
+    run(docker, ["volume", "create", restoreDataVolume]);
+    run(docker, ["run", "-d", "--name", restoreDb, "-v", `${restoreDataVolume}:/var/lib/postgresql`, "--network", network, "-e", "POSTGRES_DB=vault_restore", "-e", "POSTGRES_USER=vault", "-e", "POSTGRES_PASSWORD_FILE=/run/secrets/database_password", "-v", `${postgresSecretVolume}:/run/secrets:ro`, "postgres:18.1-alpine@sha256:aa6eb304ddb6dd26df23d05db4e5cb05af8951cda3e0dc57731b771e0ef4ab29"]);
+    const restoreDeadline = Date.now() + 60000;
+    let restoreReady = false;
+    while (Date.now() < restoreDeadline) {
+        const logs = run(docker, ["logs", restoreDb], process.env, true);
+        const initializationComplete = `${logs.stdout ?? ""}\n${logs.stderr ?? ""}`.includes("PostgreSQL init process complete; ready for start up.");
+        if (initializationComplete && run(docker, ["exec", restoreDb, "pg_isready", "-U", "vault", "-d", "vault_restore"], process.env, true).status === 0) {
+            restoreReady = true;
+            break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+    if (!restoreReady) {
+        const logs = run(docker, ["logs", "--tail", "100", restoreDb], process.env, true);
+        throw new Error(`Restore database did not become ready: ${`${logs.stdout ?? ""}\n${logs.stderr ?? ""}`.trim().slice(-4000)}`);
+    }
+    runBinary(docker, ["exec", "-i", restoreDb, "pg_restore", "-U", "vault", "-d", "vault_restore", "--no-owner", "--no-acl"], dump);
+    const sourceCounts = run(docker, ["exec", postgres, "psql", "-U", "vault", "-d", "vault", "-Atc", "SELECT count(*) FROM resources; SELECT count(*) FROM audit_events;"]).stdout.trim();
+    const restoredCounts = run(docker, ["exec", restoreDb, "psql", "-U", "vault", "-d", "vault_restore", "-Atc", "SELECT count(*) FROM resources; SELECT count(*) FROM audit_events;"]).stdout.trim();
+    if (sourceCounts !== restoredCounts)
+        throw new Error("Clean database restore comparison failed");
+    const recoverySeconds = (Date.now() - drStarted) / 1000;
+    owner.stop(restoreDb);
+    pass("clean-host database recovery drill", { dumpBytes: dump.length, countsExact: true, elapsedSeconds: recoverySeconds, rpoTargetSeconds: 21600, rtoTargetSeconds: 7200, rtoMet: recoverySeconds < 7200 });
+    const hostEnvironment = { ...runtimeEnvironment, DATABASE_URL: `postgres://vault@127.0.0.1:${prepared.environment.DEV_POSTGRES_BIND_PORT}/vault`, DATABASE_PASSWORD_FILE: path.join(secretRoot, "database_password"), OWNER_BOOTSTRAP_TOKEN_FILE: path.join(secretRoot, "owner_access_key"), AUTH_PEPPER_FILE: path.join(secretRoot, "auth_pepper"), DROP_PEPPER_FILE: path.join(secretRoot, "drop_pepper"), SHARE_PEPPER_FILE: path.join(secretRoot, "share_pepper"), DEVICE_PEPPER_FILE: path.join(secretRoot, "device_pepper"), BACKUP_PEPPER_FILE: path.join(secretRoot, "backup_pepper"), LABORATORY_PEPPER_FILE: path.join(secretRoot, "laboratory_pepper"), STORAGE_HOST: "127.0.0.1", STORAGE_PORT: prepared.environment.DEV_SFTP_BIND_PORT, STORAGE_PRIVATE_KEY_FILE: path.join(secretRoot, "storage_private_key"), VAULT_EXIT_QUIESCED: "true", VAULT_EXIT_MAX_BYTES: String(512 * 1024 * 1024) };
+    const exitResult = run(process.execPath, [path.join(root, "scripts", "storage-exit.mjs"), exitRoot, exitManifest], { ...process.env, ...hostEnvironment });
+    const exitSummary = JSON.parse(exitResult.stdout.trim());
+    const exitEvidence = JSON.parse(await fs.readFile(exitManifest, "utf8"));
+    if (exitSummary.files < 1 || exitEvidence.files.some((item) => !/^[a-f0-9]{64}$/.test(item.sha256)))
+        throw new Error("Alternative backend exit evidence failed");
+    pass("alternative StorageAdapter provider exit", { files: exitSummary.files, totalBytes: exitSummary.totalBytes, digestsExact: true, quiesceRequired: true, stableRelativePaths: true });
+    const runtimeLogs = [apiContainer, worker, webContainer, ingress].map((name) => { const output = run(docker, ["logs", name]); return `${output.stdout}\n${output.stderr}`; }).join("\n");
+    const artifactFiles = [bundlePath, sbomPath, manifestPath, reportPath].filter((file) => file !== reportPath);
+    const secrets = [...knownSecrets];
+    for (const secret of secrets)
+        if (secret.length >= 8 && runtimeLogs.includes(secret))
+            throw new Error("Known secret found in production-like runtime logs");
+    await scanBytes(artifactFiles, secrets);
+    const productionFiles = await imageFiles(appImage, "/app");
+    if (productionFiles.some(forbidden))
+        throw new Error("Final production image rescan failed");
+    pass("final runtime, release and secret scans", { knownValues: secrets.length, runtimeLogBytes: Buffer.byteLength(runtimeLogs), releaseArtifacts: artifactFiles.length, imageFiles: productionFiles.length, findings: 0 });
+    report.runtimeChecksPassed = true;
+}
+catch (error) {
+    report.error = error instanceof Error ? error.message : String(error);
+    for (const secret of knownSecrets) if (secret.length >= 8) report.error = report.error.replaceAll(secret, "[REDACTED]");
+    throw new Error(report.error);
+}
+finally {
+    restoreTrust?.();
+    if (previousReleaseSigningKey === undefined) delete process.env.RELEASE_SIGNING_KEY; else process.env.RELEASE_SIGNING_KEY = previousReleaseSigningKey;
+    report.checksComplete = report.runtimeChecksPassed;
+    report.finishedAt = new Date().toISOString();
+    await fs.writeFile(ownedReportPath, JSON.stringify(report, null, 2) + "\n", { mode: 0o600 });
+    report.closure = owner.close(completedRuntimeGraph(report) && !owner.pending);
+    process.exitCode = finalizeStage13Report(report, executionMode);
+    report.privateEvidenceRetained = stageRoot;
+    report.resources = { engine: owner.engine, budgets: owner.budgets, manifest: owner.manifestPath, images: owner.images, objects: owner.objects,
+        operations: owner.commands.map((command) => ({ operation: command.operation ?? command.argv?.[0], executable: command.executable ? path.basename(command.executable) : "docker", exitCode: command.exitCode, signal: command.signal, errorCode: command.errorCode, actor: command.actor, supervisorEvidence: command.supervisorEvidence })) };
+    await fs.writeFile(ownedReportPath, JSON.stringify(report, null, 2) + "\n", { mode: 0o600 });
+    await fs.mkdir(path.dirname(reportPath), { recursive: true });
+    await fs.writeFile(reportPath, JSON.stringify(report, null, 2) + "\n", { mode: 0o600 });
+    if (completedRuntimeGraph(report) && report.closure.status === "CLOSED" && input.retainSuccessfulPrivateEvidence !== true) {
+        try { removeIsolation(isolation); report.privateEvidenceRetained = false; }
+        catch (error) { report.cleanupError = error.message; process.exitCode = finalizeStage13Report(report, executionMode); }
+        await fs.writeFile(reportPath, JSON.stringify(report, null, 2) + "\n", { mode: 0o600 });
+    }
+    knownSecrets.clear();
+}

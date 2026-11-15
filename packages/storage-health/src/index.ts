@@ -1,7 +1,7 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import fs from "node:fs/promises";
 import { Client, type ConnectConfig, type SFTPWrapper } from "ssh2";
-import type { SaturnConfig } from "@saturn/config";
+import { requireSftpStorage, type SaturnConfig, type SftpStorageConfig } from "@saturn/config";
 import type { HealthCheckResult } from "@saturn/contracts";
 import type { StorageAdapter } from "@saturn/storage";
 
@@ -54,7 +54,7 @@ async function closeClient(client: Client, timeoutMs = 250): Promise<void> {
   });
 }
 
-async function loadAuthentication(storage: SaturnConfig["storage"]): Promise<Pick<ConnectConfig, "password" | "privateKey">> {
+async function loadAuthentication(storage: SftpStorageConfig): Promise<Pick<ConnectConfig, "password" | "privateKey">> {
   if (storage.authMode === "password_file") {
     if (storage.passwordFile === undefined) throw new Error("Storage password file is not configured");
     const password = (await fs.readFile(storage.passwordFile, "utf8")).replace(/[\r\n]+$/, "");
@@ -66,10 +66,10 @@ async function loadAuthentication(storage: SaturnConfig["storage"]): Promise<Pic
 }
 
 export class SftpHealthProbe {
-  readonly #storage: SaturnConfig["storage"];
+  readonly #storage: SftpStorageConfig;
 
   constructor(storage: SaturnConfig["storage"]) {
-    this.#storage = storage;
+    this.#storage = requireSftpStorage(storage);
   }
 
   async check(): Promise<HealthCheckResult> {
@@ -120,6 +120,7 @@ export class AdapterStorageHealthProbe {
   async check(): Promise<HealthCheckResult> {
     const started = performance.now();
     try {
+      await this.#storage.assertReady?.();
       const root = await this.#storage.stat("");
       if (root.type !== "directory") throw new Error("storage_root_not_directory");
       return { state: "pass", latencyMs: performance.now() - started };

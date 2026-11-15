@@ -1,21 +1,36 @@
 import { randomUUID } from "node:crypto";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { Database as ArchiveDatabase } from "@saturn/database";
+import { checkpointReconciliation } from "../../protection/src/storage-catalog-checkpoint.fixture.js";
 import postgres from "postgres";
 import { expect, it } from "vitest";
 import { Database, migrate } from "./index.js";
 import { setTimeout as delay } from "node:timers/promises";
 
 const baseUrl = process.env.PIPELINE_TEST_DATABASE_URL;
+const evidence = process.env.SATURN_MAINTENANCE_EVIDENCE_DIR;
+
+async function save(scenario: string, name: string, proof: unknown) {
+  if (evidence === undefined) return;
+  const root = await fs.realpath(os.tmpdir());
+  if (!path.isAbsolute(evidence) || path.dirname(await fs.realpath(evidence)) !== root || !/^audit_[a-f0-9]{32}$/.test(name)) {
+    throw new Error("Maintenance evidence requires an owned test database and TEMP");
+  }
+  await fs.writeFile(path.join(evidence, scenario + ".json"), JSON.stringify({ scenario, name, proof }), { flag: "wx" });
+}
 
 it.skipIf(!baseUrl)("keeps short queries and transactions responsive while all filesystem admission slots are busy", async () => {
   if (!baseUrl) throw new Error("PIPELINE_TEST_DATABASE_URL is required");
   const name = `audit_${randomUUID().replaceAll("-", "")}`;
   const admin = postgres(baseUrl, { max: 1, onnotice: () => undefined });
-  let database: Database | undefined;
+  let database: Database | undefined, created = false;
   let release: () => void = () => undefined;
   const held = new Promise<void>(resolve => { release = resolve; });
   const pending: Promise<unknown>[] = [];
   try {
-    await admin.unsafe(`CREATE DATABASE "${name}"`);
+    await admin.unsafe(`CREATE DATABASE "${name}"`); created = true;
     const url = new URL(baseUrl); url.pathname = `/${name}`;
     database = new Database(url.toString(), { max: 1, maintenanceBarrier: true });
     const db = database;
@@ -26,15 +41,20 @@ it.skipIf(!baseUrl)("keeps short queries and transactions responsive while all f
       pending.push(db.withSharedMaintenance(async () => { started(); await held; await db.ping(); }));
     }
     await Promise.all(entered);
+    const started=performance.now();
     const queries = Promise.all([db.ping(), db.transaction(async sql => { await sql`SELECT 1`; })]);
     pending.push(queries);
     await Promise.race([queries, delay(1000).then(() => { throw new Error("Short queries waited for unrelated filesystem transfers"); })]);
+    await save("short-query", name, { sharedSlots: entered.length, queryMs: performance.now()-started });
   } finally {
     release();
     await Promise.allSettled(pending);
     await database?.close();
-    await admin.unsafe(`DROP DATABASE "${name}" WITH (FORCE)`);
-    await admin.end();
+    try {
+      if (created && evidence === undefined) await admin.unsafe(`DROP DATABASE "${name}"`);
+    } finally {
+      await admin.end();
+    }
   }
 }, 15_000);
 
@@ -44,14 +64,15 @@ it.skipIf(!baseUrl).each(["query", "transaction"] as const)("lets an admitted wr
   const admin = postgres(baseUrl, { max: 1, onnotice: () => undefined });
   let db: Database | undefined;
   let probe: ReturnType<typeof postgres> | undefined;
+  let created = false, completed = false;
+  let release: () => void = () => undefined;
   const pending: Promise<unknown>[] = [];
   try {
-    await admin.unsafe(`CREATE DATABASE "${name}"`);
+    await admin.unsafe(`CREATE DATABASE "${name}"`); created = true;
     const url = new URL(baseUrl); url.pathname = `/${name}`;
     db = new Database(url.toString(), { max: 1, maintenanceBarrier: true });
     probe = postgres(url.toString(), { max: 1 });
     const inspect = probe;
-    let release: () => void = () => undefined;
     let entered: () => void = () => undefined;
     const started = new Promise<void>(resolve => { entered = resolve; });
     const held = new Promise<void>(resolve => { release = resolve; });
@@ -73,15 +94,21 @@ it.skipIf(!baseUrl).each(["query", "transaction"] as const)("lets an admitted wr
     release();
     await Promise.race([Promise.all([writer, exclusive, waiting]), delay(1000).then(() => { throw new Error("Writer was starved by requests waiting for maintenance"); })]);
     expect(order).toEqual(["writer", "exclusive"]);
+    completed = true;
+    await save(kind, name, { order, actualExclusiveWaiter: true, actualSharedWaiter: true });
   } finally {
+    release();
     // Cancel blocked admission on a failing reproduction, freeing the query
     // pool so the older writer and exclusive operation can drain before close.
-    await admin.unsafe(`SELECT pg_cancel_backend(a.pid) FROM pg_stat_activity a JOIN pg_locks l ON a.pid=l.pid WHERE a.datname='${name}' AND l.locktype='advisory' AND l.mode='ShareLock' AND NOT l.granted`);
+    if (!completed && created) await admin.unsafe(`SELECT pg_cancel_backend(a.pid) FROM pg_stat_activity a JOIN pg_locks l ON a.pid=l.pid WHERE a.datname='${name}' AND l.locktype='advisory' AND l.mode='ShareLock' AND NOT l.granted`);
     await Promise.allSettled(pending);
     await db?.close().catch(() => undefined);
     await probe?.end().catch(() => undefined);
-    await admin.unsafe(`DROP DATABASE "${name}" WITH (FORCE)`);
-    await admin.end();
+    try {
+      if (created && evidence === undefined) await admin.unsafe(`DROP DATABASE "${name}"`);
+    } finally {
+      await admin.end();
+    }
   }
 }, 15_000);
 
@@ -124,6 +151,20 @@ it.skipIf(!baseUrl)("keeps nested writers live with one query connection and rec
         VALUES (${operation},'upload','verifying',${operation},${upload})`;
       await sql`INSERT INTO operation_locks (lock_key,operation_id,expires_at) VALUES ('interrupted',${operation},now()+interval '1 hour')`;
     });
+    if (evidence !== undefined) {
+      const root = await fs.realpath(os.tmpdir());
+      const directory = await fs.mkdtemp(path.join(root, "saturn-maintenance-verification-"));
+      const checkpoint = await fs.mkdtemp(path.join(root, "saturn-maintenance-proof-"));
+      await fs.mkdir(path.join(directory, "storage"));
+      await fs.writeFile(path.join(checkpoint, "ownership.json"), JSON.stringify({ name, directory }), { flag: "wx" });
+      const archiveDb = new ArchiveDatabase(url.toString(), { max: 1 });
+      try {
+        await checkpointReconciliation("before-recovery", archiveDb, url.toString(), directory, checkpoint);
+      } finally {
+        await archiveDb.close();
+      }
+      await save("verification", name, { upload, operation, checkpoint, directory });
+    }
     await db.reconcileInactiveFileLocks();
     await db.withSql(async sql => {
       expect((await sql`SELECT status FROM upload_sessions WHERE id=${upload}`)[0]?.status).toBe("failed_retryable");
@@ -132,7 +173,10 @@ it.skipIf(!baseUrl)("keeps nested writers live with one query connection and rec
     });
   } finally {
     await database?.close();
-    if (created && /^audit_[a-f0-9]{32}$/.test(name)) await admin.unsafe(`DROP DATABASE "${name}" WITH (FORCE)`);
-    await admin.end();
+    try {
+      if (created && evidence === undefined) await admin.unsafe(`DROP DATABASE "${name}"`);
+    } finally {
+      await admin.end();
+    }
   }
 }, 20_000);

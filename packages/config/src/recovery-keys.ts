@@ -75,6 +75,7 @@ export const recoveryEnvironmentKeys: Readonly<Record<string, string>> = {
   "laboratory.tokenRotationGraceMs": "LABORATORY_TOKEN_ROTATION_GRACE_MS",
   "laboratory.maxConcurrentPublicStreams": "LABORATORY_MAX_CONCURRENT_PUBLIC_STREAMS",
   "storage.host": "STORAGE_HOST",
+  "storage.backend": "STORAGE_BACKEND",
   "storage.port": "STORAGE_PORT",
   "storage.username": "STORAGE_USER",
   "storage.root": "STORAGE_ROOT",

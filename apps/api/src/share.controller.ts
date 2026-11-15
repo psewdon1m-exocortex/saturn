@@ -8,6 +8,7 @@ import { OwnerTokenGuard, RequireRecentReauthentication } from "./owner-token.gu
 import { ShareApiExceptionFilter } from "./share-api-exception.filter.js";
 import { APP_CONFIG, SHARE_SERVICE, SHARE_THUMBNAIL_SERVICE } from "./tokens.js";
 import { TransferMonitorService } from "./transfer-monitor.service.js";
+import { downloadEtag, validatedRange } from "./download-http.js";
 
 const mode = z.enum(["view", "download", "browse", "download_folder"]);
 const createSchema = z.object({
@@ -72,8 +73,9 @@ function range(value: string | undefined, size: number): { readonly offset: numb
     return { offset: size - length, length, partial: true };
   }
   const offset = Number(match[1]);
-  const end = match[2] === "" ? size - 1 : Number(match[2]);
-  if (!Number.isSafeInteger(offset) || !Number.isSafeInteger(end) || offset < 0 || end < offset || end >= size) throw new Error("Range is invalid");
+  const requestedEnd = match[2] === "" ? size - 1 : Number(match[2]);
+  if (!Number.isSafeInteger(offset) || !Number.isSafeInteger(requestedEnd) || offset < 0 || offset >= size || requestedEnd < offset) throw new Error("Range is invalid");
+  const end = Math.min(requestedEnd, size - 1);
   return { offset, length: end - offset + 1, partial: true };
 }
 
@@ -171,6 +173,14 @@ export class PublicShareController {
     return this.shares.listChildren(token, parentId, accessInput(this.config, request));
   }
 
+  @Get(":token/children/page")
+  async childrenPage(@Param("token") token: string, @Query("parentId") parentId: string | undefined, @Req() request: FastifyRequest,
+    @Query("offset") rawOffset?: string, @Query("limit") rawLimit?: string) {
+    const page = z.object({ offset: z.coerce.number().int().min(0).max(Number.MAX_SAFE_INTEGER - 500).default(0), limit: z.coerce.number().int().min(1).max(500).default(500) })
+      .parse({ offset: rawOffset, limit: rawLimit });
+    return this.shares.listChildrenPage(token, parentId, accessInput(this.config, request), page);
+  }
+
   @Get(":token/thumbnail/:resourceId")
   async thumbnail(@Param("token") token: string, @Param("resourceId") resourceId: string, @Req() request: FastifyRequest, @Res() reply: FastifyReply): Promise<void> {
     const opened = await this.thumbnails.open(token, resourceId, accessInput(this.config, request));
@@ -190,7 +200,9 @@ export class PublicShareController {
     const opened = await this.shares.contentMetadata(token, accessInput(this.config, request));
     if (opened.newSession !== undefined) setSessionCookie(this.config, reply, opened.newSession);
     let selectedRange: ReturnType<typeof range>;
-    try { selectedRange = range(rawRange, opened.resource.sizeBytes); }
+    const etag = downloadEtag(opened.resource);
+    if (etag !== undefined) reply.header("ETag", etag);
+    try { selectedRange = range(validatedRange(rawRange, request.headers["if-range"], etag), opened.resource.sizeBytes); }
     catch { reply.status(416).header("Content-Range", `bytes */${String(opened.resource.sizeBytes)}`).send(); return; }
     const contentLength = selectedRange.length ?? opened.resource.sizeBytes;
     reply.header("Accept-Ranges", "bytes").header("Content-Length", contentLength)
@@ -208,16 +220,28 @@ export class PublicShareController {
     const transferId = z.uuid().optional().parse(rawTransferId);
     if (transferId !== undefined) this.transfers.assertDownloadAvailable(transferId);
     let selectedRange: ReturnType<typeof range>;
-    try { selectedRange = range(rawRange, metadata.share.resourceSize); }
+    try { selectedRange = range(request.headers["if-range"] === undefined ? rawRange : undefined, metadata.share.resourceSize); }
     catch { reply.status(416).header("Content-Range", `bytes */${String(metadata.share.resourceSize)}`).send({ code: "range_not_satisfiable" }); return; }
-    const opened = await this.shares.openContent(token, selectedRange, accessInput(this.config, request, metadata.session?.token));
-    const contentLength = selectedRange.length ?? metadata.share.resourceSize;
+    let invalidRangeSize: number | undefined;
+    const opened = await this.shares.openContent(token, current => {
+      try { selectedRange = range(validatedRange(rawRange, request.headers["if-range"], downloadEtag(current)), current.sizeBytes); }
+      catch (error) { invalidRangeSize = current.sizeBytes; throw error; }
+      return selectedRange;
+    }, { ...accessInput(this.config, request, metadata.session?.token), ...(transferId === undefined ? {} : { transferId }) }).catch((error: unknown) => {
+      if (invalidRangeSize === undefined) throw error;
+      reply.status(416).header("Content-Range", `bytes */${String(invalidRangeSize)}`).send({ code: "range_not_satisfiable" });
+      return undefined;
+    });
+    if (opened === undefined) return;
+    const contentLength = selectedRange.length ?? opened.resource.sizeBytes;
+    const etag = downloadEtag(opened.resource);
+    if (etag !== undefined) reply.header("ETag", etag);
     reply
       .header("Accept-Ranges", "bytes")
       .header("Content-Length", contentLength)
       .header("Content-Type", opened.resource.mimeType ?? "application/octet-stream")
       .header("Content-Disposition", disposition(opened.share.mode === "view" ? "inline" : "attachment", opened.resource.name));
-    if (selectedRange.partial) reply.status(206).header("Content-Range", `bytes ${String(selectedRange.offset)}-${String(selectedRange.offset + contentLength - 1)}/${String(metadata.share.resourceSize)}`);
+    if (selectedRange.partial) reply.status(206).header("Content-Range", `bytes ${String(selectedRange.offset)}-${String(selectedRange.offset + contentLength - 1)}/${String(opened.resource.sizeBytes)}`);
     reply.send(this.transfers.trackDownload(opened.stream, { ...(transferId === undefined ? {} : { id: transferId }), filename: opened.resource.name, totalBytes: contentLength }));
   }
 
@@ -227,7 +251,9 @@ export class PublicShareController {
     if (metadata.share.mode !== "download_folder") throw new BadRequestException({ code: "invalid_mode" });
     if (metadata.session !== undefined) setSessionCookie(this.config, reply, metadata.session);
     let selectedRange: ReturnType<typeof range>;
-    try { selectedRange = range(rawRange, metadata.resource.sizeBytes); }
+    const etag = downloadEtag(metadata.resource);
+    if (etag !== undefined) reply.header("ETag", etag);
+    try { selectedRange = range(validatedRange(rawRange, request.headers["if-range"], etag), metadata.resource.sizeBytes); }
     catch { reply.status(416).header("Content-Range", `bytes */${String(metadata.resource.sizeBytes)}`).send(); return; }
     const contentLength = selectedRange.length ?? metadata.resource.sizeBytes;
     reply.header("Accept-Ranges", "bytes").header("Content-Length", contentLength)
@@ -244,16 +270,28 @@ export class PublicShareController {
     const transferId = z.uuid().optional().parse(rawTransferId);
     if (transferId !== undefined) this.transfers.assertDownloadAvailable(transferId);
     let selectedRange: ReturnType<typeof range>;
-    try { selectedRange = range(rawRange, metadata.resource.sizeBytes); }
+    try { selectedRange = range(validatedRange(rawRange, request.headers["if-range"], downloadEtag(metadata.resource)), metadata.resource.sizeBytes); }
     catch { reply.status(416).header("Content-Range", `bytes */${String(metadata.resource.sizeBytes)}`).send({ code: "range_not_satisfiable" }); return; }
-    const opened = await this.shares.openChildContent(token, resourceId, selectedRange, accessInput(this.config, request, metadata.session?.token));
-    const contentLength = selectedRange.length ?? metadata.resource.sizeBytes;
+    let invalidRangeSize: number | undefined;
+    const opened = await this.shares.openChildContent(token, resourceId, current => {
+      try { selectedRange = range(validatedRange(rawRange, request.headers["if-range"], downloadEtag(current)), current.sizeBytes); }
+      catch (error) { invalidRangeSize = current.sizeBytes; throw error; }
+      return selectedRange;
+    }, { ...accessInput(this.config, request, metadata.session?.token), ...(transferId === undefined ? {} : { transferId }) }).catch((error: unknown) => {
+      if (invalidRangeSize === undefined) throw error;
+      reply.status(416).header("Content-Range", `bytes */${String(invalidRangeSize)}`).send({ code: "range_not_satisfiable" });
+      return undefined;
+    });
+    if (opened === undefined) return;
+    const contentLength = selectedRange.length ?? opened.resource.sizeBytes;
+    const etag = downloadEtag(opened.resource);
+    if (etag !== undefined) reply.header("ETag", etag);
     reply
       .header("Accept-Ranges", "bytes")
       .header("Content-Length", contentLength)
       .header("Content-Type", opened.resource.mimeType ?? "application/octet-stream")
       .header("Content-Disposition", disposition("attachment", opened.resource.name));
-    if (selectedRange.partial) reply.status(206).header("Content-Range", `bytes ${String(selectedRange.offset)}-${String(selectedRange.offset + contentLength - 1)}/${String(metadata.resource.sizeBytes)}`);
+    if (selectedRange.partial) reply.status(206).header("Content-Range", `bytes ${String(selectedRange.offset)}-${String(selectedRange.offset + contentLength - 1)}/${String(opened.resource.sizeBytes)}`);
     reply.send(this.transfers.trackDownload(opened.stream, { ...(transferId === undefined ? {} : { id: transferId }), filename: opened.resource.name, totalBytes: contentLength }));
   }
 
@@ -271,7 +309,9 @@ export class PublicShareController {
     const prepared = (await this.shares.packageMetadata(token, accessInput(this.config, request, metadata.session?.token))).package;
     if (prepared.state !== "ready") throw new BadRequestException({ code: "package_unavailable" });
     let selectedRange: ReturnType<typeof range>;
-    try { selectedRange = range(rawRange, prepared.sizeBytes); }
+    const etag = downloadEtag(prepared);
+    if (etag !== undefined) reply.header("ETag", etag);
+    try { selectedRange = range(validatedRange(rawRange, request.headers["if-range"], etag), prepared.sizeBytes); }
     catch { reply.status(416).header("Content-Range", `bytes */${String(prepared.sizeBytes)}`).send(); return; }
     const contentLength = selectedRange.length ?? prepared.sizeBytes;
     reply.header("Accept-Ranges", "bytes").header("Content-Length", contentLength).header("Content-Type", "application/zip")
@@ -291,9 +331,11 @@ export class PublicShareController {
     const prepared = preparedAccess.package;
     if (prepared.state !== "ready") throw new BadRequestException({ code: "package_unavailable" });
     let selectedRange: ReturnType<typeof range>;
-    try { selectedRange = range(rawRange, prepared.sizeBytes); }
+    const etag = downloadEtag(prepared);
+    if (etag !== undefined) reply.header("ETag", etag);
+    try { selectedRange = range(validatedRange(rawRange, request.headers["if-range"], etag), prepared.sizeBytes); }
     catch { reply.status(416).header("Content-Range", `bytes */${String(prepared.sizeBytes)}`).send({ code: "range_not_satisfiable" }); return; }
-    const opened = await this.shares.openPackage(token, selectedRange, accessInput(this.config, request, metadata.session?.token));
+    const opened = await this.shares.openPackage(token, { ...selectedRange, packageId: prepared.id }, { ...accessInput(this.config, request, metadata.session?.token), ...(transferId === undefined ? {} : { transferId }) });
     const contentLength = selectedRange.length ?? prepared.sizeBytes;
     reply.header("Accept-Ranges", "bytes").header("Content-Length", contentLength).header("Content-Type", "application/zip").header("Content-Disposition", disposition("attachment", `${metadata.share.resourceName}.zip`));
     if (selectedRange.partial) reply.status(206).header("Content-Range", `bytes ${String(selectedRange.offset)}-${String(selectedRange.offset + contentLength - 1)}/${String(prepared.sizeBytes)}`);

@@ -159,6 +159,10 @@ export class PostgresReconciliationRepository implements ReconciliationRepositor
     const lockId = uuidv7();
     if (!await files.acquireLocks(lockId, [`resource:${tracked.id}`], new Date(Date.now() + 30 * 60_000))) return false;
     try {
+      // Process death releases volatile locks while a durable overwrite may
+      // still have its original in the version archive. Recover it before
+      // classifying the temporary target state as missing or corrupt.
+      if (await files.hasCommittingTree(tracked.storagePath)) return false;
       const current = await files.getResource(tracked.id);
       if (current?.status !== tracked.status || current.storagePath !== tracked.storagePath || current.currentVersionId !== tracked.currentVersionId
         || current.sizeBytes !== tracked.sizeBytes || current.sha256 !== tracked.sha256) return false;
@@ -172,6 +176,7 @@ export class PostgresReconciliationRepository implements ReconciliationRepositor
       const rows = await sql<{ id: string; resource_id: string | null; state: string; payload: Record<string, unknown> }[]>`
         SELECT id, resource_id, state, payload FROM operation_journal
         WHERE state IN ('committing', 'storage_committing', 'storage_committed', 'rollback_failed')
+          AND sync_root_id IS NULL
           AND updated_at < now() - interval '5 minutes'
         ORDER BY updated_at LIMIT 1000
       `;

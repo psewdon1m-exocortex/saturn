@@ -1,0 +1,29 @@
+.upload-recovery {
+  position: fixed;
+  z-index: 90;
+  right: 1rem;
+  bottom: 1rem;
+  width: min(32rem, calc(100vw - 2rem));
+  max-height: min(26rem, 55vh);
+  overflow: auto;
+  padding: 1rem;
+  border: 1px solid var(--accent);
+  background: #080808;
+  color: var(--white, #fff);
+  box-shadow: 0 0.5rem 2rem #0008;
+}
+.upload-recovery summary { cursor: pointer; font-weight: 700; }
+.upload-recovery ul { display: grid; gap: 0.75rem; padding-left: 1.25rem; }
+.upload-recovery li { overflow-wrap: anywhere; }
+.upload-recovery li > span { display: block; margin-bottom: 0.25rem; }
+.upload-recovery button { min-height: 2rem; margin: 0.2rem; }
+.upload-recovery nav { display: flex; align-items: center; gap: 0.5rem; }
+.drop-upload-stage .upload-recovery {
+  position: static;
+  z-index: auto;
+  width: auto;
+  max-height: none;
+  margin: 0.75rem;
+  box-shadow: none;
+}
+.drop-recovery-access { max-width: 40rem; font-size: 0.875rem; line-height: 1.4; overflow-wrap: anywhere; }

@@ -10,42 +10,67 @@ import { NestFactory } from "@nestjs/core";
 import { FastifyAdapter, type NestFastifyApplication } from "@nestjs/platform-fastify";
 import { BackupIngestService, PostgresBackupRepository, type BackupRepository, type BackupRunRecord } from "@saturn/backup-ingest";
 import { Database, migrate } from "@saturn/database";
+import { BACKUPS_RESOURCE_ID, FileService, PostgresFileRepository } from "@saturn/file-core";
 import { LocalStorageAdapter } from "@saturn/storage";
 import { afterAll, beforeAll, expect, it } from "vitest";
 import { MemoryRepository } from "../../../packages/backup-ingest/src/testing/memory.repository.js";
+import { checkpointHostHttp } from "../../../packages/protection/src/storage-catalog-checkpoint.fixture.js";
 import { BackupCapabilitiesController, BackupEnrollmentController, BackupProducerController } from "./backup.controller.js";
 import { registerRawBodyParsers } from "./raw-body-parsers.js";
 import { APP_CONFIG, BACKUP_INGEST_SERVICE, DEVICE_SERVICE } from "./tokens.js";
 import { TransferMonitorService } from "./transfer-monitor.service.js";
 
 const scopes = ["updater", "neptune", "gryphon", "wyvern", "window"] as const;
+const custody = process.env.SATURN_HOST_RECOVERY_TEST_EVIDENCE_DIR;
+const ownedGoRunner = process.env.SATURN_HOST_RECOVERY_OWNED_GO_RUNNER;
+const pepper = "synthetic-host-http-pepper".repeat(3);
 let repository: BackupRepository = new MemoryRepository();
 const committed = new Map<string, BackupRunRecord>();
 const codes: Record<string, string> = {};
 const identities: Record<string, { serviceId: string; token: string }> = {};
-let root: string, origin: string, app: NestFastifyApplication, storage: LocalStorageAdapter, backups: BackupIngestService;
-let database: Database | undefined, admin: Database | undefined, schema: string | undefined;
+let work: string, root: string, origin: string, storage: LocalStorageAdapter, backups: BackupIngestService;
+let app: NestFastifyApplication | undefined;
+let database: Database | undefined, admin: Database | undefined, name: string | undefined, scopedDatabaseUrl: string | undefined;
+let createdDatabase = false;
+type Checkpoint = Parameters<typeof checkpointHostHttp>[0];
+const acknowledged = new Set<Checkpoint>();
 function required<T>(value: T | undefined): T {
   if (value === undefined) throw new Error("HTTP fixture value is missing"); return value;
 }
 beforeAll(async () => {
-  root = await fs.mkdtemp(path.join(os.tmpdir(), "saturn-host-recovery-http-"));
+  work = await fs.mkdtemp(path.join(await fs.realpath(os.tmpdir()), "saturn-host-recovery-http-"));
+  root = path.join(work, "storage");
   storage = new LocalStorageAdapter(root); await storage.initialize();
   const databaseUrl = process.env.SATURN_HOST_RECOVERY_TEST_DATABASE_URL;
+  if ((custody || ownedGoRunner) && (!custody || !ownedGoRunner || !databaseUrl)) throw new Error("Owned Go, evidence and PostgreSQL settings are required together");
   if (databaseUrl) {
-    admin = new Database(databaseUrl); const isolatedSchema = "host_http_qa_" + randomUUID().replaceAll("-", ""); schema = isolatedSchema;
-    await admin.withSql(sql => sql.unsafe(`CREATE SCHEMA ${isolatedSchema}`));
-    const url = new URL(databaseUrl); url.searchParams.set("options", "-csearch_path=" + isolatedSchema);
-    await migrate(url.toString()); database = new Database(url.toString());
+    admin = new Database(databaseUrl); const isolated = "host_http_qa_" + randomUUID().replaceAll("-", ""); name = isolated;
+    if (custody) await fs.writeFile(path.join(custody, "ownership.json"), JSON.stringify({ name, directory: work }), { flag: "wx" });
+    await admin.withSql(sql => sql.unsafe(`CREATE DATABASE ${isolated}`));
+    createdDatabase = true;
+    const url = new URL(databaseUrl); url.pathname = "/" + isolated; url.searchParams.delete("options");
+    scopedDatabaseUrl = url.toString();
+    await migrate(scopedDatabaseUrl); database = new Database(scopedDatabaseUrl);
     repository = new PostgresBackupRepository(database);
   }
-  backups = new BackupIngestService({ repository, storage, pepper: "synthetic-host-http-pepper".repeat(3), options: {
+  const files = custody && database ? new FileService(new PostgresFileRepository(database), storage) : undefined;
+  if (files) await files.initializeStorage();
+  backups = new BackupIngestService({ repository, storage, pepper, options: {
     enabled: true, trustClientCertificateHeader: false, tokenRotationGraceMs: 1000,
     uploadChunkMaxBytes: 53, incompleteTtlMs: 60_000,
     defaults: { requireEncryption: true, maxBackupBytes: 1024 * 1024, dailyQuotaBytes: 16 * 1024 * 1024,
       storedQuotaBytes: 32 * 1024 * 1024, maxConcurrentRuns: 1, freshnessSlaMs: 86_400_000,
       retention: { daily: 7, weekly: 4, monthly: 12, yearly: 3 } },
-  }, catalog: { publish: async run => { committed.set(run.id, run); }, purge: async run => { committed.delete(run.id); } } });
+  }, catalog: {
+    publish: async run => {
+      if (files) await files.adoptExistingFile({
+        rootId: BACKUPS_RESOURCE_ID, storagePath: run.finalPath, sizeBytes: run.expectedSize, sha256: run.expectedSha256,
+        mimeType: "application/octet-stream", auditActor: { type: "service_token", id: run.serviceId },
+      });
+      committed.set(run.id, run);
+    },
+    purge: async run => { committed.delete(run.id); },
+  } });
   @Module({ controllers: [BackupCapabilitiesController, BackupEnrollmentController, BackupProducerController], providers: [
     { provide: BACKUP_INGEST_SERVICE, useValue: backups }, { provide: DEVICE_SERVICE, useValue: {} },
     { provide: APP_CONFIG, useValue: { limits: { uploadChunkMaxBytes: 53 } } }, TransferMonitorService,
@@ -60,8 +85,19 @@ beforeAll(async () => {
     if (!run) return reply.status(404).send();
     return reply.type("application/octet-stream").send(await fs.readFile(path.join(root, run.finalPath)));
   });
+  if (custody) adapter.getInstance().addHook("onSend", async (request, reply, payload) => {
+    let phase: Checkpoint | undefined;
+    if (request.method === "POST" && reply.statusCode === 201 && request.url === "/api/v1/backups/updater-qa/runs") phase = "before-host-create-ack";
+    if (request.method === "PATCH" && reply.statusCode === 204 && /^\/api\/v1\/backups\/updater-qa\/runs\/[a-f0-9-]{36}\/upload$/.test(request.url)) phase = "before-host-chunk-ack";
+    if (request.method === "POST" && reply.statusCode === 201 && /^\/api\/v1\/backups\/updater-qa\/runs\/[a-f0-9-]{36}\/complete$/.test(request.url)) phase = "before-host-complete-ack";
+    if (phase && !acknowledged.has(phase)) {
+      await checkpointHostHttp(phase, required(database), required(scopedDatabaseUrl), work, custody);
+      acknowledged.add(phase);
+    }
+    return payload;
+  });
   app = await NestFactory.create<NestFastifyApplication>(TestModule, adapter, { logger: false });
-  app.setGlobalPrefix("api/v1"); await app.listen(0, "0.0.0.0");
+  app.setGlobalPrefix("api/v1"); await app.listen(0, custody ? "127.0.0.1" : "0.0.0.0");
   const address = adapter.getInstance().server.address();
   if (!address || typeof address === "string") throw new Error("HTTP fixture did not start");
   origin = `http://127.0.0.1:${String(address.port)}`;
@@ -73,14 +109,27 @@ beforeAll(async () => {
   }
 });
 afterAll(async () => {
-  await app.close(); await storage.close();
-  await database?.close();
-  if (admin && schema) {
-    const isolatedSchema = schema;
-    await admin.withSql(async sql => { await sql`SET client_min_messages=warning`; await sql.unsafe(`DROP SCHEMA ${isolatedSchema} CASCADE`); });
-    await admin.close();
+  try {
+    await app?.close();
+  } finally {
+    try {
+      if (work) await storage.close();
+    } finally {
+      try {
+        await database?.close();
+        if (admin && name && createdDatabase && !custody) {
+          const isolated = name;
+          await admin.withSql(sql => sql.unsafe(`DROP DATABASE ${isolated}`));
+        }
+      } finally {
+        await admin?.close();
+      }
+    }
   }
-  if (root) await fs.rm(root, { recursive: true, force: true });
+  if (work && !custody) {
+    if (path.dirname(work) !== await fs.realpath(os.tmpdir()) || !path.basename(work).startsWith("saturn-host-recovery-http-")) throw new Error("Invalid test cleanup path");
+    await fs.rm(work, { recursive: true, force: true });
+  }
 });
 
 it("stores host archives over actual HTTP, rejects missing media type without accepting bytes, and resumes all five scopes", async () => {
@@ -168,20 +217,39 @@ it("authenticates producer abort, releases quotas, expires abandoned uploads and
 it.skipIf(!process.env.UPDATER_HTTP_TEST_SOURCE)("enrolls, publishes, downloads, decrypts and restores with the actual Go Updater client", async () => {
   const source = required(process.env.UPDATER_HTTP_TEST_SOURCE);
   const endpoint = origin.replace("127.0.0.1", "host.docker.internal");
-  const { stdout, stderr } = await promisify(execFile)("docker", ["run", "--rm", "--shm-size=1g",
+  if (custody) {
+    const runtime = path.join(work, "runtime");
+    await fs.mkdir(runtime);
+    await fs.writeFile(path.join(runtime, "fixture-authority.private.json"), JSON.stringify({ pepper, identities, codes }), { flag: "wx", mode: 0o600 });
+    await checkpointHostHttp("before-host-client", required(database), required(scopedDatabaseUrl), work, custody);
+  }
+  const execute = promisify(execFile);
+  const call = ownedGoRunner ? execute(process.execPath, [ownedGoRunner, endpoint], { windowsHide: true, maxBuffer: 1024 * 1024 })
+    : execute("docker", ["run", "--rm", "--shm-size=1g",
     "-v", `${source}:/workspace:ro`, "-v", "updater-recovery-history-go-cache:/go/pkg/mod",
     "-v", "updater-recovery-history-build-cache:/root/.cache/go-build", "-w", "/workspace",
     "-e", `UPDATER_SATURN_HTTP_TEST_URL=${endpoint}`, "golang:1.26.9-bookworm",
     "go", "test", "-tags=saturnintegration", "-run", "^TestActualSaturnHostRecoveryHTTP$", "-count=1", "-v", "./internal/hostrecovery"],
-  { timeout: 60_000, maxBuffer: 1024 * 1024 }).catch((error: unknown) => {
+  { timeout: 60_000, maxBuffer: 1024 * 1024 });
+  const { stdout, stderr } = await call.catch((error: unknown) => {
     if (error instanceof Error && "stdout" in error) console.error(error.stdout);
     if (error instanceof Error && "stderr" in error) console.error(error.stderr);
     throw error;
   });
   console.log(stdout); if (stderr) console.log(stderr);
+  const physical = [];
   for (const scope of scopes) {
     const runs = [...committed.values()].filter(run => run.filename.startsWith(scope + "-component-http-go-"));
     expect(runs).toHaveLength(1); const run = required(runs[0]); expect(run.state).toBe("complete");
     expect(run.receipt?.logicalPath).toMatch(new RegExp(`^/backups/${scope}/fixture-host/`));
+    const bytes = await fs.readFile(path.join(root, run.finalPath));
+    expect(createHash("sha256").update(bytes).digest("hex")).toBe(run.expectedSha256);
+    expect(await storage.exists(run.tempPath)).toBe(false);
+    physical.push({ scope, id: run.id, serviceId: run.serviceId, path: run.finalPath, temporary: run.tempPath,
+      sha256: run.expectedSha256, bytes: bytes.length, receipt: run.receipt });
   }
-}, 70_000);
+  if (custody) {
+    expect([...acknowledged]).toEqual(["before-host-create-ack", "before-host-chunk-ack", "before-host-complete-ack"]);
+    await fs.writeFile(path.join(work, "proof.json"), JSON.stringify({ name, origin, physical, checkpoints: [...acknowledged] }, null, 2), { flag: "wx" });
+  }
+}, ownedGoRunner ? 155_000 : 70_000);

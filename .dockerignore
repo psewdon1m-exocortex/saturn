@@ -9,6 +9,8 @@ dist
 coverage
 artifacts
 .tmp
+**/.tmp
+**/.release-evidence
 data
 docs/server_password.txt
 *.key

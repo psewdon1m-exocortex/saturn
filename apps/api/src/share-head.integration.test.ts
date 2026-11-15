@@ -1,3 +1,4 @@
+import { isolatedTestDatabase } from "../../../packages/database/src/isolated-test-database.fixture.js";
 import "reflect-metadata";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -9,7 +10,7 @@ import type { FastifyPluginCallback } from "fastify";
 import { Module } from "@nestjs/common";
 import { NestFactory } from "@nestjs/core";
 import { FastifyAdapter, type NestFastifyApplication } from "@nestjs/platform-fastify";
-import { Database, migrate } from "@saturn/database";
+import { Database } from "@saturn/database";
 import { FileService, PostgresFileRepository, SYNC_RESOURCE_ID } from "@saturn/file-core";
 import { ShareService, PostgresShareRepository } from "@saturn/shares";
 import { LocalStorageAdapter } from "@saturn/storage";
@@ -21,12 +22,9 @@ import { TransferMonitorService } from "./transfer-monitor.service.js";
 const databaseUrl = process.env.PLUTO_TEST_DATABASE_URL;
 it.skipIf(!databaseUrl)("HEAD checks file, child and package headers without consuming download quota or streaming bytes", async () => {
   if (!databaseUrl) throw new Error("Database test configuration is missing");
-  const schema = `share_head_${randomUUID().replaceAll("-", "")}`;
-  const admin = new Database(databaseUrl);
-  await admin.withSql(sql => sql.unsafe(`CREATE SCHEMA ${schema}`));
-  const url = new URL(databaseUrl); url.searchParams.set("options", `-c search_path=${schema}`);
-  await migrate(url.toString(), path.resolve("../../packages/database/migrations"));
-  const database = new Database(url.toString()), root = await fs.mkdtemp(path.join(os.tmpdir(), "saturn-share-head-"));
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "saturn-share-head-"));
+  const isolated = await isolatedTestDatabase(databaseUrl, undefined, root);
+  const database = new Database(isolated.url);
   const storage = new LocalStorageAdapter(root), files = new FileService(new PostgresFileRepository(database), storage);
   const shares = new ShareService({ repository: new PostgresShareRepository(database), files, storage,
     pepper: "share-head-test-pepper-with-at-least-32-characters",
@@ -66,7 +64,6 @@ it.skipIf(!databaseUrl)("HEAD checks file, child and package headers without con
     const locked = await shares.createShare({ resourceId: file.id, mode: "download", password: "protected" });
     expect((await inject({ method: "HEAD", url: `/api/v1/public/shares/${locked.token}/content` })).statusCode).toBe(401);
   } finally {
-    await app.close(); await database.close(); await storage.close(); await fs.rm(root, { recursive: true, force: true });
-    await admin.withSql(async sql => { await sql`SET client_min_messages = warning`; await sql.unsafe(`DROP SCHEMA ${schema} CASCADE`); }); await admin.close();
+    await app.close(); await database.close(); await storage.close(); if (!isolated.retained) await fs.rm(root, { recursive: true, force: true });
   }
 }, 30000);

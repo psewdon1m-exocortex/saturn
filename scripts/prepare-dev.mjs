@@ -44,11 +44,11 @@ async function ensureSecret(filePath) {
   return value;
 }
 
-function restrictWindowsAcl(filePath) {
+function restrictWindowsAcl(filePath, execute = run) {
   if (process.platform !== "win32") return;
   const identity = `${process.env.USERDOMAIN ?? ""}\\${process.env.USERNAME ?? ""}`;
   if (identity === "\\") return;
-  run("icacls.exe", [
+  execute("icacls.exe", [
     filePath,
     "/inheritance:r",
     "/grant:r",
@@ -69,20 +69,53 @@ function developmentPort(value, fallback, name) {
   return port;
 }
 
+/** Explicit isolated callers provide a newly owned root/marker. Defaults retain
+ * the ordinary development layout, including its existing namespace behavior. */
+export function resolveDevelopmentPaths(options = {}) {
+  const isolatedRoot = options.isolatedRoot;
+  const runtimeNamespace = options.runtimeNamespace;
+  if (isolatedRoot !== undefined && (!path.isAbsolute(isolatedRoot) || isolatedRoot !== path.resolve(isolatedRoot)
+    || isolatedRoot === path.parse(isolatedRoot).root || !/^[a-z0-9][a-z0-9-]{0,80}$/.test(runtimeNamespace ?? ""))) {
+    throw new Error("Isolated DEV root/namespace is invalid");
+  }
+  const secrets = isolatedRoot === undefined ? secretDirectory : path.join(isolatedRoot, "preparation-secrets");
+  const temporary = isolatedRoot === undefined
+    ? runtimeNamespace === undefined ? temporaryDirectory : path.join(temporaryDirectory, runtimeNamespace)
+    : path.join(isolatedRoot, "preparation");
+  const data = isolatedRoot === undefined ? path.join(vaultRoot, "data") : path.join(isolatedRoot, "data");
+  const spool = isolatedRoot === undefined ? path.join(vaultRoot, "spool") : path.join(isolatedRoot, "spool");
+  return {
+    isolatedRoot, secretDirectory: secrets, scopedTemporaryDirectory: temporary,
+    sftpDirectory: path.join(temporary, "sftp"),
+    sftpDataDirectory: isolatedRoot === undefined && runtimeNamespace !== undefined ? path.join(temporary, "sftp-data") : path.join(data, "sftp"),
+    dataDirectory: data, spoolDirectory: spool,
+    postgresPasswordFile: path.join(secrets, "dev-postgres-password"), ownerTokenFile: path.join(secrets, "dev-owner-bootstrap-token"),
+    authPepperFile: path.join(secrets, "dev-auth-pepper"), dropPepperFile: path.join(secrets, "dev-drop-pepper"),
+    sharePepperFile: path.join(secrets, "dev-share-pepper"), devicePepperFile: path.join(secrets, "dev-device-pepper"),
+    backupPepperFile: path.join(secrets, "dev-backup-pepper"), laboratoryPepperFile: path.join(secrets, "dev-laboratory-pepper"),
+    gryphonServiceTokenFile: path.join(secrets, "dev-gryphon-service-token"),
+    composeFile: isolatedRoot === undefined ? undefined : path.join(isolatedRoot, "dependencies.compose.json"),
+  };
+}
+
 export async function prepareDevelopmentEnvironment(options = {}) {
+  const paths = resolveDevelopmentPaths(options);
+  const { secretDirectory, postgresPasswordFile, ownerTokenFile, authPepperFile, dropPepperFile, sharePepperFile,
+    devicePepperFile, backupPepperFile, laboratoryPepperFile, gryphonServiceTokenFile } = paths;
+  const execute = options.execute ?? run;
+  if (paths.isolatedRoot !== undefined) {
+    const realRoot = await fs.realpath(paths.isolatedRoot);
+    if (realRoot !== paths.isolatedRoot || (await fs.lstat(paths.isolatedRoot)).isSymbolicLink()) throw new Error("Isolated DEV root is not canonical");
+    const owner = JSON.parse(await fs.readFile(path.join(paths.isolatedRoot, ".exocortex-isolation.json"), "utf8"));
+    if (owner.namespace !== options.runtimeNamespace || owner.schema !== "exocortex.local-isolation.v1") throw new Error("Isolated DEV owner mismatch");
+  }
   const postgresPort = developmentPort(options.postgresPort, 55_432, "DEV PostgreSQL port");
   const sftpPort = developmentPort(options.sftpPort, 2_222, "DEV SFTP port");
   const runtimeNamespace = options.runtimeNamespace;
   if (runtimeNamespace !== undefined && !/^[a-z0-9][a-z0-9-]{0,80}$/.test(runtimeNamespace)) {
     throw new Error("DEV runtime namespace is invalid");
   }
-  const scopedTemporaryDirectory = runtimeNamespace === undefined
-    ? temporaryDirectory
-    : path.join(temporaryDirectory, runtimeNamespace);
-  const sftpDirectory = path.join(scopedTemporaryDirectory, "sftp");
-  const sftpDataDirectory = runtimeNamespace === undefined
-    ? path.join(vaultRoot, "data", "sftp")
-    : path.join(scopedTemporaryDirectory, "sftp-data");
+  const { scopedTemporaryDirectory, sftpDirectory, sftpDataDirectory } = paths;
   const hostKeyFile = path.join(sftpDirectory, "ssh_host_ed25519_key");
   const clientKeyFile = path.join(sftpDirectory, "dev_client_ed25519");
   const usersFile = path.join(sftpDirectory, "users.conf");
@@ -105,14 +138,14 @@ export async function prepareDevelopmentEnvironment(options = {}) {
   try {
     await fs.access(hostKeyFile);
   } catch {
-    run(sshKeygenCommand, ["-q", "-t", "ed25519", "-N", "", "-C", "vault-dev-only", "-f", hostKeyFile]);
+    execute(sshKeygenCommand, ["-q", "-t", "ed25519", "-N", "", "-C", "vault-dev-only", "-f", hostKeyFile]);
   }
   try {
     await fs.access(clientKeyFile);
   } catch {
-    run(sshKeygenCommand, ["-q", "-t", "ed25519", "-N", "", "-C", "vault-dev-client", "-f", clientKeyFile]);
+    execute(sshKeygenCommand, ["-q", "-t", "ed25519", "-N", "", "-C", "vault-dev-client", "-f", clientKeyFile]);
   }
-  const fingerprintOutput = run(sshKeygenCommand, ["-l", "-E", "sha256", "-f", `${hostKeyFile}.pub`]);
+  const fingerprintOutput = execute(sshKeygenCommand, ["-l", "-E", "sha256", "-f", `${hostKeyFile}.pub`]);
   const hostFingerprint = fingerprintOutput.split(/\s+/)[1];
   if (!/^SHA256:[A-Za-z0-9+/]{43}=?$/.test(hostFingerprint ?? "")) {
     throw new Error("Could not derive the local SFTP host fingerprint");
@@ -130,8 +163,8 @@ export async function prepareDevelopmentEnvironment(options = {}) {
     DATABASE_URL: databaseUrl,
     DEV_POSTGRES_BIND_PORT: String(postgresPort),
     DEV_SFTP_BIND_PORT: String(sftpPort),
-    DEV_SFTP_CONFIG_DIR: `./${path.relative(vaultRoot, sftpDirectory).replaceAll("\\", "/")}`,
-    DEV_SFTP_DATA_DIR: `./${path.relative(vaultRoot, sftpDataDirectory).replaceAll("\\", "/")}`,
+    DEV_SFTP_CONFIG_DIR: paths.isolatedRoot === undefined ? `./${path.relative(vaultRoot, sftpDirectory).replaceAll("\\", "/")}` : sftpDirectory,
+    DEV_SFTP_DATA_DIR: paths.isolatedRoot === undefined ? `./${path.relative(vaultRoot, sftpDataDirectory).replaceAll("\\", "/")}` : sftpDataDirectory,
     OWNER_BOOTSTRAP_TOKEN_FILE: ownerTokenFile,
     AUTH_PEPPER_FILE: authPepperFile,
     AUTH_SESSION_IDLE_TTL_MS: "900000",
@@ -144,7 +177,7 @@ export async function prepareDevelopmentEnvironment(options = {}) {
     DROP_SESSION_TTL_MS: "1800000",
     DROP_MAX_FILES: "1000",
     DROP_MAX_BYTES: "107374182400",
-    DROP_BUFFER_DIRECTORY: path.join(vaultRoot, "data", "drop-buffer"),
+    DROP_BUFFER_DIRECTORY: path.join(paths.dataDirectory, "drop-buffer"),
     DROP_BUFFER_MAX_BYTES: "118111600640",
     DROP_BUFFER_MIN_FREE_BYTES: "10737418240",
     DROP_BUFFER_WARNING_RATIO: "0.70",
@@ -203,7 +236,7 @@ export async function prepareDevelopmentEnvironment(options = {}) {
     STORAGE_AUTH_MODE: "private_key_file",
     STORAGE_PASSWORD_FILE: "",
     STORAGE_PRIVATE_KEY_FILE: clientKeyFile,
-    STORAGE_RUNTIME_CONFIG_DIR: path.join(vaultRoot, "data", "storage-runtime"),
+    STORAGE_RUNTIME_CONFIG_DIR: path.join(paths.dataDirectory, "storage-runtime"),
     STORAGE_OPERATION_TIMEOUT_MS: "60000",
     STORAGE_MAX_CONNECTIONS: "8",
     UPLOAD_MAX_BYTES: "21474836480",
@@ -216,8 +249,8 @@ export async function prepareDevelopmentEnvironment(options = {}) {
     WORKER_HEARTBEAT_INTERVAL_MS: "5000",
     WORKER_STALE_AFTER_MS: "20000",
     RECONCILIATION_INTERVAL_MS: "21600000",
-    RECOVERY_SPOOL_DIR: path.join(vaultRoot, "spool", "recovery"),
-    RECOVERY_ARCHIVE_DIR: path.join(vaultRoot, "data", "recovery"),
+    RECOVERY_SPOOL_DIR: path.join(paths.spoolDirectory, "recovery"),
+    RECOVERY_ARCHIVE_DIR: path.join(paths.dataDirectory, "recovery"),
     RECOVERY_MAX_ARCHIVE_BYTES: "10737418240",
     RECOVERY_MAX_MEMBER_BYTES: "8589934592",
     RECOVERY_MAX_EXTRACTED_BYTES: "12884901888",
@@ -225,7 +258,7 @@ export async function prepareDevelopmentEnvironment(options = {}) {
     RECOVERY_MAX_COMPRESSION_RATIO: "200",
     RECOVERY_MAX_MANIFEST_BYTES: "1048576",
     RECOVERY_BACKUP_INTERVAL_MS: "21600000",
-    ARCHIVE_SPOOL_DIR: path.join(vaultRoot, "spool", "archives"),
+    ARCHIVE_SPOOL_DIR: path.join(paths.spoolDirectory, "archives"),
     ARCHIVE_7Z_BIN: process.platform === "win32" ? "7z.exe" : "7zz",
     ARCHIVE_MAX_ARCHIVE_BYTES: "21474836480",
     ARCHIVE_MAX_MEMBER_BYTES: "21474836480",
@@ -235,8 +268,8 @@ export async function prepareDevelopmentEnvironment(options = {}) {
     ARCHIVE_JOB_LEASE_MS: "300000",
     PG_DUMP_BIN: process.platform === "win32" ? "docker.exe" : "docker",
     PG_RESTORE_BIN: process.platform === "win32" ? "docker.exe" : "docker",
-    PG_DUMP_PREFIX_ARGS: JSON.stringify(["compose", "--project-directory", vaultRoot, "-p", "vault-dev", "exec", "-T", "postgres", "pg_dump"]),
-    PG_RESTORE_PREFIX_ARGS: JSON.stringify(["compose", "--project-directory", vaultRoot, "-p", "vault-dev", "exec", "-T", "postgres", "pg_restore"]),
+    PG_DUMP_PREFIX_ARGS: JSON.stringify(paths.isolatedRoot === undefined ? ["compose", "--project-directory", vaultRoot, "-p", "vault-dev", "exec", "-T", "postgres", "pg_dump"] : ["compose", "--project-directory", vaultRoot, "-f", paths.composeFile, "-p", runtimeNamespace, "exec", "-T", "postgres", "pg_dump"]),
+    PG_RESTORE_PREFIX_ARGS: JSON.stringify(paths.isolatedRoot === undefined ? ["compose", "--project-directory", vaultRoot, "-p", "vault-dev", "exec", "-T", "postgres", "pg_restore"] : ["compose", "--project-directory", vaultRoot, "-f", paths.composeFile, "-p", runtimeNamespace, "exec", "-T", "postgres", "pg_restore"]),
     PG_COMMAND_CONNECTION_ARGS: JSON.stringify(["--username", "vault", "--dbname", "vault"]),
   };
   await fs.writeFile(
@@ -245,9 +278,9 @@ export async function prepareDevelopmentEnvironment(options = {}) {
     { encoding: "utf8", mode: 0o600 },
   );
   for (const filePath of [postgresPasswordFile, ownerTokenFile, authPepperFile, dropPepperFile, sharePepperFile, devicePepperFile, backupPepperFile, laboratoryPepperFile, gryphonServiceTokenFile, hostKeyFile, clientKeyFile, usersFile, runtimeEnvironmentFile]) {
-    restrictWindowsAcl(filePath);
+    restrictWindowsAcl(filePath, execute);
   }
-  return { environment, hostFingerprint, runtimeEnvironmentFile };
+  return { environment, hostFingerprint, runtimeEnvironmentFile, paths };
 }
 
 if (path.resolve(process.argv[1] ?? "") === fileURLToPath(import.meta.url)) {
