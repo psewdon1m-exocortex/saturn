@@ -1,3 +1,4 @@
+import { readySmallPublications,publishedSmallGroup } from './publication-ready.fixture.js';
 import { fixtureChunks, fixtureValue } from './test-values.fixture.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -118,7 +119,7 @@ it('uses the set writer through FileService and recovers a lost commit response 
   try{
     const {bytes,inputs,prepared}=await smallReady(f,c),original=c.database.commitSet.bind(c.database),writes=vi.spyOn(f.raw,'write');
     const set=vi.spyOn(c.database,'commitSet').mockImplementationOnce(async(...args)=>{await original(...args);throw Error('lost set commit ACK');});
-    const outcomes=await Promise.all(prepared.map(p=>c.files.completeSmallCatalogUpload(p,f.proof,bytes)));
+    const outcomes=publishedSmallGroup(await readySmallPublications(f,c,prepared.map(prepared=>({prepared,bytes}))));
     expect(set).toHaveBeenCalledTimes(1);expect(outcomes.every(p=>p.status.result?.status==='PUBLISHED')).toBe(true);expect(writes).toHaveBeenCalledTimes(4);
     const before=await projections(f),restarted=composed(f);
     for(const input of inputs){const p=await restarted.files.prepareSmallCatalogUpload(input,f.proof);expect((await restarted.files.completeSmallCatalogUpload(p,f.proof,bytes)).status.result?.status).toBe('PUBLISHED');}
@@ -132,7 +133,7 @@ it('retains all original identities and physical files when authority changes af
   try{
     const {bytes,prepared}=await smallReady(f,c),before=await history(f),original=c.database.commitSet.bind(c.database);
     vi.spyOn(c.database,'commitSet').mockImplementationOnce(async(...args)=>{await f.admin.withSql(sql=>sql`UPDATE devices SET can_write=false WHERE sync_root_id=${f.rootId}`);return original(...args);});
-    const outcomes=await Promise.allSettled(prepared.map(p=>c.files.completeSmallCatalogUpload(p,f.proof,bytes)));
+    const outcomes=await readySmallPublications(f,c,prepared.map(prepared=>({prepared,bytes})));
     expect(outcomes.every(r=>r.status==='rejected')).toBe(true);
     expect(await f.admin.withSql(sql=>sql`SELECT id FROM file_versions`)).toHaveLength(0);
     expect((await projections(f)).every(r=>r.upload_effect_state==='reconciliation_required')).toBe(true);

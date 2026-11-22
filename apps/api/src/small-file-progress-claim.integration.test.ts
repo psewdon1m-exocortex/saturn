@@ -1,3 +1,4 @@
+import { readySmallPublications,publishedSmallGroup } from './publication-ready.fixture.js';
 import { fixtureValue } from './test-values.fixture.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -39,7 +40,7 @@ it('publishes a mixed group of ordinary progress and final marked chunks with in
     const prepared=await Promise.all(inputs.map(i=>files.prepareSmallCatalogUpload(i,f.proof)));
     prepared[0]=await files.appendCatalogUpload(fixtureValue(prepared[0]),f.proof,'0',bytes);
     const group=vi.spyOn(database,'verifyAndClaimGroup'),writes=vi.spyOn(f.raw,'write');
-    const results=await Promise.all(prepared.map(p=>files.completeSmallCatalogUpload(p,f.proof,bytes)));
+    const results=publishedSmallGroup(await readySmallPublications(f,{files,database},prepared.map(prepared=>({prepared,bytes}))));
     expect(results.every(p=>p.status.result?.status==='PUBLISHED')).toBe(true);
     expect(writes).toHaveBeenCalledTimes(3);
     expect(group.mock.calls.some(([entries])=>entries.length>1&&entries.some(e=>e.transfer))).toBe(true);
@@ -57,7 +58,7 @@ it('keeps accepted final transfers fenced when a group claim response is lost',a
     const bytes=Buffer.from('accepted before lost SQL response'),prepared=await Promise.all([0,1].map(n=>files.prepareSmallCatalogUpload(f.uploadInput('lost-'+String(n)+'.bin',bytes),f.proof)));
     const original=database.verifyAndClaimGroup.bind(database),rename=vi.spyOn(f.raw,'rename');
     vi.spyOn(database,'verifyAndClaimGroup').mockImplementationOnce(async(...args)=>{await original(...args);throw Error('lost group claim response');});
-    const results=await Promise.allSettled(prepared.map(p=>files.completeSmallCatalogUpload(p,f.proof,bytes)));
+    const results=await readySmallPublications(f,{files,database},prepared.map(prepared=>({prepared,bytes})));
     expect(results.every(r=>r.status==='rejected')).toBe(true);expect(rename).not.toHaveBeenCalled();
     const rows=await f.admin.withSql(sql=>sql`SELECT upload_effect_state,upload_transfer,upload_transfer_backend_task,upload_last_transfer IS NOT NULL AS original_retained FROM operation_journal WHERE sync_root_id=${f.rootId} AND upload_execution IS NOT NULL`);
     expect(rows).toHaveLength(2);expect(rows.every(r=>r.upload_effect_state==='reconciliation_required'&&r.upload_transfer===null&&r.upload_transfer_backend_task===null&&r.original_retained)).toBe(true);

@@ -49,8 +49,9 @@ qualified("compound real PG returns a peer claim, waits for its ACK before I/O a
     expect(rawWrites).toHaveBeenCalledTimes(2);
     expect(await fs.readFile(path.join(f.directory,"storage/peer.bin"))).toEqual(peerBytes);
     expect(await fs.readFile(path.join(f.directory,"storage/local.bin"))).toEqual(bytes);
-    expect(await fs.readdir(store.directory)).toEqual([]);
+    // A local receipt does not join the peer worker's final payload cleanup.
     await finish(f,id,{peer,local,claimed,compoundCalls,physicalWrites:rawWrites.mock.calls.length,fullBytes:true,replayWithoutNewWrite:true});
+    expect(await fs.readdir(store.directory)).toEqual([]);
   }finally{ack.release();await Promise.allSettled([write]);await f.close();vi.restoreAllMocks();}
 },60000);
 
