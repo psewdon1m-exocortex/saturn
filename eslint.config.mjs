@@ -12,6 +12,7 @@ export default tseslint.config(
       "tools/pnpm-runner/**",
       "eslint.config.mjs",
       "scripts/**/*.mjs",
+      "!scripts/supervise-docker-cohort.mjs",
       "infra/production/*.mjs",
       "**/.tmp/**",
     ],
@@ -53,5 +54,10 @@ export default tseslint.config(
         tsconfigRootDir: import.meta.dirname,
       },
     },
+  },
+  {
+    files: ["scripts/supervise-docker-cohort.mjs"],
+    extends: [tseslint.configs.disableTypeChecked],
+    languageOptions: { parserOptions: { projectService: false } },
   },
 );

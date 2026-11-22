@@ -37,3 +37,9 @@ Validation evidence for the bounded local stand is in
 worker129 (worker crash), stack141 (API/worker/Kernel/PostgreSQL/SFTP crash with a
 surviving supervisor), and the retained stack132 failure. These buffered-upload
 checks do not claim host power-loss or in-flight physical-write recovery.
+
+For opt-in qualified local Docker cohorts, the independent authenticated engine
+fence and automatic controller are documented in
+[automatic-docker-supervisor.md](automatic-docker-supervisor.md). This separate
+mode does not turn a serialized managed-child receipt into a fence and does not
+claim simultaneous host/engine/operator-supervisor recovery.

@@ -1,6 +1,7 @@
 import { ChildProcess } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import type { Database } from '@saturn/database';
+import { requireEngineFence, type EngineFencedBackendOwner } from './docker-backend-cohort.js';
 
 export interface ManagedBackendIdentity { backendIdentity: string; generation: string; ownerId: string; fencingToken: string }
 const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
@@ -61,7 +62,20 @@ export class ManagedBackendProcess {
  */
 export async function recoverExitedBackendOwner(database: Database, process: ManagedBackendProcess) {
   if (!tickets.has(process)) throw new Error('managed_child_required');
-  const proof = process.proof(), i = proof.identity, proofSha256 = digest(proof);
+  return releaseProvenNoEffectOwner(database,process.proof(),()=>process.proof(),false);
+}
+
+/** Automatic product supervision boundary: a live authenticated engine client
+ * has witnessed actual cohort exits and permanently removed every old writer.
+ * Runtime credentials, arbitrary JSON and the former parent IPC are insufficient.
+ * RUNNING/UNKNOWN effects remain untouched and fail closed exactly as before. */
+export async function recoverEngineFencedBackendOwner(database: Database, fence: EngineFencedBackendOwner) {
+  const proof=requireEngineFence(fence);
+  return releaseProvenNoEffectOwner(database,proof,()=>requireEngineFence(fence),true);
+}
+
+async function releaseProvenNoEffectOwner(database: Database, proof: {recoveryId:string;identity:ManagedBackendIdentity}, assertProof:()=>unknown,automatic:boolean) {
+  const i=proof.identity,proofSha256=digest(proof);
   return database.withExclusiveMaintenance(() => database.transaction(async sql => {
     await sql`SET LOCAL lock_timeout='2s'`;
     await sql`SET LOCAL statement_timeout='10s'`;
@@ -84,14 +98,14 @@ export async function recoverExitedBackendOwner(database: Database, process: Man
       throw new Error('recovery_effect_unresolved');
     if ((await sql`SELECT id FROM public.sync_backend_read_slots WHERE backend_identity=${i.backendIdentity} LIMIT 1`).length)
       throw new Error('recovery_readers_not_drained');
-    process.proof();
-    const receipt = { schema: 'saturn.backend-no-effect-owner-release.v1', proofSha256, owner: i,
-      queuedTaskIds: tasks.map(t => t.id), queuedTasksSha256: digest(tasks), reason: 'managed_process_exited_no_running_or_unknown_effects' };
+    assertProof();
+    const receipt = { schema: automatic?'saturn.engine-fenced-no-effect-owner-release.v1':'saturn.backend-no-effect-owner-release.v1', proofSha256, owner: i,
+      queuedTaskIds: tasks.map(t => t.id), queuedTasksSha256: digest(tasks), reason: automatic?'independently_engine_fenced_cohort_no_running_or_unknown_effects':'managed_process_exited_no_running_or_unknown_effects' };
     const rows = await sql`UPDATE public.sync_backend_executor SET state='STOPPED',owner_id=NULL,fencing_token=NULL,
       liveness_owner_id=NULL,liveness_fencing_token=NULL,liveness_at=NULL,stopped_receipt=${JSON.stringify(receipt)}::text::jsonb,updated_at=now()
       WHERE backend_identity=${i.backendIdentity} AND generation=${i.generation}::uuid AND owner_id=${i.ownerId}::uuid AND fencing_token=${i.fencingToken}::uuid RETURNING backend_identity`;
     if (rows.length !== 1) throw new Error('recovery_owner_changed');
-    const result = { status: 'RELEASED_NO_EFFECT_OWNER', recoveryId: proof.recoveryId, queuedTaskIds: receipt.queuedTaskIds, generation: i.generation };
+    const result = { status: automatic?'RELEASED_ENGINE_FENCED_NO_EFFECT_OWNER':'RELEASED_NO_EFFECT_OWNER', recoveryId: proof.recoveryId, queuedTaskIds: receipt.queuedTaskIds, generation: i.generation };
     await sql`INSERT INTO saturn_owner_recovery.history(id,proof_sha256,proof,receipt,result) VALUES(${proof.recoveryId}::uuid,${proofSha256},
       ${JSON.stringify(proof)}::text::jsonb,${JSON.stringify(receipt)}::text::jsonb,${JSON.stringify(result)}::text::jsonb)`;
     return result;

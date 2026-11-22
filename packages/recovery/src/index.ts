@@ -20,7 +20,7 @@ export type {
 } from "./types.js";
 export type { RecoverySnapshot, JournalSnapshotState } from "./consistent-snapshot.js";
 export { guardRecoveryMutation } from "./consistent-snapshot.js";
-export { ManagedBackendProcess, recoverExitedBackendOwner } from "./backend-owner-process.js";
+export { ManagedBackendProcess, recoverExitedBackendOwner, recoverEngineFencedBackendOwner } from "./backend-owner-process.js";
 export type { ManagedBackendIdentity } from "./backend-owner-process.js";
 export { backendOwnerProcessReporter } from "./backend-owner-ipc.js";
 export { reconcileAbsentBackupPart } from './absent-backup-part-reconciliation.js';
@@ -31,3 +31,6 @@ export { reconcileCompletedCatalogEffects } from './completed-catalog-effects.js
 export type { CompletedCatalogEffectsInput } from './completed-catalog-effects.js';
 export { resumeUnstartedCatalogUpload } from './unstarted-upload-resume.js';
 export type { OriginalUploadResumeInput } from './unstarted-upload-resume.js';
+
+export { DockerBackendCohort, EngineFencedBackendOwner } from './docker-backend-cohort.js';
+export type { DockerCohortControl, DockerCohortMember } from './docker-backend-cohort.js';

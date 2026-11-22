@@ -44,7 +44,8 @@
     "prod:smoke-storage": "node scripts/storage-smoke.mjs",
     "prod:release": "node scripts/release-bundle.mjs",
     "recovery": "node scripts/recovery-cli.mjs",
-    "sync:lifecycle": "tsx --tsconfig apps/api/tsconfig.json scripts/sync-lifecycle.mts"
+    "sync:lifecycle": "tsx --tsconfig apps/api/tsconfig.json scripts/sync-lifecycle.mts",
+    "recovery:supervise": "node scripts/supervise-docker-cohort.mjs"
   },
   "devDependencies": {
     "@axe-core/playwright": "4.13.0",

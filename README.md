@@ -255,3 +255,5 @@ Host recovery names derive from component + Server ID. Volt/Mastermind registrat
 ## Targeted test lanes
 
 See [test lanes and fixture custody](docs/TEST_LANES.md) before running integration tests. Guarded migrations bind SQL functions to `public`; isolated test databases are required. A passed local audit is not a production activation receipt. Current release gate: [production readiness](docs/implementation/PRODUCTION_READINESS.md).
+
+The optional operator-only [automatic Docker cohort supervisor](packages/recovery/automatic-docker-supervisor.md) can recover a fenced API/worker owner unit with no unresolved physical effects. It is not enabled by ordinary startup.
