@@ -16,6 +16,15 @@ The database connection is an explicitly published loopback operator port;
 runtime credentials cannot use the recovery-history schema. No secret is passed
 on the supervisor command line or written to a public log.
 
+The worker must run through scripts/registered-worker-parent.mjs, which launches
+the real worker through the existing private owner IPC reporter. A fresh protected
+nonce, the actual live parent/worker PID births and executable/argv digests, and
+the exact registered owner/generation/fence must match the database. The engine
+client verifies that live association inside the exact worker container and
+checks the parent script SHA before accepting custody. An unregistered or wrong
+worker is refused. Container StartedAt is pinned as well as Created, so a manual
+restart cannot silently substitute a new process incarnation.
+
 The supervisor first captures the exact live cohort and its actual RUNNING
 owner/fencing token. Failure means an actual stopped registered container, not
 an expired heartbeat. It drains the remaining old peers, records actual daemon

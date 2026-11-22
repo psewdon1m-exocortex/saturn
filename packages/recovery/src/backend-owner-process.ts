@@ -85,7 +85,9 @@ async function releaseProvenNoEffectOwner(database: Database, proof: {recoveryId
     const [b] = await sql<Record<string, unknown>[]>`SELECT * FROM public.sync_backend_executor WHERE backend_identity=${i.backendIdentity} FOR UPDATE`;
     const [prior] = await sql<{ proof_sha256: string; result: unknown }[]>`SELECT proof_sha256,result FROM saturn_owner_recovery.history WHERE id=${proof.recoveryId}::uuid`;
     if (prior) { if (prior.proof_sha256 !== proofSha256) throw new Error('recovery_proof_changed'); return prior.result; }
-    if (!b || b.generation !== i.generation || b.state !== 'RUNNING' || b.owner_id !== i.ownerId || b.fencing_token !== i.fencingToken)
+    const stopped=b?.stopped_receipt as Record<string,unknown>|null|undefined;
+    const cleanlyStopped=automatic&&b?.state==='STOPPED'&&b.owner_id===null&&b.fencing_token===null&&stopped?.ownerId===i.ownerId&&stopped.fencingToken===i.fencingToken&&stopped.generation===i.generation&&stopped.connectionsClosed===true&&typeof stopped.stoppedAt==='string';
+    if (!b || b.generation !== i.generation || !cleanlyStopped&&(b.state !== 'RUNNING' || b.owner_id !== i.ownerId || b.fencing_token !== i.fencingToken))
       throw new Error('recovery_owner_changed');
     // Root locks match the catalog -> backend ordering through the exclusive
     // maintenance barrier; a caller that has not drained peers is refused below.
@@ -99,13 +101,15 @@ async function releaseProvenNoEffectOwner(database: Database, proof: {recoveryId
     if ((await sql`SELECT id FROM public.sync_backend_read_slots WHERE backend_identity=${i.backendIdentity} LIMIT 1`).length)
       throw new Error('recovery_readers_not_drained');
     assertProof();
-    const receipt = { schema: automatic?'saturn.engine-fenced-no-effect-owner-release.v1':'saturn.backend-no-effect-owner-release.v1', proofSha256, owner: i,
-      queuedTaskIds: tasks.map(t => t.id), queuedTasksSha256: digest(tasks), reason: automatic?'independently_engine_fenced_cohort_no_running_or_unknown_effects':'managed_process_exited_no_running_or_unknown_effects' };
+    const receipt = { schema: cleanlyStopped?'saturn.engine-fenced-confirmed-clean-stop.v1':automatic?'saturn.engine-fenced-no-effect-owner-release.v1':'saturn.backend-no-effect-owner-release.v1', proofSha256, owner: i,
+      queuedTaskIds: tasks.map(t => t.id), queuedTasksSha256: digest(tasks), reason: cleanlyStopped?'independently_fenced_same_owner_clean_stop_confirmed':automatic?'independently_engine_fenced_cohort_no_running_or_unknown_effects':'managed_process_exited_no_running_or_unknown_effects' };
+    if(!cleanlyStopped){
     const rows = await sql`UPDATE public.sync_backend_executor SET state='STOPPED',owner_id=NULL,fencing_token=NULL,
       liveness_owner_id=NULL,liveness_fencing_token=NULL,liveness_at=NULL,stopped_receipt=${JSON.stringify(receipt)}::text::jsonb,updated_at=now()
       WHERE backend_identity=${i.backendIdentity} AND generation=${i.generation}::uuid AND owner_id=${i.ownerId}::uuid AND fencing_token=${i.fencingToken}::uuid RETURNING backend_identity`;
     if (rows.length !== 1) throw new Error('recovery_owner_changed');
-    const result = { status: automatic?'RELEASED_ENGINE_FENCED_NO_EFFECT_OWNER':'RELEASED_NO_EFFECT_OWNER', recoveryId: proof.recoveryId, queuedTaskIds: receipt.queuedTaskIds, generation: i.generation };
+    }
+    const result = { status: cleanlyStopped?'CONFIRMED_ENGINE_FENCED_CLEAN_STOP':automatic?'RELEASED_ENGINE_FENCED_NO_EFFECT_OWNER':'RELEASED_NO_EFFECT_OWNER', recoveryId: proof.recoveryId, queuedTaskIds: receipt.queuedTaskIds, generation: i.generation };
     await sql`INSERT INTO saturn_owner_recovery.history(id,proof_sha256,proof,receipt,result) VALUES(${proof.recoveryId}::uuid,${proofSha256},
       ${JSON.stringify(proof)}::text::jsonb,${JSON.stringify(receipt)}::text::jsonb,${JSON.stringify(result)}::text::jsonb)`;
     return result;

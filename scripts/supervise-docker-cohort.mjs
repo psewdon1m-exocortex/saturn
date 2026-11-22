@@ -53,7 +53,7 @@ function createReplacement(template,role,index,client){
   for(const [port,bindings]of Object.entries(h.PortBindings??{}))for(const b of bindings){assert(['127.0.0.1','::1'].includes(b.HostIp));args.push('--publish',b.HostIp+':'+b.HostPort+':'+port);}
   const network=Object.values(template.NetworkSettings.Networks);assert.equal(network.length,1);
   for(const alias of network[0].Aliases??[])if(alias!==template.Id&&alias!==template.Id.slice(0,12))args.push('--network-alias',alias);
-  for(const mount of template.Mounts){assert(['bind','volume'].includes(mount.Type));assert(!mount.Destination.includes(','));let source=mount.Type==='volume'?mount.Name:mount.Source;
+  for(const mount of template.Mounts){assert(['bind','volume'].includes(mount.Type));assert(!mount.Destination.includes(','));let source=mount.Type==='volume'?mount.Name:mount.Source;if(process.platform==='win32'&&mount.Type==='bind'){const mapped=/^\/run\/desktop\/mnt\/host\/([a-z])\/(.*)$/.exec(source);if(mapped)source=mapped[1].toUpperCase()+':\\'+mapped[2].replaceAll('/','\\');}
     const ephemeral=(s.ephemeralOutputMounts??[]).find(x=>x.destination===mount.Destination);
     if(ephemeral){assert.equal(mount.Type,'bind');assert(mount.RW);assert(path.isAbsolute(ephemeral.sourceRoot));source=path.join(ephemeral.sourceRoot,'r'+index+'-'+role);fs.mkdirSync(source,{recursive:true});}
     assert(typeof source==='string'&&!source.includes(','));args.push('--mount','type='+mount.Type+',source='+source+',destination='+mount.Destination+(mount.RW?'':',readonly'));
@@ -85,7 +85,7 @@ try{
     // Database maintenance authority is held only here, outside runtime actors.
     // The shared transaction refuses every unresolved effect/reader and never
     // rewrites queued IDs, client UNKNOWNs, payloads, profiles or cursors.
-    const released=await recoverEngineFencedBackendOwner(database,fence);assert.equal(released.status,'RELEASED_ENGINE_FENCED_NO_EFFECT_OWNER');
+    const released=await recoverEngineFencedBackendOwner(database,fence);assert(['RELEASED_ENGINE_FENCED_NO_EFFECT_OWNER','CONFIRMED_ENGINE_FENCED_CLEAN_STOP'].includes(released.status));
     const index=recoveries.length+1;const replacements=[];
     for(const role of ['worker','api']){const source=templates.find(x=>x.Id===liveMembers.find(m=>m.role===role).id);const member=createReplacement(source,role,index,cohort);replacements.push(member);await event({schema:'saturn.replacement-created-before-start.v1',at:new Date().toISOString(),...member,previousOwner:original.ownerId});cohort.command(['start',member.id]);await ready(member,role==='worker'?3001:3000,cohort);}
     const next=await readOwner();assert.notEqual(next.ownerId,original.ownerId);assert.notEqual(next.fencingToken,original.fencingToken);assert.equal(next.generation,original.generation);

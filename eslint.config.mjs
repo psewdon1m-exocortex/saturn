@@ -13,6 +13,7 @@ export default tseslint.config(
       "eslint.config.mjs",
       "scripts/**/*.mjs",
       "!scripts/supervise-docker-cohort.mjs",
+      "!scripts/registered-worker-parent.mjs",
       "infra/production/*.mjs",
       "**/.tmp/**",
     ],
@@ -56,7 +57,7 @@ export default tseslint.config(
     },
   },
   {
-    files: ["scripts/supervise-docker-cohort.mjs"],
+    files: ["scripts/supervise-docker-cohort.mjs", "scripts/registered-worker-parent.mjs"],
     extends: [tseslint.configs.disableTypeChecked],
     languageOptions: { parserOptions: { projectService: false } },
   },

@@ -8,17 +8,20 @@ export interface DockerCohortControl {
   executable: string; executableSha256: string; endpoint: string; engineId: string;
   ownershipLabel: { key: string; value: string };
   writerVolumes: readonly string[];
+  registration?: { fileName:string; nonce:string; parentScriptSHA256:string };
 }
 export interface DockerCohortMember { id: string; created: string; image: string; role: 'api' | 'worker' }
 type ObjectValue = Record<string, unknown>;
 const object = (v: unknown): ObjectValue => { if (!v || typeof v !== 'object' || Array.isArray(v)) throw Error('cohort_engine_response_invalid'); return v as ObjectValue; };
-const hash = (v: unknown) => createHash('sha256').update(JSON.stringify(v)).digest('hex');
+function canonical(v:unknown):unknown { if(Array.isArray(v))return v.map(canonical);if(v&&typeof v==='object')return Object.fromEntries(Object.entries(v).sort(([a],[b])=>a<b?-1:a>b?1:0).map(([k,x])=>[k,canonical(x)]));return v; }
+const hash = (v: unknown) => createHash('sha256').update(JSON.stringify(canonical(v))).digest('hex');
 const sha = (b: Buffer) => createHash('sha256').update(b).digest('hex');
 const wait = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const creationKey = Symbol('authenticated-engine-fence');
 const liveFences = new WeakSet<EngineFencedBackendOwner>();
-function immutable(c: ObjectValue) { return { Id:c.Id, Created:c.Created, Image:c.Image, Name:c.Name, Config:c.Config, HostConfig:c.HostConfig, Mounts:c.Mounts }; }
+function immutable(c:ObjectValue){if(!Array.isArray(c.Mounts))throw Error('cohort_engine_response_invalid');const mounts=c.Mounts.map(object).sort((a,b)=>String(a.Destination)<String(b.Destination)?-1:String(a.Destination)>String(b.Destination)?1:0);return{Id:c.Id,Created:c.Created,Image:c.Image,Name:c.Name,Config:c.Config,HostConfig:c.HostConfig,StartedAt:object(c.State).StartedAt,Mounts:mounts};}
+export function dockerCohortConfigurationSha256(value:unknown){return hash(immutable(object(value)));}
 
 /** Operator-side authenticated LOCAL engine client. It is never provided to a
  * runtime HTTP handler. A PID, heartbeat, parsed receipt or caller callback is
@@ -27,19 +30,24 @@ function immutable(c: ObjectValue) { return { Id:c.Id, Created:c.Created, Image:
 export class DockerBackendCohort {
   readonly recoveryId = randomUUID();
   readonly #environment: NodeJS.ProcessEnv;
+  readonly #registration: NonNullable<DockerCohortControl["registration"]>;
   readonly #snapshots = new Map<string, ObjectValue>();
   readonly #fingerprints = new Map<string, string>();
   #fenced?: EngineFencedBackendOwner;
+  #ownerRegistration: ObjectValue | undefined;
   private constructor(readonly control: DockerCohortControl, readonly members: readonly DockerCohortMember[], readonly identity: ManagedBackendIdentity,
     readonly record: (event: ObjectValue) => Promise<void>) {
+    const registration=control.registration;
     if (!path.isAbsolute(control.executable) || !/^[a-f0-9]{64}$/.test(control.executableSha256)
       || !/^(?:unix:\/\/\/[^\r\n]+|npipe:\/\/\/\/\.\/pipe\/[^\r\n]+)$/.test(control.endpoint)
+      || !registration || registration.fileName!=='backend-owner-registration.json' || !/^[a-f0-9]{64}$/.test(registration.nonce) || !/^[a-f0-9]{64}$/.test(registration.parentScriptSHA256)
       || !control.engineId || !control.ownershipLabel.key || !control.ownershipLabel.value
       || !control.writerVolumes.length || control.writerVolumes.some(x => !/^[a-zA-Z0-9][a-zA-Z0-9_.-]+$/.test(x))
       || !identity.backendIdentity || ![identity.generation,identity.ownerId,identity.fencingToken].every(x => uuid.test(x))
       || members.length !== 2 || new Set(members.map(x => x.role)).size !== 2
       || new Set(members.map(x => x.id)).size !== members.length
       || members.some(x => !['api','worker'].includes(x.role) || !/^[a-f0-9]{64}$/.test(x.id) || !/^sha256:[a-f0-9]{64}$/.test(x.image) || !x.created)) throw Error('cohort_configuration_invalid');
+    this.#registration=Object.freeze({...registration});
     this.#environment = { ...process.env, DOCKER_HOST:control.endpoint };
     delete this.#environment.DOCKER_CONTEXT;
   }
@@ -50,10 +58,11 @@ export class DockerBackendCohort {
     for (const m of cohort.members) {
       const c=cohort.inspect(m.id);cohort.assertMember(m,c);
       const state=object(c.State);if(state.Running!==true||Number(state.Pid)<=0||state.OOMKilled!==false) throw Error('cohort_live_observation_required');
-      cohort.#snapshots.set(m.id,structuredClone(c));cohort.#fingerprints.set(m.id,hash(immutable(c)));
+      cohort.#snapshots.set(m.id,structuredClone(c));cohort.#fingerprints.set(m.id,dockerCohortConfigurationSha256(c));
     }
     cohort.assertNoOtherWriters();
-    await record({schema:'saturn.engine-cohort-observed.v1',at:new Date().toISOString(),recoveryId:cohort.recoveryId,engineId:control.engineId,identity:cohort.identity,members:cohort.members});
+    cohort.#ownerRegistration=cohort.readOwnerRegistration();
+    await record({schema:'saturn.engine-cohort-observed.v1',at:new Date().toISOString(),recoveryId:cohort.recoveryId,engineId:control.engineId,identity:cohort.identity,members:cohort.members,ownerRegistrationSHA256:hash(cohort.#ownerRegistration)});
     return cohort;
   }
   command(args: readonly string[]) {
@@ -65,13 +74,20 @@ export class DockerBackendCohort {
     const result=spawnSync(this.control.executable,['logs',id],{env:this.#environment,windowsHide:true,encoding:'utf8',timeout:40000,maxBuffer:16*1024*1024});
     if(result.error||result.status!==0)throw Error('cohort_log_capture_failed');return {stdout:result.stdout,stderr:result.stderr};
   }
+  private readOwnerRegistration() {
+    const worker=this.members.find(m=>m.role==='worker');if(!worker)throw Error('cohort_worker_registration_required');
+    const script="const fs=require('node:fs'),crypto=require('node:crypto'),a=require('node:assert/strict');const sha=b=>crypto.createHash('sha256').update(b).digest('hex');a.equal(process.getuid(),1000);const f='/out/backend-owner-registration.json',st=fs.lstatSync(f);a(st.isFile()&&!st.isSymbolicLink()&&st.size<=16384);const r=JSON.parse(fs.readFileSync(f,'utf8'));function check(x){a(Number.isSafeInteger(x.pid)&&x.pid>1);const p='/proc/'+x.pid;const fields=fs.readFileSync(p+'/stat','utf8').split(') ').at(-1).split(' ');a.equal(Number(fields[1]),x.parent);a.equal(fields[19],x.createdTicks);a.equal(sha(fs.readFileSync(p+'/exe')),x.exeSHA256);a.equal(sha(fs.readFileSync(p+'/cmdline')),x.argvSHA256);}check(r.parent);check(r.worker);a.equal(r.worker.parent,r.parent.pid);a(fs.readFileSync('/proc/'+r.parent.pid+'/cmdline','utf8').includes('/registered-worker-parent.mjs'));console.log(JSON.stringify({registration:r,parentScriptSHA256:sha(fs.readFileSync('/registered-worker-parent.mjs'))}));";
+    const observed=object(JSON.parse(this.command(['exec',worker.id,'node','-e',script]))),registration=object(observed.registration);
+    if(observed.parentScriptSHA256!==this.#registration.parentScriptSHA256||registration.schema!=='saturn.managed-worker-owner-registration.v1'||registration.nonce!==this.#registration.nonce||registration.actualPrivateIPC!==true||hash(registration.identity)!==hash(this.identity))throw Error('cohort_worker_owner_mismatch');
+    return registration;
+  }
   assertEngine() { if(this.command(['info','--format','{{.ID}}']).trim()!==this.control.engineId) throw Error('cohort_engine_changed'); }
   inspect(id: string) { const values=JSON.parse(this.command(['inspect',id])) as unknown[];if(values.length!==1)throw Error('cohort_engine_response_invalid');return object(values[0]); }
   private assertMember(m: DockerCohortMember,c: ObjectValue) {
     const config=object(c.Config),host=object(c.HostConfig),labels=object(config.Labels),restart=object(host.RestartPolicy);
     if(c.Id!==m.id||c.Created!==m.created||c.Image!==m.image||labels[this.control.ownershipLabel.key]!==this.control.ownershipLabel.value
       ||host.Privileged!==false||host.PidMode==='host'||restart.Name!=='no')throw Error('cohort_member_changed');
-    const fingerprint=this.#fingerprints.get(m.id);if(fingerprint&&hash(immutable(c))!==fingerprint)throw Error('cohort_configuration_changed');
+    const fingerprint=this.#fingerprints.get(m.id);if(fingerprint&&dockerCohortConfigurationSha256(c)!==fingerprint)throw Error('cohort_configuration_changed');
   }
   assertNoOtherWriters() {
     const ids=this.command(['ps','-q','--no-trunc']).trim().split(/\r?\n/).filter(Boolean);
@@ -109,7 +125,7 @@ export class DockerBackendCohort {
       const text=this.command(['wait',m.id]).trim();if(!/^(?:0|[1-9][0-9]{0,2})$/.test(text))throw Error('cohort_exit_unknown');
       c=this.inspect(m.id);this.assertMember(m,c);const state=object(c.State);
       if(state.Running!==false||state.Pid!==0||state.OOMKilled!==false||Number(state.ExitCode)!==Number(text))throw Error('cohort_exit_unproved');
-      const exit={...m,actualExit:Number(text),actualEngineWait:true,pid:0,oom:false,finishedAt:state.FinishedAt,configurationSha256:this.#fingerprints.get(m.id)};
+      const exit={...m,actualExit:Number(text),actualEngineWait:true,pid:0,oom:false,finishedAt:state.FinishedAt,instanceStartedAt:state.StartedAt,configurationSha256:this.#fingerprints.get(m.id)};
       // Persist actual daemon-backed exit before permanent removal. No volumes
       // are removed. The controller must retain application logs separately.
       await this.record({schema:'saturn.engine-cohort-exit.v1',at:new Date().toISOString(),...exit});exits.push(exit);
@@ -118,7 +134,7 @@ export class DockerBackendCohort {
     for(const m of this.members){const c=this.inspect(m.id);this.assertMember(m,c);if(object(c.State).Running!==false)throw Error('cohort_restarted_before_fence');}
     this.command(['rm',...this.members.map(m=>m.id)]);
     this.assertRemoved();
-    const proof=Object.freeze({schema:'saturn.authenticated-engine-cohort-fence.v1',recoveryId:this.recoveryId,identity:this.identity,engineId:this.control.engineId,members:exits,oldContainerIdsPermanentlyRemoved:true,physicalEffectsReplayed:0});
+    const proof=Object.freeze({schema:'saturn.authenticated-engine-cohort-fence.v1',recoveryId:this.recoveryId,identity:this.identity,engineId:this.control.engineId,ownerRegistrationSHA256:hash(this.#ownerRegistration),members:exits,oldContainerIdsPermanentlyRemoved:true,physicalEffectsReplayed:0});
     const fence=new EngineFencedBackendOwner(creationKey,this,proof);this.#fenced=fence;
     await this.record({at:new Date().toISOString(),...proof});return fence;
   }
