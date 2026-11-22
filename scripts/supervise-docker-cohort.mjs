@@ -30,7 +30,7 @@ const passwordInfo=fs.lstatSync(s.passwordFile);assert(passwordInfo.isFile()&&!p
 const password=fs.readFileSync(s.passwordFile,'utf8').replace(/[\r\n]+$/,'');assert(password.length>=8);
 const url=new URL(s.databaseUrl);assert(['127.0.0.1','localhost','[::1]'].includes(url.hostname),'Only explicitly published local operator PG');url.password=password;
 const database=new Database(url.toString(),{max:2,maintenanceBarrier:true});
-let cohort,liveMembers=[...s.members];const recoveries=[];const allCreated=[];const joins=[];
+let outcome;let cohort,liveMembers=[...s.members];const recoveries=[];const allCreated=[];const joins=[];
 const readOwner=async()=>database.withSql(async sql=>{const rows=await sql.unsafe('SELECT backend_identity,generation,owner_id,fencing_token,state FROM public.sync_backend_executor WHERE backend_identity=$1',[s.backendIdentity]);assert.equal(rows.length,1);const b=rows[0];assert.equal(b.generation,s.generation);assert.equal(b.state,'RUNNING');return{backendIdentity:b.backend_identity,generation:b.generation,ownerId:b.owner_id,fencingToken:b.fencing_token};});
 async function ready(member,port,client){const end=Date.now()+60000;for(;;){memory();const c=client.inspect(member.id);assert.equal(c.State.Running,true,'Replacement exited before readiness');try{client.command(['exec',member.id,'node','-e','fetch("http://127.0.0.1:'+port+'/health/ready",{signal:AbortSignal.timeout(2000)}).then(r=>process.exitCode=r.ok?0:1).catch(()=>process.exitCode=1)']);return;}catch{assert(Date.now()<end,'Replacement readiness deadline');await paused(250);}}}
 function createReplacement(template,role,index,client){
@@ -69,7 +69,7 @@ async function normalStop(){
   if(!cohort)return;
   for(const member of [...liveMembers].sort((a,b)=>a.role==='api'?-1:b.role==='api'?1:0)){
     let c=cohort.inspect(member.id);if(c.State.Running){await event({schema:'saturn.supervisor-normal-drain.v1',id:member.id,role:member.role,signal:'TERM'});cohort.command(['kill','--signal','TERM',member.id]);const deadline=Date.now()+30000;while(c.State.Running&&Date.now()<deadline){await paused(100);c=cohort.inspect(member.id);}assert.equal(c.State.Running,false,'Normal drain pending; no implicit kill');}
-    const text=cohort.command(['wait',member.id]).trim();assert(/^\d+$/.test(text));assert.equal(Number(text),0,'Normal shutdown must join zero');joins.push({...member,actualExit:Number(text),actualWait:true});
+    const text=cohort.command(['wait',member.id]).trim();assert(/^\d+$/.test(text));assert(member.role==='api'?[0,143].includes(Number(text)):Number(text)===0,'Unexpected cooperative shutdown status');joins.push({...member,actualExit:Number(text),actualWait:true});
   }
 }
 try{
@@ -93,8 +93,8 @@ try{
     liveMembers=replacements;cohort=await DockerBackendCohort.observe(s.control,liveMembers,next,event);
   }
   await normalStop();const stopped=await database.withSql(sql=>sql.unsafe('SELECT state,owner_id,fencing_token FROM public.sync_backend_executor WHERE backend_identity=$1',[s.backendIdentity]));assert.equal(stopped[0].state,'STOPPED');assert.equal(stopped[0].owner_id,null);assert.equal(stopped[0].fencing_token,null);
-  save('result.json',{at:new Date().toISOString(),status:'STOPPED_AUTOMATIC_COHORT_SUPERVISOR',recoveries,joins,allCreated,manualRepairs:0,queueRewrites:0,cursorResets:0});
+  outcome={at:new Date().toISOString(),status:'STOPPED_AUTOMATIC_COHORT_SUPERVISOR',recoveries,joins,allCreated,manualRepairs:0,queueRewrites:0,cursorResets:0};
 }catch(error){
   await event({schema:'saturn.supervisor-refusal.v1',name:error.name,message:String(error.message).replaceAll(password,'[REDACTED]')});
-  save('result.json',{at:new Date().toISOString(),status:'REFUSED_RETAINED_STATE',error:{name:error.name,message:String(error.message).replaceAll(password,'[REDACTED]')},recoveries,joins,allCreated,manualRepairs:0,queueRewrites:0,cursorResets:0});process.exitCode=1;
-}finally{await database.close();}
+  outcome={at:new Date().toISOString(),status:'REFUSED_RETAINED_STATE',error:{name:error.name,message:String(error.message).replaceAll(password,'[REDACTED]')},recoveries,joins,allCreated,manualRepairs:0,queueRewrites:0,cursorResets:0};process.exitCode=1;
+}finally{let closeCompleted=false,closeError;let closeTimer;const deadline=new Promise(resolve=>{closeTimer=setTimeout(resolve,10000);});await Promise.race([database.close().then(()=>{closeCompleted=true;},error=>{closeError=String(error.message).replaceAll(password,'[REDACTED]');}),deadline]);clearTimeout(closeTimer);outcome.databaseCloseCompleted=closeCompleted;if(closeError)outcome.databaseCloseError=closeError;if(!closeCompleted){outcome.previousStatus=outcome.status;outcome.status='REFUSED_DATABASE_CLOSE_PENDING';process.exitCode=1;}const intendedExit=closeCompleted&&outcome.status==='STOPPED_AUTOMATIC_COHORT_SUPERVISOR'?0:1;await event({schema:'saturn.supervisor-process-exit.v1',databaseCloseCompleted:closeCompleted,intendedExit,ordinaryRuntimeJoinsComplete:outcome.status==='STOPPED_AUTOMATIC_COHORT_SUPERVISOR'});save('result.json',outcome);process.exit(intendedExit);}

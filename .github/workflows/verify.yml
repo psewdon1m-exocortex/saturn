@@ -87,6 +87,8 @@ jobs:
         env:
           SATURN_DOCUMENTATION_OUTPUT: artifacts/verification/documentation
         run: pnpm verify:documentation
+      - name: Verify automatic supervisor dependency refusal
+        run: node --test scripts/supervise-docker-cohort.test.mjs
       - name: Preserve verification evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

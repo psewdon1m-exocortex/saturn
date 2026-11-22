@@ -48,7 +48,9 @@ started. Application images, credentials, storage/data volumes, transport
 ceilings and original IDs are preserved. Only declared ephemeral output bind
 mounts may receive a fresh generation directory. The bounded recovery budget
 is explicit. The private stop-file nonce, or SIGTERM on a supporting host,
-requests normal API-before-worker shutdown and actual zero exits; normal stop
+requests normal API-before-worker shutdown, actual worker exit0 and API exit0
+or Nest SIGTERM143, and observed database-pool closure. Refusal or incomplete
+database closure exits nonzero within a bounded cleanup deadline; normal stop
 never silently escalates to KILL.
 
 The scope is real owner/API/worker unit failure with the authenticated Docker
