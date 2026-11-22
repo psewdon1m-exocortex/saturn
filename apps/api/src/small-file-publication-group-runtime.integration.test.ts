@@ -1,3 +1,4 @@
+import { readySmallPublications,publishedSmallGroup } from './publication-ready.fixture.js';
 import { fixtureChunks, fixtureMethod, fixtureValue } from './test-values.fixture.js';
 import {expect,it,vi} from 'vitest';
 import {FileService,PostgresFileRepository} from '@saturn/file-core';
@@ -17,7 +18,7 @@ it('publishes four independent originals with one backend group and replays exac
   try{
     const items=Array.from({length:4},(_,n)=>{const bytes=Buffer.alloc(4096,n+1);return {bytes,input:f.uploadInput('group-'+String(n)+'.bin',bytes)};});
     const prepared=await Promise.all(items.map(i=>c.files.prepareSmallCatalogUpload(i.input,f.proof)));
-    const results=await Promise.all(prepared.map((p,n)=>c.files.completeSmallCatalogUpload(p,f.proof,fixtureValue(items[n]).bytes)));
+    const results=publishedSmallGroup(await readySmallPublications(f,c,prepared.map((prepared,n)=>({prepared,bytes:fixtureValue(items[n]).bytes}))));
     expect(results.every(p=>p.status.result?.status==='PUBLISHED')).toBe(true);
     const tasks=await f.admin.withSql(sql=>sql<{id:string;command:string;state:string;payload:{members:{operationId:string}[]}}[]>`SELECT id,command,state,payload FROM sync_backend_tasks WHERE command IN ('rename','rename-group')`);
     expect(tasks).toHaveLength(1);expect(tasks[0]).toMatchObject({command:'rename-group',state:'DONE'});
@@ -43,7 +44,7 @@ it('keeps all original claims when the grouped physical response is lost after t
     const items=Array.from({length:4},(_,n)=>{const bytes=Buffer.alloc(4096,n+7);return {bytes,input:f.uploadInput('uncertain-'+String(n)+'.bin',bytes)};});
     const prepared=await Promise.all(items.map(i=>c.files.prepareSmallCatalogUpload(i.input,f.proof))),effect=f.executor.renameGroupOnce.bind(f.executor);
     vi.spyOn(f.executor,'renameGroupOnce').mockImplementationOnce(async(...args)=>{await effect(...args);throw Error('lost grouped response');});
-    expect((await Promise.allSettled(prepared.map((p,n)=>c.files.completeSmallCatalogUpload(p,f.proof,fixtureValue(items[n]).bytes)))).every(r=>r.status==='rejected')).toBe(true);
+    expect((await readySmallPublications(f,c,prepared.map((prepared,n)=>({prepared,bytes:fixtureValue(items[n]).bytes})))).every(r=>r.status==='rejected')).toBe(true);
     for(const [n,p]of prepared.entries()){
       expect((await c.database.status(p,f.proof)).status.session.phase).toBe('reconciliation_required');
       const chunks:Buffer[]=[];for await(const part of fixtureChunks(await f.raw.openRead(p.execution.targetPath)))chunks.push(Buffer.from(part));expect(sha(Buffer.concat(chunks))).toBe(sha(fixtureValue(items[n]).bytes));
@@ -65,7 +66,7 @@ it('retains already accepted claims if checking the optional effect capability f
   try{
     const bytes=Buffer.from('retained verified bytes'),prepared=await Promise.all(Array.from({length:4},(_,n)=>c.files.prepareSmallCatalogUpload(f.uploadInput('cap-'+String(n)+'.bin',bytes),f.proof)));
     vi.spyOn(f.executor,'supportsRenameGroupOnce').mockRejectedValueOnce(Error('lost capability response'));const rename=vi.spyOn(f.raw,'rename');
-    expect((await Promise.allSettled(prepared.map(p=>c.files.completeSmallCatalogUpload(p,f.proof,bytes)))).every(r=>r.status==='rejected')).toBe(true);expect(rename).not.toHaveBeenCalled();
+    expect((await readySmallPublications(f,c,prepared.map(prepared=>({prepared,bytes})))).every(r=>r.status==='rejected')).toBe(true);expect(rename).not.toHaveBeenCalled();
     for(const p of prepared){expect((await c.database.status(p,f.proof)).status.session.phase).toBe('reconciliation_required');expect(await f.raw.exists(p.execution.tempPath)).toBe(true);}
     expect(await f.admin.withSql(sql=>sql`SELECT id FROM file_versions`)).toHaveLength(0);
     expect(await f.admin.withSql(sql=>sql`SELECT id FROM sync_backend_tasks WHERE command='rename-group'`)).toHaveLength(0);
