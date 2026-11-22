@@ -33,6 +33,29 @@ async function clientOriginals(f:Awaited<ReturnType<typeof activeFixture>>,c:Ret
   return items;
 }
 
+// These fault cards require one genuinely ready four-member publication set.
+// Keep the real stat, full-byte verification and SQL capability checks, then
+// release all ready completions together; the product's 50ms tail stays intact.
+async function readyGroupCompletions(f:Awaited<ReturnType<typeof activeFixture>>,c:ReturnType<typeof client>,items:Awaited<ReturnType<typeof clientOriginals>>){
+  const supports=c.db.supportsPublicationGroups.bind(c.db);let release=()=>{},ready=0,expired=false;
+  const gate=new Promise<void>(resolve=>{release=resolve;});
+  const timer=setTimeout(()=>{expired=true;release();},5000);
+  const observed=vi.spyOn(c.db,'supportsPublicationGroups').mockImplementation(async()=>{
+    const actual=await supports();
+    if(ready>=items.length)return actual;
+    if(!actual)throw Error('Publication-group fixture capability unavailable');
+    ready++;if(ready===items.length){clearTimeout(timer);release();}
+    await gate;if(expired)throw Error('Four real verified originals did not reach the publication-group barrier');return actual;
+  });
+  try{
+    const outcomes=await Promise.allSettled(items.map(i=>c.files.completeCatalogUpload(i.prepared,f.proof)));
+    expect(ready).toBe(4);expect(expired).toBe(false);return outcomes;
+  }finally{clearTimeout(timer);release();observed.mockRestore();}
+}
+function publishedGroup(outcomes:Awaited<ReturnType<typeof readyGroupCompletions>>){
+  return outcomes.map(outcome=>{if(outcome.status==='rejected')throw outcome.reason;return outcome.value;});
+}
+
 it('claims distinct originals together, excludes new work, and publishes independent exact receipts',async()=>{
   const f=await activeFixture('smallfile-group','windows',reviewMigration);
   try{
@@ -57,7 +80,7 @@ it('falls back from an unclaimed conflicting group without losing independent va
   const f=await activeFixture('smallfile-group-fallback','windows',reviewMigration),c=client(f);
   try{
     const items=await clientOriginals(f,c,['same.bin','same.bin','valid.bin','also-valid.bin']);
-    const results=await Promise.allSettled(items.map(i=>c.files.completeCatalogUpload(i.prepared,f.proof)));
+    const results=await readyGroupCompletions(f,c,items);
     expect(results.filter(r=>r.status==='fulfilled')).toHaveLength(3);
     expect(results.filter(r=>r.status==='rejected')).toMatchObject([{reason:{code:'precondition_failed'}}]);
     expect(await f.admin.withSql(sql=>sql`SELECT id FROM catalog_upload_publication_groups`)).toHaveLength(0);
@@ -75,7 +98,7 @@ it('rechecks revoked authority before a group claim and retains all private byte
   try{
     const items=await clientOriginals(f,c),rename=vi.spyOn(f.raw,'rename');
     await f.admin.withSql(sql=>sql`UPDATE devices SET can_write=false WHERE sync_root_id=${f.rootId}`);
-    const results=await Promise.allSettled(items.map(i=>c.files.completeCatalogUpload(i.prepared,f.proof)));
+    const results=await readyGroupCompletions(f,c,items);
     expect(results.every(r=>r.status==='rejected')).toBe(true);expect(rename).not.toHaveBeenCalled();
     expect(await f.admin.withSql(sql=>sql`SELECT upload_effect_state FROM operation_journal WHERE sync_root_id=${f.rootId}`)).toEqual(Array(4).fill({upload_effect_state:'transport'}));
     expect(await f.admin.withSql(sql=>sql`SELECT id FROM catalog_upload_publication_groups`)).toHaveLength(0);
@@ -86,7 +109,7 @@ it('rechecks revoked authority before a group claim and retains all private byte
 it('retains immutable group history and refuses a rollback that would erase it',async()=>{
   const f=await activeFixture('smallfile-group-history','windows',reviewMigration),c=client(f);
   try{
-    const items=await clientOriginals(f,c);await Promise.all(items.map(i=>c.files.completeCatalogUpload(i.prepared,f.proof)));
+    const items=await clientOriginals(f,c);publishedGroup(await readyGroupCompletions(f,c,items));
     const history=await f.admin.withSql(sql=>sql`SELECT * FROM catalog_upload_publication_groups`);expect(history).toHaveLength(1);
     await expect(f.runtime.withSql(sql=>sql`DELETE FROM catalog_upload_publication_groups`)).rejects.toThrow();
     await expect(f.runtime.withSql(sql=>sql`UPDATE operation_journal SET upload_publication_group=NULL WHERE sync_root_id=${f.rootId}`)).rejects.toThrow();
@@ -102,7 +125,7 @@ it('a lost group claim ACK retains every original and performs no rename',async(
   try{
     const items=await clientOriginals(f,c),original=c.db.verifyAndClaimGroup.bind(c.db),rename=vi.spyOn(f.raw,'rename');
     vi.spyOn(c.db,'verifyAndClaimGroup').mockImplementationOnce(async(...args)=>{await original(...args);throw Error('lost group claim ACK');});
-    const outcomes=await Promise.allSettled(items.map(i=>c.files.completeCatalogUpload(i.prepared,f.proof)));
+    const outcomes=await readyGroupCompletions(f,c,items);
     expect(outcomes.every(r=>r.status==='rejected')).toBe(true);expect(rename).not.toHaveBeenCalled();
     const restarted=client(f);
     for(const i of items){
@@ -119,7 +142,7 @@ it('a lost group member commit ACK returns all original receipts without repeat 
   try{
     const items=await clientOriginals(f,c),original=c.db.commit.bind(c.db),groups=vi.spyOn(c.db,'verifyAndClaimGroup');
     vi.spyOn(c.db,'commit').mockImplementationOnce(async(...args)=>{await original(...args);throw Error('lost member commit ACK');});
-    const published=await Promise.all(items.map(i=>c.files.completeCatalogUpload(i.prepared,f.proof)));
+    const published=publishedGroup(await readyGroupCompletions(f,c,items));
     expect(groups).toHaveBeenCalledOnce();expect(fixtureValue(groups.mock.calls[0])[0]).toHaveLength(4);
     expect(published.map(p=>p.status.result?.status)).toEqual(Array(4).fill('PUBLISHED'));
     const versions=await f.admin.withSql(sql=>sql`SELECT id FROM file_versions ORDER BY id`),rename=vi.spyOn(f.raw,'rename'),write=vi.spyOn(f.raw,'write'),restarted=client(f);
@@ -142,7 +165,7 @@ it('a response loss after one rename keeps the whole uncertain group before any 
       const raw=f.raw.rename.bind(f.raw);
       vi.spyOn(f.raw,'rename').mockImplementationOnce(async(...args)=>{await raw(...args);renamed=args[1];throw Error('lost rename response');});
     }else vi.spyOn(f.executor,'rename').mockImplementationOnce(async(...args)=>{await rename(...args);throw Error('lost rename response');});
-    const results=await Promise.allSettled(items.map(i=>c.files.completeCatalogUpload(i.prepared,f.proof)));
+    const results=await readyGroupCompletions(f,c,items);
     expect(results.every(r=>r.status==='rejected')).toBe(true);
     for(const i of items){
       expect((await c.db.status(i.prepared,f.proof)).status.session.phase).toBe('reconciliation_required');
