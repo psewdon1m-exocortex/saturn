@@ -136,18 +136,31 @@ it('rejects malformed or stale final CAS members and revoked authority before cl
 
 it('resolves a lost CAS publication acknowledgement by the same durable receipts without duplicate versions',async()=>{
  const id='n01-cas-set-lost-ack',f=await activeFixture(id,'windows',migration),{files}=composition(f);
+ let releaseVerified=()=>{},verifiedTimer:ReturnType<typeof setTimeout>|undefined,completionJoin:Promise<unknown>|undefined;
  try{
   const seed=await seeded(f),bytes=Buffer.alloc(49152,172),prepared=[];
   for(const [n,old]of seed.old.entries())prepared.push(await files.prepareCatalogUpload(f.uploadInput('cas-'+String(n)+'.bin',bytes,previous(old)),f.proof));
   const send=f.writer.catalogUploadBatch.bind(f.writer);let lost=0;
   vi.spyOn(f.writer,'catalogUploadBatch').mockImplementation(async(...args)=>{const value=await send(...args);if(args[0]==='publish-cas-set'&&lost++===0)throw Error('Injected lost SQL publication ACK');return value;});
-  const results=await Promise.all(prepared.map(p=>files.completeSmallCatalogUpload(p,f.proof,bytes)));
+  // Qualify one four-member ready set while retaining all real verified writes.
+  // The grouping must not depend on host fsync scheduling before the ACK fault.
+  const writeVerified=f.executor.writeVerifiedOnce.bind(f.executor),verifiedGate=new Promise<void>(resolve=>{releaseVerified=resolve;});
+  let verifiedReady=0,verifiedExpired=false;
+  verifiedTimer=setTimeout(()=>{verifiedExpired=true;releaseVerified();},5000);
+  vi.spyOn(f.executor,'writeVerifiedOnce').mockImplementation(async(...args)=>{
+   const proof=await writeVerified(...args);verifiedReady++;
+   if(verifiedReady===prepared.length){clearTimeout(verifiedTimer);releaseVerified();}
+   await verifiedGate;if(verifiedExpired)throw Error('Lost-ACK CAS fixture did not reach four real verified originals');return proof;
+  });
+  const completing=prepared.map(p=>files.completeSmallCatalogUpload(p,f.proof,bytes));
+  completionJoin=Promise.allSettled(completing);const results=await Promise.all(completing);
+  expect(verifiedReady).toBe(4);expect(verifiedExpired).toBe(false);
   expect(lost).toBe(1);expect(results.every(p=>p.status.result?.status==='PUBLISHED')).toBe(true);
   expect(results.map(p=>previous(p).nodeId)).toEqual(seed.old.map(p=>previous(p).nodeId));
   for(const [n,p]of results.entries()){expect(sha(await physical(f,p.execution.targetPath))).toBe(sha(bytes));expect(sha(await physical(f,fixtureValue(p.execution.archivePath)))).toBe(sha(fixtureValue(seed.bytes[n])));}
   expect(await f.admin.withSql(sql=>sql`SELECT id FROM file_versions`)).toHaveLength(8);
   await evidence(id,'result',{lostAckAfterSqlCommit:1,sameOriginalReceipts:true,versions:8,fullShaAndOldArchives:true});
- }finally{vi.restoreAllMocks();await f.close();}
+ }finally{releaseVerified();clearTimeout(verifiedTimer);await completionJoin;vi.restoreAllMocks();await f.close();}
 },90000);
 
 it('does not bypass a rejected CAS set through per-member publication when its last version is stale',async()=>{
