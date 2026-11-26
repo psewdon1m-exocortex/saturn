@@ -1147,6 +1147,42 @@ describe("FileService upload state machine", () => {
     expect(enumeration).not.toHaveBeenCalled();
   }));
 
+  it("bounds archive traversal across 501 sibling parents using catalog parents rather than physical object paths", async () => safetyFixture(async (service, repository) => {
+    const root = repository.resources.get(SYNC_RESOURCE_ID);
+    if (!root) throw Error("Fixture root missing");
+    const folders = Array.from({ length: 501 }, (_, i): Resource => ({ ...root,
+      id: `00000000-0000-7000-8000-${String(i + 10000).padStart(12, "0")}`,
+      parentId: root.id, name: `branch-${String(i)}`, storagePath: `immutable-object/${String(i)}` }));
+    for (const row of folders) repository.resources.set(row.id, row);
+    const last = folders.at(-1); if (!last) throw Error("Fixture branch missing");
+    const leaf: Resource = { ...last, id: "00000000-0000-7000-8000-000000099999", type: "file",
+      parentId: last.id, name: "файл.bin", storagePath: "unrelated/immutable-body", sizeBytes: 1 };
+    repository.resources.set(leaf.id, leaf);
+    const batched = repository as MemoryRepository & { readChildrenBatch: NonNullable<FileRepository["readChildrenBatch"]> };
+    const read = vi.fn(async (parents: readonly string[], maximum: number) => ({
+      parents: parents.map(id => repository.resources.get(id)).filter((r): r is Resource => r !== undefined),
+      children: [...repository.resources.values()].filter(r => r.parentId !== undefined && parents.includes(r.parentId) && r.status === "active").slice(0, maximum),
+    }));
+    batched.readChildrenBatch = read;
+    const rows = await service.readFolderDescendants(root.id, 502);
+    expect(new Set(rows.map(r => r.id))).toEqual(new Set([...folders, leaf].map(r => r.id)));
+    expect(rows.find(r => r.id === leaf.id)).toMatchObject({ parentId: last.id, storagePath: "unrelated/immutable-body" });
+    expect(read.mock.calls.some(([parents]) => parents.length > 1)).toBe(true);
+    expect(read.mock.calls.every(([parents]) => parents.length <= 500)).toBe(true);
+    await expect(service.readFolderDescendants(root.id, 501)).rejects.toThrow("item limit");
+  }));
+
+  it.each(["missing-parent", "inactive-parent", "foreign-child", "cycle"] as const)("refuses an archive batch with %s instead of silently dropping or reparenting data", async kind => safetyFixture(async (service, repository) => {
+    const root = repository.resources.get(SYNC_RESOURCE_ID); if (!root) throw Error("Fixture root missing");
+    const batched = repository as MemoryRepository & { readChildrenBatch: NonNullable<FileRepository["readChildrenBatch"]> };
+    batched.readChildrenBatch = async () => ({
+      parents: kind === "missing-parent" ? [] : [{ ...root, ...(kind === "inactive-parent" ? { status: "trashed" as const } : {}) }],
+      children: kind === "foreign-child" ? [{ ...root, id: "foreign", parentId: ROOT_RESOURCE_ID }]
+        : kind === "cycle" ? [{ ...root, parentId: root.id }] : [],
+    });
+    await expect(service.readFolderDescendants(root.id, 10)).rejects.toThrow();
+  }));
+
   it("creates a folder and commits a resumable upload only after checksum verification", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "vault-file-service-"));
     const storage = new LocalStorageAdapter(root);

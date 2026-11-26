@@ -9,7 +9,7 @@ it("bounds physical ZIP source opens to the active and following member", async 
   const root = { id: "root", name: "tree", type: "folder", status: "active", storagePath: "fixture/tree", updatedAt: now };
   const children = Array.from({ length: 32 }, (_, index) => ({ id: String(index), name: `${String(index)}.bin`, parentId: "root", type: "file", status: "active", storagePath: `fixture/tree/${String(index)}.bin`, sizeBytes: bytes.length, sha256, updatedAt: now }));
   let active = 0, peak = 0, opened = 0;
-  const files = { getResource: vi.fn(async () => root), listChildren: vi.fn(async () => children),
+  const files = { getResource: vi.fn(async () => root), readFolderDescendants: vi.fn(async () => children),
     openDownload: vi.fn(async (id: string, select?: (value: unknown) => unknown) => {
       const resource = fixtureValue(children.find(r => r.id === id)); select?.(resource); active++; opened++; peak = Math.max(peak, active);
       const stream = Readable.from((async function* () { try { await new Promise<void>(resolve => setImmediate(resolve)); yield bytes; } finally { active--; } })());

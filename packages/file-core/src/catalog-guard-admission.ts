@@ -13,13 +13,7 @@ export class PostgresCatalogMutationGuard implements CatalogMutationGuard {
   constructor(private readonly database:Database) {}
   async assertOutside(nodeIds:readonly string[]):Promise<void> {
     if(nodeIds.length<1||nodeIds.length>500||nodeIds.some(id=>!UUID.test(id)))throw new CatalogFolderError("invalid_input");
-    await this.database.transaction(async sql=>{
-      await sql`SET LOCAL statement_timeout='2s'`;await sql`SET LOCAL lock_timeout='2s'`;
-      const scoped=(await sql<{scoped:boolean}[]>`SELECT EXISTS(SELECT 1 FROM unnest(${[...new Set(nodeIds)]}::uuid[]) n(id)
-        LEFT JOIN public.resources r ON r.id=n.id
-        WHERE cardinality(public.catalog_guard_scope(n.id))>0 OR cardinality(public.catalog_guard_scope(r.trashed_from_parent_id))>0) AS scoped`)[0]?.scoped;
-      if(scoped)throw new CatalogFolderError("binding_invalid");
-    });
+    if(!await this.database.catalogGuardOutside(nodeIds))throw new CatalogFolderError("binding_invalid");
   }
 }
 /** Caller holds/acquires the root clock first. The qualified successor excludes only fixed-lifecycle

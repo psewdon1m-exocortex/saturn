@@ -15,6 +15,7 @@ on:
       - main
       - "release-qualification/package1-*"
       - "release-qualification/package6-*"
+      - "release-qualification/package7-*"
     tags:
       - "v*.*.*"
 

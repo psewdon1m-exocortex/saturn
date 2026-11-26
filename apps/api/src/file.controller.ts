@@ -155,10 +155,14 @@ export class FileController {
   async #folderArchiveEntries(folder: Resource): Promise<{ readonly entries: readonly { readonly resource: Resource; readonly path: string }[]; readonly totalBytes: number }> {
     const entries: Array<{ readonly resource: Resource; readonly path: string }> = [];
     let totalBytes = 0;
-    const visit = async (parentId: string, prefix: string): Promise<void> => {
-      for (let offset = 0; ; offset += 500) {
-        const page = await this.files.listChildren(parentId, offset, 500);
-        for (const resource of page) {
+    const children = new Map<string, Resource[]>();
+    for (const resource of await this.files.readFolderDescendants(folder.id, this.config.share.packageMaxFiles)) {
+      const parent = resource.parentId;
+      if (parent === undefined) throw new Error("Archive member has no parent");
+      const page = children.get(parent) ?? []; page.push(resource); children.set(parent, page);
+    }
+    const visit = (parentId: string, prefix: string): void => {
+        for (const resource of children.get(parentId) ?? []) {
           const archivePath = `${prefix}${resource.name}${resource.type === "folder" ? "/" : ""}`;
           entries.push({ resource, path: archivePath });
           if (entries.length > this.config.share.packageMaxFiles) throw new Error("Folder archive exceeds the configured item limit");
@@ -166,13 +170,11 @@ export class FileController {
             totalBytes += resource.sizeBytes;
             if (totalBytes > this.config.share.packageMaxBytes) throw new Error("Folder archive exceeds the configured size limit");
           } else {
-            await visit(resource.id, archivePath);
+            visit(resource.id, archivePath);
           }
         }
-        if (page.length < 500) return;
-      }
     };
-    await visit(folder.id, `${folder.name}/`);
+    visit(folder.id, `${folder.name}/`);
     return { entries, totalBytes };
   }
 

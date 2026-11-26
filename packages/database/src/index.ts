@@ -41,6 +41,7 @@ export class Database {
   readonly #queryAdmissionSql: Sql;
   readonly #backendCommandSql: Sql;
   readonly #catalogCommandSql: Sql;
+  readonly #catalogGuardSql: Sql;
   readonly #maintenanceContext: AsyncLocalStorage<{ active: boolean }>;
   readonly #maintenanceEndpoint: string | undefined;
   #lockRequests = 0;
@@ -86,6 +87,13 @@ export class Database {
       max: Math.min(options.max ?? 4, 4), idle_timeout: 20, connect_timeout: 10,
       max_lifetime: 60 * 30, prepare: true, ...noCommandPipelining, transform: { undefined: null },
       connection: { plan_cache_mode: "force_generic_plan", statement_timeout: 2000, lock_timeout: 2000, idle_in_transaction_session_timeout: 2000, default_transaction_isolation: "read committed", application_name: "saturn_catalog_command" },
+    });
+    // One fixed read, with the same deadlines as the former BEGIN/SET/SELECT
+    // guard. Private startup defaults also cover replacement connections.
+    this.#catalogGuardSql = postgres(databaseUrl, {
+      max: 2, idle_timeout: 20, connect_timeout: 10, max_lifetime: 60 * 30,
+      prepare: true, ...noCommandPipelining,
+      connection: { statement_timeout: 2000, lock_timeout: 2000, application_name: "saturn_catalog_guard" },
     });
   }
 
@@ -133,6 +141,20 @@ export class Database {
     // new requests waiting behind an exclusive barrier can consume every query
     // connection needed by the admitted writers that must release that barrier.
     return this.#withMaintenanceAdmission(this.#queryAdmissionSql, () => action(this.#sql));
+  }
+
+  /** Pre-I/O legacy scope check; no caller can borrow this bounded session. */
+  async catalogGuardOutside(nodeIds: readonly string[]): Promise<boolean> {
+    if (nodeIds.length < 1 || nodeIds.length > 500 || nodeIds.some(id => !/^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/.test(id))) throw Error("invalid_input");
+    if (this.#maintenanceBarrier && this.#maintenanceContext.getStore()?.active !== true) {
+      return this.#withMaintenanceAdmission(this.#queryAdmissionSql, () => this.catalogGuardOutside(nodeIds));
+    }
+    const rows = await this.#catalogGuardSql<{ outside: boolean }[]>`
+      SELECT NOT EXISTS(SELECT 1 FROM unnest(${[...new Set(nodeIds)]}::uuid[]) n(id)
+        LEFT JOIN public.resources r ON r.id=n.id
+        WHERE cardinality(public.catalog_guard_scope(n.id))>0
+          OR cardinality(public.catalog_guard_scope(r.trashed_from_parent_id))>0) AS outside`;
+    return rows[0]?.outside === true;
   }
 
   async transaction<T>(action: (sql: TransactionSql) => Promise<T>): Promise<T> {
@@ -335,7 +357,7 @@ export class Database {
   }
 
   async close(): Promise<void> {
-    await Promise.all([this.#sql.end({ timeout: 5 }), this.#lockSql.end({ timeout: 5 }), this.#maintenanceSql.end({ timeout: 5 }), this.#queryAdmissionSql.end({ timeout: 5 }), this.#backendCommandSql.end({ timeout: 5 }), this.#catalogCommandSql.end({ timeout: 5 })]);
+    await Promise.all([this.#sql.end({ timeout: 5 }), this.#lockSql.end({ timeout: 5 }), this.#maintenanceSql.end({ timeout: 5 }), this.#queryAdmissionSql.end({ timeout: 5 }), this.#backendCommandSql.end({ timeout: 5 }), this.#catalogCommandSql.end({ timeout: 5 }), this.#catalogGuardSql.end({ timeout: 5 })]);
   }
 
   async #assertRecoveryReady(sql: Sql): Promise<void> {

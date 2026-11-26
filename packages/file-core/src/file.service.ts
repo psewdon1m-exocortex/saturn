@@ -275,6 +275,40 @@ export class FileService {
     return this.#repository.listChildren(parentId, offset, limit);
   }
 
+  /** Both archive passes use this same bounded parent-graph traversal. */
+  async readFolderDescendants(rootId: string, maximumEntries: number): Promise<readonly Resource[]> {
+    if (!Number.isSafeInteger(maximumEntries) || maximumEntries < 1 || maximumEntries > 100_000) throw Error("Folder tree limit is invalid");
+    const root = await this.getResource(rootId);
+    if (root.type !== "folder" || root.status !== "active") throw Error("Parent folder is not active");
+    const queue = [root.id], seen = new Set([root.id]), entries: Resource[] = [];
+    for (let next = 0; next < queue.length;) {
+      const parents = queue.slice(next, next + (this.#repository.readChildrenBatch ? 500 : 1)); next += parents.length;
+      let children: readonly Resource[];
+      if (this.#repository.readChildrenBatch) {
+        const frame = await this.#repository.readChildrenBatch(parents, maximumEntries - entries.length + 1);
+        if (frame.parents.length !== parents.length || new Set(frame.parents.map(r => r.id)).size !== parents.length
+          || frame.parents.some(r => !parents.includes(r.id) || r.type !== "folder" || r.status !== "active")) throw Error("Parent folder is not active");
+        children = frame.children;
+      } else {
+        const collected: Resource[] = [];
+        const parentId = parents[0];
+        if (parentId === undefined) throw Error("Folder tree parent is missing");
+        for (let offset = 0;; offset += 500) {
+          const page = await this.listChildren(parentId, offset, 500); collected.push(...page);
+          if (entries.length + collected.length > maximumEntries) throw Error("Folder archive exceeds the configured item limit");
+          if (page.length < 500) break;
+        }
+        children = collected;
+      }
+      if (entries.length + children.length > maximumEntries) throw Error("Folder archive exceeds the configured item limit");
+      for (const row of children) {
+        if (row.parentId === undefined || !parents.includes(row.parentId) || row.status !== "active" || seen.has(row.id)) throw Error("Folder tree changed");
+        seen.add(row.id); entries.push(row); if (row.type === "folder") queue.push(row.id);
+      }
+    }
+    return entries;
+  }
+
   async findChildExact(parentId: string, name: string): Promise<Resource | undefined> {
     const parent = await this.getResource(parentId);
     if (parent.type !== "folder" || parent.status !== "active") throw new Error("Parent folder is not active");

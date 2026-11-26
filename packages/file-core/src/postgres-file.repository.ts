@@ -287,6 +287,21 @@ export class PostgresFileRepository implements FileRepository {
     });
   }
 
+  readChildrenBatch(parentIds: readonly string[], maximumChildren: number): Promise<{ readonly parents: readonly Resource[]; readonly children: readonly Resource[] }> {
+    if (parentIds.length < 1 || parentIds.length > 500 || new Set(parentIds).size !== parentIds.length
+      || !Number.isSafeInteger(maximumChildren) || maximumChildren < 1 || maximumChildren > 100_001) throw Error("Folder batch limit is invalid");
+    return this.#database.withSql(async sql => {
+      const rows = await sql<(ResourceRow & { frame_kind: "parent" | "child" })[]>`
+        SELECT 'parent'::text AS frame_kind,r.* FROM resources r WHERE id=ANY(${[...parentIds]}::uuid[])
+        UNION ALL
+        (SELECT 'child'::text AS frame_kind,r.* FROM resources r
+          WHERE parent_id=ANY(${[...parentIds]}::uuid[]) AND status='active'
+          ORDER BY type DESC,lower(name),id LIMIT ${maximumChildren})`;
+      return { parents: rows.filter(r => r.frame_kind === "parent").map(resource),
+        children: rows.filter(r => r.frame_kind === "child").map(resource) };
+    });
+  }
+
   listTrash(offset: number, limit: number): Promise<readonly Resource[]> {
     return this.#database.withSql(async (sql) => {
       const rows = await sql<ResourceRow[]>`

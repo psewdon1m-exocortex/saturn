@@ -59,6 +59,10 @@ export interface FileRepository {
   getResourceAtPath(storagePath: string): Promise<Resource | undefined>;
   getChild(parentId: string, name: string): Promise<Resource | undefined>;
   listChildren(parentId: string, offset: number, limit: number): Promise<readonly Resource[]>;
+  /** Bounded archive traversal; parent validity and children share one snapshot. */
+  readChildrenBatch?(parentIds: readonly string[], maximumChildren: number): Promise<{
+    readonly parents: readonly Resource[]; readonly children: readonly Resource[];
+  }>;
   listTrash(offset: number, limit: number): Promise<readonly Resource[]>;
   getTrashRetentionDays(): Promise<number>;
   getUploadLimits(): Promise<UploadLimits | undefined>;

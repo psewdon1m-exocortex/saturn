@@ -8,9 +8,56 @@ import postgres from "postgres";
 import { expect, it } from "vitest";
 import { Database, migrate } from "./index.js";
 import { setTimeout as delay } from "node:timers/promises";
+import { isolatedTestDatabase } from "./isolated-test-database.fixture.js";
 
 const baseUrl = process.env.PIPELINE_TEST_DATABASE_URL;
 const evidence = process.env.SATURN_MAINTENANCE_EVIDENCE_DIR;
+
+it.skipIf(!baseUrl)("keeps the catalog scope read bounded and isolated while preserving maintenance and interrupted-recovery fences", async () => {
+  if (!baseUrl) throw Error("PIPELINE_TEST_DATABASE_URL is required");
+  const fixture = await isolatedTestDatabase(baseUrl), raw = postgres(fixture.url, { max: 1 });
+  const db = new Database(fixture.url, { max: 1, maintenanceBarrier: true });
+  const root = "00000000-0000-7000-8000-000000000001";
+  let closed = false;
+  try {
+    expect(await db.catalogGuardOutside([root])).toBe(true);
+    const defaults = await db.withSql(sql => sql`SELECT current_setting('statement_timeout') AS statement,current_setting('lock_timeout') AS lock`);
+    let acquired: () => void = () => undefined, release: () => void = () => undefined;
+    const entered = new Promise<void>(r => { acquired = r; }), held = new Promise<void>(r => { release = r; });
+    const lock = raw.begin(async sql => { await sql`LOCK TABLE resources IN ACCESS EXCLUSIVE MODE`; acquired(); await held; });
+    try {
+      await entered;
+      const started = performance.now(), pending = db.catalogGuardOutside([root]).then(() => undefined, (error: unknown) => error);
+      // The guard's dedicated connection cannot occupy the ordinary query pool.
+      await Promise.race([db.ping(), delay(1000).then(() => { throw Error("Catalog guard occupied the ordinary query pool"); })]);
+      const error = await pending;
+      expect(error).toBeInstanceOf(postgres.PostgresError);
+      expect(["57014", "55P03"]).toContain((error as { code: string }).code);
+      expect(performance.now() - started).toBeLessThan(5000);
+    } finally { release(); await lock; }
+    expect(await db.catalogGuardOutside([root])).toBe(true);
+    expect(await db.withSql(sql => sql`SELECT current_setting('statement_timeout') AS statement,current_setting('lock_timeout') AS lock`)).toEqual(defaults);
+
+    let enteredExclusive: () => void = () => undefined, releaseExclusive: () => void = () => undefined;
+    const exclusiveReady = new Promise<void>(r => { enteredExclusive = r; });
+    const exclusiveHeld = new Promise<void>(r => { releaseExclusive = r; });
+    const exclusive = db.withExclusiveMaintenance(async () => { enteredExclusive(); await exclusiveHeld; });
+    let finished = false;
+    let pending: Promise<boolean> | undefined;
+    try {
+      await exclusiveReady; pending = db.catalogGuardOutside([root]).then(value => { finished = true; return value; });
+      await delay(40); expect(finished).toBe(false);
+    } finally { releaseExclusive(); await exclusive; }
+    expect(await pending).toBe(true);
+
+    await raw`CREATE SCHEMA _saturn_restore_guard`;
+    try { await expect(db.catalogGuardOutside([root])).rejects.toThrow("Interrupted recovery"); }
+    finally { await raw`DROP SCHEMA _saturn_restore_guard`; }
+    await db.close(); closed = true;
+    const remaining = await raw<{ n: number }[]>`SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname=current_database() AND application_name='saturn_catalog_guard'`;
+    expect(remaining[0]?.n).toBe(0);
+  } finally { if (!closed) await db.close(); await raw.end({ timeout: 2 }); }
+}, 30_000);
 
 async function save(scenario: string, name: string, proof: unknown) {
   if (evidence === undefined) return;
