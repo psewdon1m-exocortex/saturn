@@ -29,7 +29,9 @@ export class CatalogStreamUpload {
   #isClosing(): boolean { return this.#closing; }
   readonly #requests = new Set<Promise<SyncStreamStatus>>();
   readonly #completions = new Map<string, { done: boolean; result: Promise<{status: SyncStreamStatus} | {error: unknown}> }>();
-  get hasPendingCompletion(): boolean { return [...this.#completions.values()].some(task => !task.done); }
+  // A completion request can await seal/publication before a detached job exists.
+  // Namespace retry classification must cover that request lifetime as well.
+  get hasPendingCompletion(): boolean { return this.#requests.size > 0 || [...this.#completions.values()].some(task => !task.done); }
   async close(): Promise<void> {
     this.#closing = true;
     await Promise.allSettled([...this.#requests]);
