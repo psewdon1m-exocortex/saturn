@@ -2,10 +2,15 @@ import { expect, it, vi } from "vitest";
 import { activeFixture, barrier, evidence, sha, uid } from "./stage3-chat-a.fixture.js";
 import { assertGuardedNamespaceAdmission } from "../../../packages/file-core/src/catalog-guard-admission.js";
 import type { SyncStreamPrepare } from "../../../packages/contracts/src/sync-stream.js";
+import Fastify from "fastify";
+import { guardedSyncHttp } from "./guarded-sync-http.js";
+import { PostgresSyncSnapshotStage } from "../../../packages/sync/src/sync-snapshot-stage.js";
+import { PostgresSyncSnapshotReader } from "../../../packages/sync/src/sync-snapshot-read.js";
 
 it.skipIf(!process.env.STAGE3_CHAT_A_FIXTURE)("keeps a real sealed overwrite completion visible while ordinary namespace reads remain fenced", async () => {
   const id = "stream-overwrite-request-liveness";
   const f = await activeFixture(id, "pluto", 122);
+  const app = Fastify();
   const entered = barrier(), release = barrier();
   let request: ReturnType<typeof f.streams.completeWithin> | undefined;
   try {
@@ -16,6 +21,15 @@ it.skipIf(!process.env.STAGE3_CHAT_A_FIXTURE)("keeps a real sealed overwrite com
       SELECT id AS "nodeId",metadata_version AS "metadataVersion",current_version_id AS "versionId"
       FROM resources WHERE parent_id=${f.rootId} AND name='overwrite.bin'`))[0];
     if (!previous) throw Error("Missing initial publication");
+    const scope = { wire: f.wireBinding, guard: { rootId: f.rootId, epoch: f.binding.epoch, bindingVersion: f.binding.bindingVersion, guardRevision: f.binding.guardRevision } };
+    const stage = new PostgresSyncSnapshotStage(f.runtime, f.issuer, scope);
+    const reader = new PostgresSyncSnapshotReader(f.runtime, f.issuer, scope, "fixture-read", [{ id: "fixture-read", secret: Buffer.alloc(32, 73) }]);
+    const snapshotId = uid(); let progress = await stage.start(f.proof, snapshotId);
+    for (let step = 0; progress.state !== "READY" && step < 20; step++) progress = await stage.step(snapshotId, f.proof);
+    expect(progress.state).toBe("READY");
+    const ready = await reader.ready(snapshotId, f.proof);
+    await app.register(guardedSyncHttp, { root: async () => ({ binding: f.wireBinding, authority: f.issuer, admission: f.admission, stage, reader, streams: f.streams, ensureFolder: async () => { throw Error("unsupported fixture mutation"); } }) });
+    const changes = () => app.inject({ method: "POST", url: `/sync/v1/roots/${f.rootId}/changes`, headers: { authorization: f.authorization }, payload: { binding: f.wireBinding, cursor: ready.changes_cursor } });
     const bytes = Buffer.alloc(8 * 1024 * 1024 + 17, 73);
     const prepared = f.uploadInput("overwrite.bin", bytes, previous);
     const original: SyncStreamPrepare = { schema: "saturn.stream-upload.v2", operationId: uid(), source: { generation: "2", witnessSha256: sha("overwrite-source") }, chunkBytes: 4194304, prepare: { ...prepared, intent: { ...prepared.intent, sha256: null } } };
@@ -51,12 +65,20 @@ it.skipIf(!process.env.STAGE3_CHAT_A_FIXTURE)("keeps a real sealed overwrite com
     expect(seal.privateRead).toBe(false);
     await expect(f.runtime.transaction(sql => assertGuardedNamespaceAdmission(sql, { rootId: f.rootId, epoch: f.binding.epoch, bindingVersion: f.binding.bindingVersion, guardRevision: f.binding.guardRevision }))).rejects.toMatchObject({ code: "reconciliation_required" });
     expect(f.streams.hasPendingCompletion).toBe(true);
+    const refused = await changes();
+    expect(refused.statusCode).toBe(503);
+    expect(refused.headers["retry-after"]).toBe("2");
+    expect(refused.json()).toEqual({ code: "publication_pending", retry_after_ms: 2000 });
     release.release();
     await request;
     await f.streams.close();
     spy.mockRestore();
     expect((await f.streams.status(original, f.proof)).state).toBe("PUBLISHED");
     expect(f.streams.hasPendingCompletion).toBe(false);
+    const returned = await changes();
+    expect(returned.statusCode).toBe(200);
+    expect(returned.json<{ items: unknown[] }>().items.length).toBeGreaterThan(0);
+    await evidence(id, "real-changes-read-retry", { refusedStatus: refused.statusCode, refusedBody: refused.json<unknown>(), publishedStatus: returned.statusCode, originalCursorUsableAfterRetry: true, publishedBodySHA256: sha(returned.body) });
     await f.runtime.transaction(sql => assertGuardedNamespaceAdmission(sql, { rootId: f.rootId, epoch: f.binding.epoch, bindingVersion: f.binding.bindingVersion, guardRevision: f.binding.guardRevision }));
     const resources = await f.admin.withSql(sql => sql<{ id: string; storage_path: string; sha256: string }[]>`
       SELECT id,storage_path,sha256 FROM resources WHERE parent_id=${f.rootId} AND name='overwrite.bin'`);
@@ -80,6 +102,7 @@ it.skipIf(!process.env.STAGE3_CHAT_A_FIXTURE)("keeps a real sealed overwrite com
     if (request) await Promise.allSettled([request]);
     await f.streams.close();
     vi.restoreAllMocks();
+    await app.close();
     await f.close();
   }
 }, 60000);

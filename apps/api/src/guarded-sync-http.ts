@@ -10,6 +10,7 @@ import type { PostgresSyncSnapshotStage } from "../../../packages/sync/src/sync-
 import type { PostgresSyncSnapshotReader } from "../../../packages/sync/src/sync-snapshot-read.js";
 import { SyncCursorError } from "../../../packages/sync/src/sync-cursor.js";
 import type { CatalogRootAdmission } from "../../../packages/file-core/src/catalog-root-admission.js";
+import type { CatalogStreamUpload } from "../../../packages/file-core/src/catalog-stream-upload.js";
 
 const bindingKeys = ["protocol", "descriptor_schema", "server_identity", "root_id", "server_epoch", "policy_version", "binding_version"] as const;
 const bindingSchema = z.object({
@@ -35,6 +36,9 @@ export interface GuardedSyncHttpRoot {
   /** The same bounded FIFO used by this runtime's public writers. SQL still
    * refuses unresolved/foreign writers; a local queue never grants authority. */
   readonly admission?: CatalogRootAdmission;
+  /** Liveness changes only a refused read's retry classification. It never
+   * grants namespace authority or bypasses the SQL read guard. */
+  readonly streams?: Pick<CatalogStreamUpload, "hasPendingCompletion">;
   readonly extensions?: readonly string[];
   readonly ensureFolder: (request: CatalogFolderRequest, proof: CatalogFolderAuthority) => Promise<CatalogFolderOutcome>;
 }
@@ -89,7 +93,19 @@ export const guardedSyncHttp: FastifyPluginAsync<GuardedSyncHttpOptions> = (app,
     const rootId = (request.params as { rootId: string }).rootId;
     const initial = await scope(rootId, binding, request.headers.authorization);
     const admission = initial.root.admission;
-    if (!admission) return action(initial);
+    const runAction = async (current: Awaited<ReturnType<typeof scope>>): Promise<T> => {
+      const publicationWasPending = current.root.streams?.hasPendingCompletion === true;
+      try { return await action(current); }
+      catch (error) {
+        // The transaction still refuses the read. Retain the retry hint if
+        // publication finishes while that refusal is being delivered.
+        if (error instanceof Error && "code" in error && error.code === "reconciliation_required"
+          && (publicationWasPending || current.root.streams?.hasPendingCompletion))
+          throw Object.assign(new Error("publication_pending"), { code: "publication_pending" });
+        throw error;
+      }
+    };
+    if (!admission) return runAction(initial);
     const abort = new AbortController(), stop = () => abort.abort();
     request.raw.once("aborted", stop); reply.raw.once("close", stop);
     if (request.raw.destroyed && !request.raw.complete || reply.raw.destroyed) stop();
@@ -99,7 +115,7 @@ export const guardedSyncHttp: FastifyPluginAsync<GuardedSyncHttpOptions> = (app,
         // authority and current composition after waiting, before any SQL read.
         const current = await scope(rootId, binding, request.headers.authorization);
         if (current.root.admission !== admission) throw new GuardedSyncHttpRequestError("root_unavailable");
-        return action(current);
+        return runAction(current);
       }, abort.signal);
     } finally { request.raw.removeListener("aborted", stop); reply.raw.removeListener("close", stop); }
   };

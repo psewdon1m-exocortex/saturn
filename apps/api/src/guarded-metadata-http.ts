@@ -55,5 +55,5 @@ export function guardedMetadataParser(app: FastifyInstance, maximumBytes: number
 /** Cons(error: unknown)t retry hints; callers retain original immutable operation IDs. */
 export function syncRetryHint(code: string): { status: number; seconds: number } | undefined {
   return ["admission_full", "capacity"].includes(code) ? { status: 429, seconds: 1 }
-    : ["backend_busy", "backend_draining"].includes(code) ? { status: 503, seconds: 2 } : undefined;
+    : ["backend_busy", "backend_draining", "publication_pending"].includes(code) ? { status: 503, seconds: 2 } : undefined;
 }
