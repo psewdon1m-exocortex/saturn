@@ -73,6 +73,95 @@ describe("worker health", () => {
     expect(archive).toHaveBeenCalled();
   });
 
+  it.each(["archive", "sharePackage"] as const)("keeps draining later Drop work during a held %s, without overlapping drainers or heavy jobs", async (heavyKind) => {
+    let releaseHeavy!: () => void, releaseDrop!: () => void, enteredHeavy!: () => void, enteredDrop!: () => void;
+    const heavyHeld = new Promise<void>(resolve => { releaseHeavy = resolve; });
+    const dropHeld = new Promise<void>(resolve => { releaseDrop = resolve; });
+    const heavyEntered = new Promise<void>(resolve => { enteredHeavy = resolve; });
+    const dropEntered = new Promise<void>(resolve => { enteredDrop = resolve; });
+    let drains = 0, liveDrains = 0, maxDrains = 0, liveHeavy = 0, maxHeavy = 0;
+    const archive = vi.fn(async () => {
+      liveHeavy++;maxHeavy = Math.max(maxHeavy, liveHeavy);
+      try { if (heavyKind === "archive") { enteredHeavy();await heavyHeld; } } finally { liveHeavy--; }
+    });
+    const sharePackage = vi.fn(async () => {
+      liveHeavy++;maxHeavy = Math.max(maxHeavy, liveHeavy);
+      try { if (heavyKind === "sharePackage") { enteredHeavy();await heavyHeld; } } finally { liveHeavy--; }
+    });
+    const transferLocks: string[] = [];
+    const runtime = buildWorker({ ...config, worker: { ...config.worker, reconciliationIntervalMs: 60_000 }, drop: { drainIntervalMs: 5 } as SaturnConfig["drop"] },
+      database({ withAdvisoryLock: async (key, action) => { transferLocks.push(key);return action(); } }),
+      { check: async () => ({ state: "pass" }) }, {
+        reconcile: async () => undefined, archive, sharePackage,
+        drain: async () => {
+          drains++;liveDrains++;maxDrains = Math.max(maxDrains, liveDrains);
+          try { if (drains === 2) { enteredDrop();await dropHeld; } } finally { liveDrains--; }
+        },
+      });
+    await runtime.app.ready();runtime.startBackgroundJobs();
+    try {
+      await heavyEntered;
+      await vi.waitFor(() => expect(drains).toBe(2), { timeout: 1000, interval: 5 });await dropEntered;
+      expect(liveHeavy).toBe(1);expect(liveDrains).toBe(1);
+      await new Promise(resolve => setTimeout(resolve, 30));
+      expect(drains).toBe(2);expect(maxDrains).toBe(1);expect(maxHeavy).toBe(1);
+      expect(transferLocks).toEqual(["saturn-worker:transfers"]);
+      expect(archive).toHaveBeenCalledOnce();
+      expect(sharePackage).toHaveBeenCalledTimes(heavyKind === "archive" ? 0 : 1);
+    } finally { releaseHeavy();releaseDrop();await runtime.app.close(); }
+    expect(maxDrains).toBe(1);expect(maxHeavy).toBe(1);
+  });
+
+  it("joins both accepted Drop and package work on shutdown, retaining the shared maintenance and transfers locks until both finish", async () => {
+    let releaseHeavy!: () => void, releaseDrop!: () => void;
+    const heavyHeld = new Promise<void>(resolve => { releaseHeavy = resolve; });
+    const dropHeld = new Promise<void>(resolve => { releaseDrop = resolve; });
+    let drains = 0, packageStarted = false, lockHeld = false, maintenanceHeld = false;
+    const closed = vi.fn(async () => { expect(lockHeld).toBe(false);expect(maintenanceHeld).toBe(false); });
+    const runtime = buildWorker({ ...config, worker: { ...config.worker, reconciliationIntervalMs: 60_000 }, drop: { drainIntervalMs: 5 } as SaturnConfig["drop"] },
+      database({ close: closed,
+        withAdvisoryLock: async (key, action) => { expect(key).toBe("saturn-worker:transfers");lockHeld = true;try { return await action(); } finally { lockHeld = false; } },
+        withSharedMaintenance: async action => { maintenanceHeld = true;try { return await action(); } finally { maintenanceHeld = false; } },
+      }), { check: async () => ({ state: "pass" }) }, {
+        reconcile: async () => undefined,
+        drain: async () => { drains++;if (drains === 2) await dropHeld; },
+        sharePackage: async () => { packageStarted = true;await heavyHeld; },
+      });
+    await runtime.app.ready();runtime.startBackgroundJobs();let closing: Promise<void> | undefined;
+    try {
+      await vi.waitFor(() => { expect(packageStarted).toBe(true);expect(drains).toBe(2); }, { timeout: 1000, interval: 5 });
+      closing = runtime.app.close();await new Promise(resolve => setTimeout(resolve, 20));
+      expect(closed).not.toHaveBeenCalled();expect(lockHeld).toBe(true);expect(maintenanceHeld).toBe(true);
+      releaseHeavy();await new Promise(resolve => setTimeout(resolve, 20));
+      expect(closed).not.toHaveBeenCalled();expect(lockHeld).toBe(true);expect(maintenanceHeld).toBe(true);expect(drains).toBe(2);
+    } finally { releaseHeavy();releaseDrop();await (closing ?? runtime.app.close()); }
+    expect(closed).toHaveBeenCalledOnce();expect(drains).toBe(2);
+  });
+
+  it("keeps the existing distributed transfers key while another worker holds a package", async () => {
+    let release!: () => void;const held = new Promise<void>(resolve => { release = resolve; });
+    let owner: string | undefined, packageStarted = false;
+    const keys: string[] = [], competitorDrop = vi.fn(async () => undefined), competitorPackage = vi.fn(async () => undefined);
+    const lockedDatabase = (id: string) => database({ withAdvisoryLock: async (key, action) => {
+      keys.push(key);if (owner !== undefined) throw new Error("advisory_lock_busy");owner = id;
+      try { return await action(); } finally { owner = undefined; }
+    } });
+    const settings = { ...config, worker: { ...config.worker, reconciliationIntervalMs: 60_000 }, drop: { drainIntervalMs: 5 } as SaturnConfig["drop"] };
+    const first = buildWorker(settings, lockedDatabase("first"), { check: async () => ({ state: "pass" }) }, {
+      reconcile: async () => undefined, drain: async () => undefined, sharePackage: async () => { packageStarted = true;await held; },
+    });
+    const second = buildWorker(settings, lockedDatabase("second"), { check: async () => ({ state: "pass" }) }, {
+      reconcile: async () => undefined, drain: competitorDrop, sharePackage: competitorPackage,
+    });
+    await Promise.all([first.app.ready(), second.app.ready()]);first.startBackgroundJobs();
+    try {
+      await vi.waitFor(() => expect(packageStarted).toBe(true), { timeout: 1000, interval: 5 });second.startBackgroundJobs();
+      await vi.waitFor(() => expect(keys.length).toBeGreaterThan(2), { timeout: 1000, interval: 5 });
+      expect(owner).toBe("first");expect(new Set(keys)).toEqual(new Set(["saturn-worker:transfers"]));
+      expect(competitorDrop).not.toHaveBeenCalled();expect(competitorPackage).not.toHaveBeenCalled();
+    } finally { const closing = Promise.all([first.app.close(), second.app.close()]);release();await closing; }
+  });
+
   it("runs catalog tasks outside the outer shared barrier so their atomic commit can acquire exclusive maintenance", async () => {
     const shared = vi.fn(async (action: () => Promise<unknown>) => action());
     const task = vi.fn(async () => undefined);

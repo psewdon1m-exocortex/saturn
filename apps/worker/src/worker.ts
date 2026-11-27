@@ -105,6 +105,47 @@ export function buildWorker(
     }
   };
 
+  const runTransfers = async (): Promise<void> => {
+    await runSteps([["drop-drain", async () => jobs?.drain?.()]]);
+    if (closing) return;
+
+    // Keep one distributed transfers owner and one heavy job at a time, while
+    // allowing newly buffered Drop work to advance during a long archive/ZIP.
+    let heavyFinished = false;
+    let wake: (() => void) | undefined;
+    const canDrain = () => !closing && !heavyFinished;
+    const drain = jobs?.drain?.bind(jobs);
+    const heavy = runSteps([
+      ["archive", async () => jobs?.archive?.()],
+      ["share-package", async () => jobs?.sharePackage?.()],
+    ]).finally(() => { heavyFinished = true;wake?.(); });
+    try {
+      if (drain !== undefined) {
+        while (canDrain()) {
+          await new Promise<void>(resolve => {
+            let timer: NodeJS.Timeout | undefined;
+            const finish = () => {
+              if (timer !== undefined) clearTimeout(timer);
+              reconciliationStop.signal.removeEventListener("abort", finish);
+              wake = undefined;
+              resolve();
+            };
+            wake = finish;
+            reconciliationStop.signal.addEventListener("abort", finish, { once: true });
+            if (!canDrain()) finish();
+            else { timer = setTimeout(finish, config.drop.drainIntervalMs);timer.unref(); }
+          });
+          if (!canDrain()) break;
+          await runSteps([["drop-drain", drain]]);
+        }
+      }
+    } finally {
+      // Shutdown wakes the wait and prevents new admissions; both accepted
+      // tasks still finish before the maintenance/advisory locks are released.
+      await heavy;
+    }
+  };
+
   const heartbeat = async (): Promise<void> => {
     await database.upsertWorkerHeartbeat({ role: "primary", instanceId, startedAt });
   };
@@ -223,10 +264,7 @@ export function buildWorker(
         const drain = () => {
           if (closing || dropDrainRunning) return;
           dropDrainRunning = true;
-          void runJob("transfers", () => runSteps([
-            ["drop-drain", async () => jobs.drain?.()], ["archive", async () => jobs.archive?.()],
-            ["share-package", async () => jobs.sharePackage?.()],
-          ])).catch((error: unknown) => {
+          void runJob("transfers", runTransfers).catch((error: unknown) => {
             app.log.error({ error }, "Background transfer worker failed");
           }).finally(() => { dropDrainRunning = false; });
         };
