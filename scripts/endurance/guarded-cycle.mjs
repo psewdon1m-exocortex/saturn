@@ -78,4 +78,3 @@ try{
  report.status='PASS';
 }catch(error){report.status='FAIL';report.error=String(error);console.error(String(error));process.exitCode=1;}
 finally{clearInterval(progressTimer);await fs.writeFile(output+'/api-stop','');const apiCode=await Promise.race([fixture.result,delay(30000,null,{ref:false})]);if(apiCode!==0){report.status='FAIL';report.apiExitCode=apiCode;process.exitCode=1;if(apiCode===null)fixture.child.kill();}report.finishedAt=new Date().toISOString();await save();}
-

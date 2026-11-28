@@ -70,6 +70,3 @@ try{
  await event('Окно кампании завершено','Новая admission закрыта','Последний начатый цикл завершён','Результаты сохранены; требуется итоговая оценка coverage и лимитов');
 }catch(error){await atomic(base+'/manager-error.json',{at:new Date().toISOString(),error:String(error),stack:error.stack});await event('Ошибка dispatcher',current.status,'Checkpoint и процессы не сброшены',String(error));throw error;}
 finally{await fs.unlink(lockFile).catch(()=>{});}
-
-
-

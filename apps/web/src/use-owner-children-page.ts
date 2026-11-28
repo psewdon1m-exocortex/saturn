@@ -25,4 +25,3 @@ export function useOwnerChildrenPage(scope:string){
   previous:()=>page.parentId===undefined||page.offset===0?Promise.resolve(false):load(page.parentId,Math.max(0,page.offset-500)),
  };
 }
-

@@ -36,4 +36,3 @@ Upload/download полезные MiB/s и files/s; total latency p50/p95/p99; fi
 Прогноз `C:/.projects`: число/объём/распределение размеров/недоступные пути + измеренная модель metadata/transfer; диапазон initial/repeat/churn. Не суммировать ограничения разных режимов в вымышленную точную ETA.
 
 Журнал `.history/2026-10-18-six-hour-run.md`: дата/время, причина, входной гейт, действие, выходной гейт/результат. Итог `.audit/2026-10-18/endurance-6h/REPORT.md`: фактические результаты, tail/repair время, сравнение, лимиты, все FAIL/BLOCKED/NOT_RUN. После отчёта отключить heartbeat и завершить только owned test processes.
-

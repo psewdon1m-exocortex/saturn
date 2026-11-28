@@ -95,4 +95,3 @@ test('invalid persisted cycle times and finished-but-running states fail closed'
     assert.throws(() => new CampaignPolicy(saved, clock(2)), /admitted cycle/);
   }
 });
-

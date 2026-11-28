@@ -1,7 +1,7 @@
 diff --git a/src/index.js b/src/index.js
 --- a/src/index.js
 +++ b/src/index.js
-@@ -423,7 +423,13 @@
+@@ -423,6 +423,12 @@
      c.reserved = null
      c.onclose && (c.onclose(e), c.onclose = null)
      options.onclose && options.onclose(c.id)
@@ -15,11 +15,10 @@ diff --git a/src/index.js b/src/index.js
 +    }
    }
  }
- 
 diff --git a/cjs/src/index.js b/cjs/src/index.js
 --- a/cjs/src/index.js
 +++ b/cjs/src/index.js
-@@ -423,7 +423,13 @@
+@@ -423,6 +423,12 @@
      c.reserved = null
      c.onclose && (c.onclose(e), c.onclose = null)
      options.onclose && options.onclose(c.id)
@@ -33,11 +32,10 @@ diff --git a/cjs/src/index.js b/cjs/src/index.js
 +    }
    }
  }
- 
 diff --git a/cf/src/index.js b/cf/src/index.js
 --- a/cf/src/index.js
 +++ b/cf/src/index.js
-@@ -424,7 +424,13 @@
+@@ -424,6 +424,12 @@
      c.reserved = null
      c.onclose && (c.onclose(e), c.onclose = null)
      options.onclose && options.onclose(c.id)
@@ -51,4 +49,3 @@ diff --git a/cf/src/index.js b/cf/src/index.js
 +    }
    }
  }
- 

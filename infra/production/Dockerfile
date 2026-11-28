@@ -60,4 +60,3 @@ ENV NODE_ENV=production \
 USER 1000:1000
 EXPOSE 8080
 CMD ["node","/app/static-server.mjs"]
-

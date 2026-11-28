@@ -150,4 +150,3 @@ async function activateRootFixture(id: string, kind: "windows" | "pluto", f: Awa
   const wireBinding = { protocol: "neptune-sync/1" as const, descriptor_schema: "saturn.current-namespace.v1" as const, server_identity: activation.serverIdentity, root_id: rootId, server_epoch: binding.epoch, policy_version: "stage3", binding_version: binding.bindingVersion };
   return { ...f, rootId, binding, wireBinding, namespace, issuer, proof, mutations, admission, authorization, legacy, devices, rootPath: row.storage_path, files, uploadInput, upload, streams };
 }
-

@@ -131,4 +131,3 @@ it.skipIf(process.env.SMALL_FILE_NATIVE_RECEIVER!=='1')('qualified receiver for 
     await fs.writeFile(path.join(output,'server-result.json'),JSON.stringify({migration,backendMode,catalogMode,sqlProfiling,commitBatching,productionHttpComposition:true,runtimeMaintenanceVerified:runtimeMaintenance,timings:Object.fromEntries(timings),batchOutcomes,lostResponses,rows:await rows(),backendTasks,backend:await runtime.diagnostics(),sql,functions,phaseTrace},null,2),{flag:'wx'});
   }finally{await app.close();await adopted?.runtime.close();await runtimeDatabase?.close();await f.close();vi.restoreAllMocks();}
 },3600000);
-

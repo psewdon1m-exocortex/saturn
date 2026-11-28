@@ -30,7 +30,7 @@ overrides:
   glob@14.0.2>minimatch: 11.0.1
 
 patchedDependencies:
-  postgres@3.4.9: dd26a3aa6829721f683f16b4a99d75f5f1f3ee9ada9d3668940504e0b0f2635f
+  postgres@3.4.9: 9c36f90326f67e3d91a71bba6f2bcad0b9dc689d9ff7ebac34dc52b2efe7f769
 
 importers:
 
@@ -427,7 +427,7 @@ importers:
         version: link:../contracts
       postgres:
         specifier: 3.4.9
-        version: 3.4.9(patch_hash=dd26a3aa6829721f683f16b4a99d75f5f1f3ee9ada9d3668940504e0b0f2635f)
+        version: 3.4.9(patch_hash=9c36f90326f67e3d91a71bba6f2bcad0b9dc689d9ff7ebac34dc52b2efe7f769)
     devDependencies:
       tsup:
         specifier: 'catalog:'
@@ -505,7 +505,7 @@ importers:
         version: 22.0.2(supports-color@10.2.2)
       postgres:
         specifier: 3.4.9
-        version: 3.4.9(patch_hash=dd26a3aa6829721f683f16b4a99d75f5f1f3ee9ada9d3668940504e0b0f2635f)
+        version: 3.4.9(patch_hash=9c36f90326f67e3d91a71bba6f2bcad0b9dc689d9ff7ebac34dc52b2efe7f769)
       uuid:
         specifier: 14.0.2
         version: 14.0.2
@@ -5456,7 +5456,7 @@ snapshots:
       picocolors: 1.1.1
       source-map-js: 1.2.1
 
-  postgres@3.4.9(patch_hash=dd26a3aa6829721f683f16b4a99d75f5f1f3ee9ada9d3668940504e0b0f2635f): {}
+  postgres@3.4.9(patch_hash=9c36f90326f67e3d91a71bba6f2bcad0b9dc689d9ff7ebac34dc52b2efe7f769): {}
 
   prelude-ls@1.2.1: {}
 

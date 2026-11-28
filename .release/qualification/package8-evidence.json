@@ -1,0 +1,2077 @@
+{
+  "schema": "saturn.reviewed-qualification-evidence.v1",
+  "at": "2026-11-28T13:47:39.806461+00:00",
+  "scope": "Reviewed QA attestations derived from retained raw artifacts and current scoped tests. Retained artifacts remain privately addressable by their original SHA256; these public records are not fabricated raw Vitest reports or fresh historical executions.",
+  "impactFamilies": [
+    {
+      "id": "database-legacy-guard",
+      "review": "New catalogGuardOutside preserves the exact outside/trashed-scope predicate and 2s deadlines, using a private bounded pool. The pool is lazy; existing query/transaction methods are unchanged. New close() joins that pool. It does not change old Drop/retention/recovery SQL assertions. P7 accepted native/guarded/resource/drain coverage and actual current owner8 exercise current Database lifecycle; current source-bound PostgreSQL integration remains a required remote job, not an inferred per-case PASS.",
+      "sourceFiles": [
+        {
+          "path": "packages/database/src/index.ts",
+          "sha256": "3d5b740840d455b896b550501cd2a2a064030d86d0ce0b2b6589728fa4371fbd"
+        },
+        {
+          "path": "packages/file-core/src/catalog-guard-admission.ts",
+          "sha256": "c9293d6324fb672fe5132e674dca78e21715fa005bf9c74cf429ef0d865a24c9"
+        }
+      ]
+    },
+    {
+      "id": "archive-bounded-tree",
+      "review": "Only folder-archive traversal adds readFolderDescendants/readChildrenBatch and uses it in FileController. Existing repository mutation, root projection, registry/receipt recovery and Drop lease queries are unchanged. F17 accepted P7 archive/body readback plus current bounds test cover changed traversal. Final P8 current shipping download/ZIP canary remains required separately.",
+      "sourceFiles": [
+        {
+          "path": "apps/api/src/file.controller.ts",
+          "sha256": "d8344fbfef5d961ab38eb97781402fe86d505944884662ec561f23b7e8666060"
+        },
+        {
+          "path": "packages/file-core/src/file.service.ts",
+          "sha256": "f2e122302116a005b8cf7c4b25001db28717bc573e97e82cd4829a014959b3bb"
+        },
+        {
+          "path": "packages/file-core/src/postgres-file.repository.ts",
+          "sha256": "0bc6c40725329ad8ebcc857364e86d1add16361f89e45968fe1e2efe542f28e7"
+        },
+        {
+          "path": "packages/file-core/src/repository.ts",
+          "sha256": "630b0bf03875c135b3e29948b7efcc1304bad522521fcf56f312cf5b296dc4fa"
+        }
+      ]
+    },
+    {
+      "id": "pending-read-retry",
+      "review": "SQL read refusal and scope/admission still run; only reconciliation_required observed during live completion becomes publication_pending/503 Retry-After2. Request lifetime now counts before detached job registration. F17 real SQL31, paired80/resident16 and 14+4 current ordinary cases preserve refusal, same-cursor retry and completion lifecycle. No auth, epoch, publication receipt or namespace authority is bypassed.",
+      "sourceFiles": [
+        {
+          "path": "apps/api/src/guarded-metadata-http.ts",
+          "sha256": "ce6e80c9c63b08a328f0fb6f19a3e77019fcfa85df4db0481f35fac02fd41ccf"
+        },
+        {
+          "path": "apps/api/src/guarded-sync-http.ts",
+          "sha256": "63a72621c48e404a95de282e129b0692c53e30d936cdf2749248a86d9e0227f4"
+        },
+        {
+          "path": "packages/file-core/src/catalog-stream-upload.ts",
+          "sha256": "caaef2a49a6676796f97043f1d5f6028ddee8abd0e4037f5575f382bfcf19c4c"
+        }
+      ]
+    },
+    {
+      "id": "worker-fairness",
+      "review": "The single distributed transfers owner retains one heavy job and can drain buffered Drop during archive/ZIP; shutdown closes admission and awaits accepted jobs. Existing Drop SQL repository/lease/retry assertions are unchanged. P7 mixed resident workload and exact current worker12 cover this delta; final P8 drain remains required.",
+      "sourceFiles": [
+        {
+          "path": "apps/worker/src/worker.ts",
+          "sha256": "94c1c57e44259a95b5519b3202a7311408dee3a9d094cb0aabb87de68ef9d053"
+        }
+      ]
+    },
+    {
+      "id": "owner-engine-fence",
+      "review": "New engine-fenced recovery is an additional authenticated ownership path. Legacy managed-child release was factored through shared code and therefore rechecked now: all8 original SQL/OS cases PASS on current source. Current cohort26 plus accepted P6/P7 actual cohort fencing/joins retain engine-mode qualification. RUNNING/UNKNOWN/active readers remain refusal, not reset.",
+      "sourceFiles": [
+        {
+          "path": "packages/recovery/src/backend-owner-process.ts",
+          "sha256": "174984aebc9165961462c71afd046cb68a1cc5444bffb3b5d37f4e9d976d96a2"
+        },
+        {
+          "path": "packages/recovery/src/docker-backend-cohort.ts",
+          "sha256": "6586c0e52c7dd298c954dfd71c37a54078adb27896a7a6503bafeff19e4237fe"
+        },
+        {
+          "path": "packages/recovery/src/index.ts",
+          "sha256": "ffe7062f25451bcce8de0f21e174bf9769983802f3ca45c51696dde83bc32298"
+        },
+        {
+          "path": "scripts/registered-worker-parent.mjs",
+          "sha256": "714010bc87985c056f6d73e3ebfb2b596be81bac65754c2cc2b2019d50cce32a"
+        },
+        {
+          "path": "scripts/supervise-docker-cohort.mjs",
+          "sha256": "69370085d750d7fa356c73ae450c65ee02882fd88314445f6b4ccb5fb4efba59"
+        }
+      ]
+    },
+    {
+      "id": "windows-held-handles",
+      "review": "Exact Windows test, native PowerShell helper and all local runtime source dependencies above are byte-identical to P1. Retain10 actual Windows assertions as Windows retained credit, never Linux execution PASS. No replay triggered by release metadata alone.",
+      "sourceFiles": [
+        {
+          "path": "packages/file-core/src/catalog-folder-revalidation-windows.test.ts",
+          "sha256": "7a46b1d7427317cb5ef5ed81903da5c79cd60dcb4e1e09db8f757cea7ce2d32a"
+        },
+        {
+          "path": "packages/file-core/src/catalog-folder-revalidation-windows.ts",
+          "sha256": "a876aaf6cd5aceb16bc2b1cc8d84a3b4b85c375a306ec458746e3747e86d632e"
+        },
+        {
+          "path": "packages/file-core/src/catalog-folder-revalidation.ts",
+          "sha256": "011523d9baab33627f164d9d4e5a12740c6b3fd672e116616fe3442d751ce102"
+        },
+        {
+          "path": "packages/file-core/src/current-namespace.ts",
+          "sha256": "baff6bdb7ea36f8cace7fcd6b9ee3d0869116c6c626b7bdeccbd5f4f5983bfc6"
+        },
+        {
+          "path": "scripts/folder-revalidation-handles.ps1",
+          "sha256": "79ee4d698efc415d248bd6c78e5c142af8e5d358c6b1564998850a76ac40f303"
+        }
+      ]
+    },
+    {
+      "id": "historical-retention-and-registry-predicates",
+      "review": "These historical predicate implementations and executable SQL are unchanged from the accepted baseline; additional archive methods and retry classification do not alter offline guard/restore metadata checks. Keep exact cycle9 scope without a fabricated fixture or numeric exit. Keep2 independent recovery continuations as scoped predicates, not a fresh Vitest command PASS. The original whole registry FAIL remains visible.",
+      "sourceFiles": [
+        {
+          "path": "packages/file-core/src/catalog-pluto-retention.ts",
+          "sha256": "325eacd64f537c905eec20e09313d1d887ee576f33c71cb058448cfbdf708301"
+        },
+        {
+          "path": "packages/recovery/src/consistent-snapshot.ts",
+          "sha256": "1b0570046426e10d87ca5656bd0ec4f6d7268ed4795a6bbbdc8249f1be2cf463"
+        },
+        {
+          "path": "packages/recovery/src/metadata-exporter.ts",
+          "sha256": "d537b816c0c952224a07cae72226de02a6f1567d08f28b1c84015cda8b7d1997"
+        }
+      ]
+    }
+  ],
+  "cases": {
+    "15c1660035711c3fb07e4686031430aee7bff2cb9a2a6df692fe584117b5ee30": {
+      "caseId": "15c1660035711c3fb07e4686031430aee7bff2cb9a2a6df692fe584117b5ee30",
+      "currentTestSha256": "6c3ee7a92fc7ac2a38791a7f6616d5791cd1d835d81fff49b5570062f2c3841d",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_ASSERTION_ATTESTATION",
+      "originalAssertionName": "PostgreSQL Drop lease recovery and migration migrates interrupted legacy transfers without changing originals and roundtrips an idle rollback",
+      "originalAssertionStatus": "passed",
+      "originalReportSha256": "f4f18c50aee9d9447f974c98d7d287c2190d6aaf2b8b8280f01ade40554138f5",
+      "originalWholeReportSuccess": true,
+      "originalReportCounts": {
+        "reportPassed": 5,
+        "reportFailed": 0,
+        "reportPending": 0
+      },
+      "sourceImpactReviewed": true,
+      "scope": "An actual historical passed assertion retained after current dependency/runtime impact review. This is not a current invocation PASS."
+    },
+    "0c88977180ed64e9fe94a6bab14d9660c81eb5686b002ac16206cc105ad2b2a2": {
+      "caseId": "0c88977180ed64e9fe94a6bab14d9660c81eb5686b002ac16206cc105ad2b2a2",
+      "currentTestSha256": "6c3ee7a92fc7ac2a38791a7f6616d5791cd1d835d81fff49b5570062f2c3841d",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_ASSERTION_ATTESTATION",
+      "originalAssertionName": "PostgreSQL Drop lease recovery and migration claims each upload only once under concurrent workers and reclaims an abandoned original at 60 seconds",
+      "originalAssertionStatus": "passed",
+      "originalReportSha256": "f4f18c50aee9d9447f974c98d7d287c2190d6aaf2b8b8280f01ade40554138f5",
+      "originalWholeReportSuccess": true,
+      "originalReportCounts": {
+        "reportPassed": 5,
+        "reportFailed": 0,
+        "reportPending": 0
+      },
+      "sourceImpactReviewed": true,
+      "scope": "An actual historical passed assertion retained after current dependency/runtime impact review. This is not a current invocation PASS."
+    },
+    "09cc90a372aa0f3a713fe2b47b18bdb959471837d75b846fb1c3c997484a0b41": {
+      "caseId": "09cc90a372aa0f3a713fe2b47b18bdb959471837d75b846fb1c3c997484a0b41",
+      "currentTestSha256": "6c3ee7a92fc7ac2a38791a7f6616d5791cd1d835d81fff49b5570062f2c3841d",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_ASSERTION_ATTESTATION",
+      "originalAssertionName": "PostgreSQL Drop lease recovery and migration a heartbeat keeps a slow live transfer out of the reclaim queue",
+      "originalAssertionStatus": "passed",
+      "originalReportSha256": "f4f18c50aee9d9447f974c98d7d287c2190d6aaf2b8b8280f01ade40554138f5",
+      "originalWholeReportSuccess": true,
+      "originalReportCounts": {
+        "reportPassed": 5,
+        "reportFailed": 0,
+        "reportPending": 0
+      },
+      "sourceImpactReviewed": true,
+      "scope": "An actual historical passed assertion retained after current dependency/runtime impact review. This is not a current invocation PASS."
+    },
+    "a26b3eb00c4c56801b2443dec19a8ecf1764c212bee41c90a661179f49311a6d": {
+      "caseId": "a26b3eb00c4c56801b2443dec19a8ecf1764c212bee41c90a661179f49311a6d",
+      "currentTestSha256": "6c3ee7a92fc7ac2a38791a7f6616d5791cd1d835d81fff49b5570062f2c3841d",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_ASSERTION_ATTESTATION",
+      "originalAssertionName": "PostgreSQL Drop lease recovery and migration rejects every stale owner's state mutation and refuses to revive an expired lease",
+      "originalAssertionStatus": "passed",
+      "originalReportSha256": "f4f18c50aee9d9447f974c98d7d287c2190d6aaf2b8b8280f01ade40554138f5",
+      "originalWholeReportSuccess": true,
+      "originalReportCounts": {
+        "reportPassed": 5,
+        "reportFailed": 0,
+        "reportPending": 0
+      },
+      "sourceImpactReviewed": true,
+      "scope": "An actual historical passed assertion retained after current dependency/runtime impact review. This is not a current invocation PASS."
+    },
+    "b0f0cab545f13f3f0258bebd066b5c1c1ff5a903107da75e7e9b40829c05190e": {
+      "caseId": "b0f0cab545f13f3f0258bebd066b5c1c1ff5a903107da75e7e9b40829c05190e",
+      "currentTestSha256": "6c3ee7a92fc7ac2a38791a7f6616d5791cd1d835d81fff49b5570062f2c3841d",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_ASSERTION_ATTESTATION",
+      "originalAssertionName": "PostgreSQL Drop lease recovery and migration preserves retry backoff and rejects rollback while a transfer owns a lease",
+      "originalAssertionStatus": "passed",
+      "originalReportSha256": "f4f18c50aee9d9447f974c98d7d287c2190d6aaf2b8b8280f01ade40554138f5",
+      "originalWholeReportSuccess": true,
+      "originalReportCounts": {
+        "reportPassed": 5,
+        "reportFailed": 0,
+        "reportPending": 0
+      },
+      "sourceImpactReviewed": true,
+      "scope": "An actual historical passed assertion retained after current dependency/runtime impact review. This is not a current invocation PASS."
+    },
+    "bae5d125f7bfc06eba315eadec7164817b640f8bb265b9f9b282cd8ea5756ec7": {
+      "caseId": "bae5d125f7bfc06eba315eadec7164817b640f8bb265b9f9b282cd8ea5756ec7",
+      "currentTestSha256": "23e304b10942d5f4c3d73736d323422a4bfbd8852b1083bdde0ff685d187bba1",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_ASSERTION_ATTESTATION",
+      "originalAssertionName": "PostgreSQL Drop admission replay and quota replays the same intent at full global capacity without a second reservation",
+      "originalAssertionStatus": "passed",
+      "originalReportSha256": "53477dea406cee237afd646f15b267fab9697b16bad0a2ff40329850b935ff60",
+      "originalWholeReportSuccess": true,
+      "originalReportCounts": {
+        "reportPassed": 5,
+        "reportFailed": 0,
+        "reportPending": 0
+      },
+      "sourceImpactReviewed": true,
+      "scope": "An actual historical passed assertion retained after current dependency/runtime impact review. This is not a current invocation PASS."
+    },
+    "cbf8474908d3d8dd47c95193c87b4c4513b33cac70762cbd22c2cfb2f0286966": {
+      "caseId": "cbf8474908d3d8dd47c95193c87b4c4513b33cac70762cbd22c2cfb2f0286966",
+      "currentTestSha256": "23e304b10942d5f4c3d73736d323422a4bfbd8852b1083bdde0ff685d187bba1",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_ASSERTION_ATTESTATION",
+      "originalAssertionName": "PostgreSQL Drop admission replay and quota rejects changed immutable parameters before returning an existing receipt",
+      "originalAssertionStatus": "passed",
+      "originalReportSha256": "53477dea406cee237afd646f15b267fab9697b16bad0a2ff40329850b935ff60",
+      "originalWholeReportSuccess": true,
+      "originalReportCounts": {
+        "reportPassed": 5,
+        "reportFailed": 0,
+        "reportPending": 0
+      },
+      "sourceImpactReviewed": true,
+      "scope": "An actual historical passed assertion retained after current dependency/runtime impact review. This is not a current invocation PASS."
+    },
+    "3638cc45d976c0022496f066e31329ac2ff012f6457b4e2276efade6011c0aa8": {
+      "caseId": "3638cc45d976c0022496f066e31329ac2ff012f6457b4e2276efade6011c0aa8",
+      "currentTestSha256": "23e304b10942d5f4c3d73736d323422a4bfbd8852b1083bdde0ff685d187bba1",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_ASSERTION_ATTESTATION",
+      "originalAssertionName": "PostgreSQL Drop admission replay and quota concurrent retries share one identity and two new keys cannot oversubscribe capacity",
+      "originalAssertionStatus": "passed",
+      "originalReportSha256": "53477dea406cee237afd646f15b267fab9697b16bad0a2ff40329850b935ff60",
+      "originalWholeReportSuccess": true,
+      "originalReportCounts": {
+        "reportPassed": 5,
+        "reportFailed": 0,
+        "reportPending": 0
+      },
+      "sourceImpactReviewed": true,
+      "scope": "An actual historical passed assertion retained after current dependency/runtime impact review. This is not a current invocation PASS."
+    },
+    "eda5d8155ac9303e09901f6434613030955e99714f308481d1965c8aea6cb7f4": {
+      "caseId": "eda5d8155ac9303e09901f6434613030955e99714f308481d1965c8aea6cb7f4",
+      "currentTestSha256": "23e304b10942d5f4c3d73736d323422a4bfbd8852b1083bdde0ff685d187bba1",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_ASSERTION_ATTESTATION",
+      "originalAssertionName": "PostgreSQL Drop admission replay and quota revalidates revoked session authority before replay under pressure",
+      "originalAssertionStatus": "passed",
+      "originalReportSha256": "53477dea406cee237afd646f15b267fab9697b16bad0a2ff40329850b935ff60",
+      "originalWholeReportSuccess": true,
+      "originalReportCounts": {
+        "reportPassed": 5,
+        "reportFailed": 0,
+        "reportPending": 0
+      },
+      "sourceImpactReviewed": true,
+      "scope": "An actual historical passed assertion retained after current dependency/runtime impact review. This is not a current invocation PASS."
+    },
+    "2ae4d735b693f64469868ea322b0de346c3edbb3d4a6080a5a5c8ccb50cebcb4": {
+      "caseId": "2ae4d735b693f64469868ea322b0de346c3edbb3d4a6080a5a5c8ccb50cebcb4",
+      "currentTestSha256": "23e304b10942d5f4c3d73736d323422a4bfbd8852b1083bdde0ff685d187bba1",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_ASSERTION_ATTESTATION",
+      "originalAssertionName": "PostgreSQL Drop admission replay and quota reauthenticates with the original active code and replays the old channel original without resetting quota",
+      "originalAssertionStatus": "passed",
+      "originalReportSha256": "53477dea406cee237afd646f15b267fab9697b16bad0a2ff40329850b935ff60",
+      "originalWholeReportSuccess": true,
+      "originalReportCounts": {
+        "reportPassed": 5,
+        "reportFailed": 0,
+        "reportPending": 0
+      },
+      "sourceImpactReviewed": true,
+      "scope": "An actual historical passed assertion retained after current dependency/runtime impact review. This is not a current invocation PASS."
+    },
+    "f622c79ca295fe8d8c1073d8e3f58cf2e1c6c7264cb1be2b5f064573c4892aae": {
+      "caseId": "f622c79ca295fe8d8c1073d8e3f58cf2e1c6c7264cb1be2b5f064573c4892aae",
+      "currentTestSha256": "7a46b1d7427317cb5ef5ed81903da5c79cd60dcb4e1e09db8f757cea7ce2d32a",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_ASSERTION_ATTESTATION",
+      "originalAssertionName": "holds exact native identities and denies overwrite/rename until custody is released",
+      "originalAssertionStatus": "passed",
+      "originalReportSha256": "bbce608451c5ad6fa6205362355a50cfe97be04e634984b991a082b774feb334",
+      "originalWholeReportSuccess": true,
+      "originalReportCounts": {
+        "reportPassed": 375,
+        "reportFailed": 0,
+        "reportPending": 1
+      },
+      "sourceImpactReviewed": true,
+      "scope": "An actual historical passed assertion retained after current dependency/runtime impact review. This is not a current invocation PASS."
+    },
+    "023bbe2d219d690eabc9b3ba26262c953fc173708c4fac2ed4b32a99cac63a0e": {
+      "caseId": "023bbe2d219d690eabc9b3ba26262c953fc173708c4fac2ed4b32a99cac63a0e",
+      "currentTestSha256": "7a46b1d7427317cb5ef5ed81903da5c79cd60dcb4e1e09db8f757cea7ce2d32a",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_ASSERTION_ATTESTATION",
+      "originalAssertionName": "holds the1024node boundary and refuses1025 before exposing physical authority",
+      "originalAssertionStatus": "passed",
+      "originalReportSha256": "bbce608451c5ad6fa6205362355a50cfe97be04e634984b991a082b774feb334",
+      "originalWholeReportSuccess": true,
+      "originalReportCounts": {
+        "reportPassed": 375,
+        "reportFailed": 0,
+        "reportPending": 1
+      },
+      "sourceImpactReviewed": true,
+      "scope": "An actual historical passed assertion retained after current dependency/runtime impact review. This is not a current invocation PASS."
+    },
+    "3146927faea4519891b3a805bebe2a55517b8f0de6810696b97733c1655d3393": {
+      "caseId": "3146927faea4519891b3a805bebe2a55517b8f0de6810696b97733c1655d3393",
+      "currentTestSha256": "7a46b1d7427317cb5ef5ed81903da5c79cd60dcb4e1e09db8f757cea7ce2d32a",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_ASSERTION_ATTESTATION",
+      "originalAssertionName": "refuses physical missing without providing a lease",
+      "originalAssertionStatus": "passed",
+      "originalReportSha256": "bbce608451c5ad6fa6205362355a50cfe97be04e634984b991a082b774feb334",
+      "originalWholeReportSuccess": true,
+      "originalReportCounts": {
+        "reportPassed": 375,
+        "reportFailed": 0,
+        "reportPending": 1
+      },
+      "sourceImpactReviewed": true,
+      "scope": "An actual historical passed assertion retained after current dependency/runtime impact review. This is not a current invocation PASS."
+    },
+    "119f3c5a71e0b959e6ac05d3fff74d90fa138ef6db5f52978b8b85e948bfdd18": {
+      "caseId": "119f3c5a71e0b959e6ac05d3fff74d90fa138ef6db5f52978b8b85e948bfdd18",
+      "currentTestSha256": "7a46b1d7427317cb5ef5ed81903da5c79cd60dcb4e1e09db8f757cea7ce2d32a",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_ASSERTION_ATTESTATION",
+      "originalAssertionName": "refuses physical sha without providing a lease",
+      "originalAssertionStatus": "passed",
+      "originalReportSha256": "bbce608451c5ad6fa6205362355a50cfe97be04e634984b991a082b774feb334",
+      "originalWholeReportSuccess": true,
+      "originalReportCounts": {
+        "reportPassed": 375,
+        "reportFailed": 0,
+        "reportPending": 1
+      },
+      "sourceImpactReviewed": true,
+      "scope": "An actual historical passed assertion retained after current dependency/runtime impact review. This is not a current invocation PASS."
+    },
+    "9d4f52d971b366bd280164255a1f481eedb8d4a28c1e95d550f72b0a024be5af": {
+      "caseId": "9d4f52d971b366bd280164255a1f481eedb8d4a28c1e95d550f72b0a024be5af",
+      "currentTestSha256": "7a46b1d7427317cb5ef5ed81903da5c79cd60dcb4e1e09db8f757cea7ce2d32a",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_ASSERTION_ATTESTATION",
+      "originalAssertionName": "refuses physical extra without providing a lease",
+      "originalAssertionStatus": "passed",
+      "originalReportSha256": "bbce608451c5ad6fa6205362355a50cfe97be04e634984b991a082b774feb334",
+      "originalWholeReportSuccess": true,
+      "originalReportCounts": {
+        "reportPassed": 375,
+        "reportFailed": 0,
+        "reportPending": 1
+      },
+      "sourceImpactReviewed": true,
+      "scope": "An actual historical passed assertion retained after current dependency/runtime impact review. This is not a current invocation PASS."
+    },
+    "bbb07f1ca10c44358bc494631a76d056d3ed738e76e7a94d2b3c50b08d6496f6": {
+      "caseId": "bbb07f1ca10c44358bc494631a76d056d3ed738e76e7a94d2b3c50b08d6496f6",
+      "currentTestSha256": "7a46b1d7427317cb5ef5ed81903da5c79cd60dcb4e1e09db8f757cea7ce2d32a",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_ASSERTION_ATTESTATION",
+      "originalAssertionName": "refuses physical reparse without providing a lease",
+      "originalAssertionStatus": "passed",
+      "originalReportSha256": "bbce608451c5ad6fa6205362355a50cfe97be04e634984b991a082b774feb334",
+      "originalWholeReportSuccess": true,
+      "originalReportCounts": {
+        "reportPassed": 375,
+        "reportFailed": 0,
+        "reportPending": 1
+      },
+      "sourceImpactReviewed": true,
+      "scope": "An actual historical passed assertion retained after current dependency/runtime impact review. This is not a current invocation PASS."
+    },
+    "6b5744e9269347fa67eb2bde106b23d261f25a10b0de4be52305188da427915f": {
+      "caseId": "6b5744e9269347fa67eb2bde106b23d261f25a10b0de4be52305188da427915f",
+      "currentTestSha256": "7a46b1d7427317cb5ef5ed81903da5c79cd60dcb4e1e09db8f757cea7ce2d32a",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_ASSERTION_ATTESTATION",
+      "originalAssertionName": "detects membership changes during the held lease",
+      "originalAssertionStatus": "passed",
+      "originalReportSha256": "bbce608451c5ad6fa6205362355a50cfe97be04e634984b991a082b774feb334",
+      "originalWholeReportSuccess": true,
+      "originalReportCounts": {
+        "reportPassed": 375,
+        "reportFailed": 0,
+        "reportPending": 1
+      },
+      "sourceImpactReviewed": true,
+      "scope": "An actual historical passed assertion retained after current dependency/runtime impact review. This is not a current invocation PASS."
+    },
+    "4c4398cf20b101222130ef5c54b155df6c4edf882766e8ee23d286977308cc18": {
+      "caseId": "4c4398cf20b101222130ef5c54b155df6c4edf882766e8ee23d286977308cc18",
+      "currentTestSha256": "7a46b1d7427317cb5ef5ed81903da5c79cd60dcb4e1e09db8f757cea7ce2d32a",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_ASSERTION_ATTESTATION",
+      "originalAssertionName": "admits one backend operator and releases the actual mutex on close",
+      "originalAssertionStatus": "passed",
+      "originalReportSha256": "bbce608451c5ad6fa6205362355a50cfe97be04e634984b991a082b774feb334",
+      "originalWholeReportSuccess": true,
+      "originalReportCounts": {
+        "reportPassed": 375,
+        "reportFailed": 0,
+        "reportPending": 1
+      },
+      "sourceImpactReviewed": true,
+      "scope": "An actual historical passed assertion retained after current dependency/runtime impact review. This is not a current invocation PASS."
+    },
+    "dc5b59223f5398d566bc0862e6211f0a8d32a2bbb0479bb332a7eb4eb628dd53": {
+      "caseId": "dc5b59223f5398d566bc0862e6211f0a8d32a2bbb0479bb332a7eb4eb628dd53",
+      "currentTestSha256": "7a46b1d7427317cb5ef5ed81903da5c79cd60dcb4e1e09db8f757cea7ce2d32a",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_ASSERTION_ATTESTATION",
+      "originalAssertionName": "rejects an altered native helper before custody acquisition",
+      "originalAssertionStatus": "passed",
+      "originalReportSha256": "bbce608451c5ad6fa6205362355a50cfe97be04e634984b991a082b774feb334",
+      "originalWholeReportSuccess": true,
+      "originalReportCounts": {
+        "reportPassed": 375,
+        "reportFailed": 0,
+        "reportPending": 1
+      },
+      "sourceImpactReviewed": true,
+      "scope": "An actual historical passed assertion retained after current dependency/runtime impact review. This is not a current invocation PASS."
+    },
+    "4501cf4bc6e31aa51a185bc29275ce38f50c1c1600f1ad5814888c83d321fd4c": {
+      "caseId": "4501cf4bc6e31aa51a185bc29275ce38f50c1c1600f1ad5814888c83d321fd4c",
+      "currentTestSha256": "7a46b1d7427317cb5ef5ed81903da5c79cd60dcb4e1e09db8f757cea7ce2d32a",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_ASSERTION_ATTESTATION",
+      "originalAssertionName": "refuses a declared writer whose exact native process is still alive",
+      "originalAssertionStatus": "passed",
+      "originalReportSha256": "bbce608451c5ad6fa6205362355a50cfe97be04e634984b991a082b774feb334",
+      "originalWholeReportSuccess": true,
+      "originalReportCounts": {
+        "reportPassed": 375,
+        "reportFailed": 0,
+        "reportPending": 1
+      },
+      "sourceImpactReviewed": true,
+      "scope": "An actual historical passed assertion retained after current dependency/runtime impact review. This is not a current invocation PASS."
+    },
+    "fd025e0c85841598b79cde3a0669c7fbab35050ed7e8ef37a06a219053be703c": {
+      "caseId": "fd025e0c85841598b79cde3a0669c7fbab35050ed7e8ef37a06a219053be703c",
+      "currentTestSha256": "e92d0b3870a7478d20e1b568294fc7df37c487925009ed56db038acec4e0223d",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_ASSERTION_ATTESTATION",
+      "originalAssertionName": "qualifies inactive commit-ordered root journal on an isolated upgraded catalog",
+      "originalAssertionStatus": "passed",
+      "originalReportSha256": "059ced3518ad3c8a54fba7d68575ba205d0433e138af95e8e5fcc0d209c8d855",
+      "originalWholeReportSuccess": true,
+      "originalReportCounts": {
+        "reportPassed": 1,
+        "reportFailed": 0,
+        "reportPending": 0
+      },
+      "sourceImpactReviewed": true,
+      "scope": "An actual historical passed assertion retained after current dependency/runtime impact review. This is not a current invocation PASS."
+    },
+    "f083219e6cf09f5389d65de4838bad63b5264ca826a94f799ed8a96e16f0a496": {
+      "caseId": "f083219e6cf09f5389d65de4838bad63b5264ca826a94f799ed8a96e16f0a496",
+      "currentTestSha256": "c332a28f3a7ed6c45de6f3723e8ab7720f8fcd40551b5e1eec9fa95e5f866d64",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_ASSERTION_ATTESTATION",
+      "originalAssertionName": "offline absent backup part reconciliation on isolated PostgreSQL and physical storage records a rejection with the same original IDs and releases the fully fenced owner",
+      "originalAssertionStatus": "passed",
+      "originalReportSha256": "e4cbbaae2c302951c17f6dff48d791aba1876c0f2526e0c9143f1f0ed6b38806",
+      "originalWholeReportSuccess": true,
+      "originalReportCounts": {
+        "reportPassed": 10,
+        "reportFailed": 0,
+        "reportPending": 0
+      },
+      "sourceImpactReviewed": true,
+      "scope": "An actual historical passed assertion retained after current dependency/runtime impact review. This is not a current invocation PASS."
+    },
+    "bfe5152d6a6e4682c84d304f8e1f368237a80d442ed8ad71329416d553ce235a": {
+      "caseId": "bfe5152d6a6e4682c84d304f8e1f368237a80d442ed8ad71329416d553ce235a",
+      "currentTestSha256": "c332a28f3a7ed6c45de6f3723e8ab7720f8fcd40551b5e1eec9fa95e5f866d64",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_ASSERTION_ATTESTATION",
+      "originalAssertionName": "offline absent backup part reconciliation on isolated PostgreSQL and physical storage refuses a live or unproved predecessor before mutation",
+      "originalAssertionStatus": "passed",
+      "originalReportSha256": "e4cbbaae2c302951c17f6dff48d791aba1876c0f2526e0c9143f1f0ed6b38806",
+      "originalWholeReportSuccess": true,
+      "originalReportCounts": {
+        "reportPassed": 10,
+        "reportFailed": 0,
+        "reportPending": 0
+      },
+      "sourceImpactReviewed": true,
+      "scope": "An actual historical passed assertion retained after current dependency/runtime impact review. This is not a current invocation PASS."
+    },
+    "ded0aa8256673edb9bb2bd499b0bd2f474c3756cd696a4e912f53066249b6240": {
+      "caseId": "ded0aa8256673edb9bb2bd499b0bd2f474c3756cd696a4e912f53066249b6240",
+      "currentTestSha256": "c332a28f3a7ed6c45de6f3723e8ab7720f8fcd40551b5e1eec9fa95e5f866d64",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_ASSERTION_ATTESTATION",
+      "originalAssertionName": "offline absent backup part reconciliation on isolated PostgreSQL and physical storage refuses an extant physical part even at zero durable offset",
+      "originalAssertionStatus": "passed",
+      "originalReportSha256": "e4cbbaae2c302951c17f6dff48d791aba1876c0f2526e0c9143f1f0ed6b38806",
+      "originalWholeReportSuccess": true,
+      "originalReportCounts": {
+        "reportPassed": 10,
+        "reportFailed": 0,
+        "reportPending": 0
+      },
+      "sourceImpactReviewed": true,
+      "scope": "An actual historical passed assertion retained after current dependency/runtime impact review. This is not a current invocation PASS."
+    },
+    "c517519805ebdb2002b8342d79726d6073b59bcf259779c0417f15d3ce2fa0a3": {
+      "caseId": "c517519805ebdb2002b8342d79726d6073b59bcf259779c0417f15d3ce2fa0a3",
+      "currentTestSha256": "c332a28f3a7ed6c45de6f3723e8ab7720f8fcd40551b5e1eec9fa95e5f866d64",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_ASSERTION_ATTESTATION",
+      "originalAssertionName": "offline absent backup part reconciliation on isolated PostgreSQL and physical storage refuses a received backup part",
+      "originalAssertionStatus": "passed",
+      "originalReportSha256": "e4cbbaae2c302951c17f6dff48d791aba1876c0f2526e0c9143f1f0ed6b38806",
+      "originalWholeReportSuccess": true,
+      "originalReportCounts": {
+        "reportPassed": 10,
+        "reportFailed": 0,
+        "reportPending": 0
+      },
+      "sourceImpactReviewed": true,
+      "scope": "An actual historical passed assertion retained after current dependency/runtime impact review. This is not a current invocation PASS."
+    },
+    "9a28b1a6299d645936c97c96403168397e1cc09e152bc6fa9406e8747e1c6b42": {
+      "caseId": "9a28b1a6299d645936c97c96403168397e1cc09e152bc6fa9406e8747e1c6b42",
+      "currentTestSha256": "c332a28f3a7ed6c45de6f3723e8ab7720f8fcd40551b5e1eec9fa95e5f866d64",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_ASSERTION_ATTESTATION",
+      "originalAssertionName": "offline absent backup part reconciliation on isolated PostgreSQL and physical storage refuses paths without an exact recorded backup owner",
+      "originalAssertionStatus": "passed",
+      "originalReportSha256": "e4cbbaae2c302951c17f6dff48d791aba1876c0f2526e0c9143f1f0ed6b38806",
+      "originalWholeReportSuccess": true,
+      "originalReportCounts": {
+        "reportPassed": 10,
+        "reportFailed": 0,
+        "reportPending": 0
+      },
+      "sourceImpactReviewed": true,
+      "scope": "An actual historical passed assertion retained after current dependency/runtime impact review. This is not a current invocation PASS."
+    },
+    "b100bd2f2fba7e1cb4d66ae3d3eea5e010d52ab3c43486694233f1cc5d1596f2": {
+      "caseId": "b100bd2f2fba7e1cb4d66ae3d3eea5e010d52ab3c43486694233f1cc5d1596f2",
+      "currentTestSha256": "c332a28f3a7ed6c45de6f3723e8ab7720f8fcd40551b5e1eec9fa95e5f866d64",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_ASSERTION_ATTESTATION",
+      "originalAssertionName": "offline absent backup part reconciliation on isolated PostgreSQL and physical storage refuses a RUNNING original instead of reclassifying it",
+      "originalAssertionStatus": "passed",
+      "originalReportSha256": "e4cbbaae2c302951c17f6dff48d791aba1876c0f2526e0c9143f1f0ed6b38806",
+      "originalWholeReportSuccess": true,
+      "originalReportCounts": {
+        "reportPassed": 10,
+        "reportFailed": 0,
+        "reportPending": 0
+      },
+      "sourceImpactReviewed": true,
+      "scope": "An actual historical passed assertion retained after current dependency/runtime impact review. This is not a current invocation PASS."
+    },
+    "b0ed25645e434a7a887409e21a77ee6b1c936c233222a514cbcc177fbe6db7c2": {
+      "caseId": "b0ed25645e434a7a887409e21a77ee6b1c936c233222a514cbcc177fbe6db7c2",
+      "currentTestSha256": "c332a28f3a7ed6c45de6f3723e8ab7720f8fcd40551b5e1eec9fa95e5f866d64",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_ASSERTION_ATTESTATION",
+      "originalAssertionName": "offline absent backup part reconciliation on isolated PostgreSQL and physical storage refuses a non-drained backend",
+      "originalAssertionStatus": "passed",
+      "originalReportSha256": "e4cbbaae2c302951c17f6dff48d791aba1876c0f2526e0c9143f1f0ed6b38806",
+      "originalWholeReportSuccess": true,
+      "originalReportCounts": {
+        "reportPassed": 10,
+        "reportFailed": 0,
+        "reportPending": 0
+      },
+      "sourceImpactReviewed": true,
+      "scope": "An actual historical passed assertion retained after current dependency/runtime impact review. This is not a current invocation PASS."
+    },
+    "aa06261d3c800d4d89835031a1f6ec3c04de963cdcee92324782ce4ccc90b3a7": {
+      "caseId": "aa06261d3c800d4d89835031a1f6ec3c04de963cdcee92324782ce4ccc90b3a7",
+      "currentTestSha256": "c332a28f3a7ed6c45de6f3723e8ab7720f8fcd40551b5e1eec9fa95e5f866d64",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_ASSERTION_ATTESTATION",
+      "originalAssertionName": "offline absent backup part reconciliation on isolated PostgreSQL and physical storage refuses live read handles",
+      "originalAssertionStatus": "passed",
+      "originalReportSha256": "e4cbbaae2c302951c17f6dff48d791aba1876c0f2526e0c9143f1f0ed6b38806",
+      "originalWholeReportSuccess": true,
+      "originalReportCounts": {
+        "reportPassed": 10,
+        "reportFailed": 0,
+        "reportPending": 0
+      },
+      "sourceImpactReviewed": true,
+      "scope": "An actual historical passed assertion retained after current dependency/runtime impact review. This is not a current invocation PASS."
+    },
+    "faa5a14a0be2a18cfda4a8fe83000e308bba9a2385c3eb0bae61fbf5000e2932": {
+      "caseId": "faa5a14a0be2a18cfda4a8fe83000e308bba9a2385c3eb0bae61fbf5000e2932",
+      "currentTestSha256": "c332a28f3a7ed6c45de6f3723e8ab7720f8fcd40551b5e1eec9fa95e5f866d64",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_ASSERTION_ATTESTATION",
+      "originalAssertionName": "offline absent backup part reconciliation on isolated PostgreSQL and physical storage rolls back when the external fence changes during the physical probe",
+      "originalAssertionStatus": "passed",
+      "originalReportSha256": "e4cbbaae2c302951c17f6dff48d791aba1876c0f2526e0c9143f1f0ed6b38806",
+      "originalWholeReportSuccess": true,
+      "originalReportCounts": {
+        "reportPassed": 10,
+        "reportFailed": 0,
+        "reportPending": 0
+      },
+      "sourceImpactReviewed": true,
+      "scope": "An actual historical passed assertion retained after current dependency/runtime impact review. This is not a current invocation PASS."
+    },
+    "64a126d0729b39f946da76e98ff70a5115e3fab91f0fe30ea9d307164b4de886": {
+      "caseId": "64a126d0729b39f946da76e98ff70a5115e3fab91f0fe30ea9d307164b4de886",
+      "currentTestSha256": "c332a28f3a7ed6c45de6f3723e8ab7720f8fcd40551b5e1eec9fa95e5f866d64",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_ASSERTION_ATTESTATION",
+      "originalAssertionName": "offline absent backup part reconciliation on isolated PostgreSQL and physical storage propagates storage uncertainty and retains UNKNOWN",
+      "originalAssertionStatus": "passed",
+      "originalReportSha256": "e4cbbaae2c302951c17f6dff48d791aba1876c0f2526e0c9143f1f0ed6b38806",
+      "originalWholeReportSuccess": true,
+      "originalReportCounts": {
+        "reportPassed": 10,
+        "reportFailed": 0,
+        "reportPending": 0
+      },
+      "sourceImpactReviewed": true,
+      "scope": "An actual historical passed assertion retained after current dependency/runtime impact review. This is not a current invocation PASS."
+    },
+    "6ece7c2d2fff07e5f8c406bf3de7540d01fef40db1723406493f8093c1df15c8": {
+      "caseId": "6ece7c2d2fff07e5f8c406bf3de7540d01fef40db1723406493f8093c1df15c8",
+      "currentTestSha256": "1b0ca26edd6481220a92b49f6e9f491f2988d4f4b4d3d26dc12eec7264ede22f",
+      "currentInvocationPass": false,
+      "kind": "CURRENT_SCOPED_ASSERTION",
+      "actualExit": 0,
+      "caseStatus": "passed",
+      "joined": true,
+      "originalReportSha256": "1c0258762e49f2398d573ea8a8be082c8f2ab04df92db237d123cd9ab1f7b982",
+      "sourceExecutionWitnessSha256": "b05e710fa784826ba0ef3ff8abd7253addc050d3485f5f9a79c332d3540cf8c5",
+      "executedSourceInputs": [
+        {
+          "path": "packages/recovery/src/backend-owner-process.integration.test.ts",
+          "sha256": "1b0ca26edd6481220a92b49f6e9f491f2988d4f4b4d3d26dc12eec7264ede22f"
+        },
+        {
+          "path": "packages/recovery/src/backend-owner-process.ts",
+          "sha256": "174984aebc9165961462c71afd046cb68a1cc5444bffb3b5d37f4e9d976d96a2"
+        },
+        {
+          "path": "packages/recovery/src/docker-backend-cohort.ts",
+          "sha256": "6586c0e52c7dd298c954dfd71c37a54078adb27896a7a6503bafeff19e4237fe"
+        },
+        {
+          "path": "packages/database/src/index.ts",
+          "sha256": "3d5b740840d455b896b550501cd2a2a064030d86d0ce0b2b6589728fa4371fbd"
+        },
+        {
+          "path": "packages/database/src/migrate.ts",
+          "sha256": "586b1b5a766bf80c1016d5ccbb38d952c27af2bf84853546c226c4e3a052432b"
+        },
+        {
+          "path": "packages/contracts/src/test-support.ts",
+          "sha256": "d62d10e8819e7769d230646383b282e991c1b734c5da72b6a18bdf5bf0a4b340"
+        }
+      ],
+      "executionPlatform": "win32",
+      "executionArchitecture": "x64",
+      "scope": "Current eight managed-owner PostgreSQL/OS assertions on a genuine fresh empty ACTIVE root; ordinary workspace remains NOT_RUN."
+    },
+    "049a02141618977deffec45132b94fee2cc4f0dbda1213e0d8bd11cf379c9ff0": {
+      "caseId": "049a02141618977deffec45132b94fee2cc4f0dbda1213e0d8bd11cf379c9ff0",
+      "currentTestSha256": "1b0ca26edd6481220a92b49f6e9f491f2988d4f4b4d3d26dc12eec7264ede22f",
+      "currentInvocationPass": false,
+      "kind": "CURRENT_SCOPED_ASSERTION",
+      "actualExit": 0,
+      "caseStatus": "passed",
+      "joined": true,
+      "originalReportSha256": "1c0258762e49f2398d573ea8a8be082c8f2ab04df92db237d123cd9ab1f7b982",
+      "sourceExecutionWitnessSha256": "b05e710fa784826ba0ef3ff8abd7253addc050d3485f5f9a79c332d3540cf8c5",
+      "executedSourceInputs": [
+        {
+          "path": "packages/recovery/src/backend-owner-process.integration.test.ts",
+          "sha256": "1b0ca26edd6481220a92b49f6e9f491f2988d4f4b4d3d26dc12eec7264ede22f"
+        },
+        {
+          "path": "packages/recovery/src/backend-owner-process.ts",
+          "sha256": "174984aebc9165961462c71afd046cb68a1cc5444bffb3b5d37f4e9d976d96a2"
+        },
+        {
+          "path": "packages/recovery/src/docker-backend-cohort.ts",
+          "sha256": "6586c0e52c7dd298c954dfd71c37a54078adb27896a7a6503bafeff19e4237fe"
+        },
+        {
+          "path": "packages/database/src/index.ts",
+          "sha256": "3d5b740840d455b896b550501cd2a2a064030d86d0ce0b2b6589728fa4371fbd"
+        },
+        {
+          "path": "packages/database/src/migrate.ts",
+          "sha256": "586b1b5a766bf80c1016d5ccbb38d952c27af2bf84853546c226c4e3a052432b"
+        },
+        {
+          "path": "packages/contracts/src/test-support.ts",
+          "sha256": "d62d10e8819e7769d230646383b282e991c1b734c5da72b6a18bdf5bf0a4b340"
+        }
+      ],
+      "executionPlatform": "win32",
+      "executionArchitecture": "x64",
+      "scope": "Current eight managed-owner PostgreSQL/OS assertions on a genuine fresh empty ACTIVE root; ordinary workspace remains NOT_RUN."
+    },
+    "a74ba32de5668945fc2f6c01c06eea882dc59f5e56fc54f77cef5f37b375ef6c": {
+      "caseId": "a74ba32de5668945fc2f6c01c06eea882dc59f5e56fc54f77cef5f37b375ef6c",
+      "currentTestSha256": "1b0ca26edd6481220a92b49f6e9f491f2988d4f4b4d3d26dc12eec7264ede22f",
+      "currentInvocationPass": false,
+      "kind": "CURRENT_SCOPED_ASSERTION",
+      "actualExit": 0,
+      "caseStatus": "passed",
+      "joined": true,
+      "originalReportSha256": "1c0258762e49f2398d573ea8a8be082c8f2ab04df92db237d123cd9ab1f7b982",
+      "sourceExecutionWitnessSha256": "b05e710fa784826ba0ef3ff8abd7253addc050d3485f5f9a79c332d3540cf8c5",
+      "executedSourceInputs": [
+        {
+          "path": "packages/recovery/src/backend-owner-process.integration.test.ts",
+          "sha256": "1b0ca26edd6481220a92b49f6e9f491f2988d4f4b4d3d26dc12eec7264ede22f"
+        },
+        {
+          "path": "packages/recovery/src/backend-owner-process.ts",
+          "sha256": "174984aebc9165961462c71afd046cb68a1cc5444bffb3b5d37f4e9d976d96a2"
+        },
+        {
+          "path": "packages/recovery/src/docker-backend-cohort.ts",
+          "sha256": "6586c0e52c7dd298c954dfd71c37a54078adb27896a7a6503bafeff19e4237fe"
+        },
+        {
+          "path": "packages/database/src/index.ts",
+          "sha256": "3d5b740840d455b896b550501cd2a2a064030d86d0ce0b2b6589728fa4371fbd"
+        },
+        {
+          "path": "packages/database/src/migrate.ts",
+          "sha256": "586b1b5a766bf80c1016d5ccbb38d952c27af2bf84853546c226c4e3a052432b"
+        },
+        {
+          "path": "packages/contracts/src/test-support.ts",
+          "sha256": "d62d10e8819e7769d230646383b282e991c1b734c5da72b6a18bdf5bf0a4b340"
+        }
+      ],
+      "executionPlatform": "win32",
+      "executionArchitecture": "x64",
+      "scope": "Current eight managed-owner PostgreSQL/OS assertions on a genuine fresh empty ACTIVE root; ordinary workspace remains NOT_RUN."
+    },
+    "7378f051ac236b4de5cce06d8593fb78dab318413190cbbd5edd666566b5f67d": {
+      "caseId": "7378f051ac236b4de5cce06d8593fb78dab318413190cbbd5edd666566b5f67d",
+      "currentTestSha256": "1b0ca26edd6481220a92b49f6e9f491f2988d4f4b4d3d26dc12eec7264ede22f",
+      "currentInvocationPass": false,
+      "kind": "CURRENT_SCOPED_ASSERTION",
+      "actualExit": 0,
+      "caseStatus": "passed",
+      "joined": true,
+      "originalReportSha256": "1c0258762e49f2398d573ea8a8be082c8f2ab04df92db237d123cd9ab1f7b982",
+      "sourceExecutionWitnessSha256": "b05e710fa784826ba0ef3ff8abd7253addc050d3485f5f9a79c332d3540cf8c5",
+      "executedSourceInputs": [
+        {
+          "path": "packages/recovery/src/backend-owner-process.integration.test.ts",
+          "sha256": "1b0ca26edd6481220a92b49f6e9f491f2988d4f4b4d3d26dc12eec7264ede22f"
+        },
+        {
+          "path": "packages/recovery/src/backend-owner-process.ts",
+          "sha256": "174984aebc9165961462c71afd046cb68a1cc5444bffb3b5d37f4e9d976d96a2"
+        },
+        {
+          "path": "packages/recovery/src/docker-backend-cohort.ts",
+          "sha256": "6586c0e52c7dd298c954dfd71c37a54078adb27896a7a6503bafeff19e4237fe"
+        },
+        {
+          "path": "packages/database/src/index.ts",
+          "sha256": "3d5b740840d455b896b550501cd2a2a064030d86d0ce0b2b6589728fa4371fbd"
+        },
+        {
+          "path": "packages/database/src/migrate.ts",
+          "sha256": "586b1b5a766bf80c1016d5ccbb38d952c27af2bf84853546c226c4e3a052432b"
+        },
+        {
+          "path": "packages/contracts/src/test-support.ts",
+          "sha256": "d62d10e8819e7769d230646383b282e991c1b734c5da72b6a18bdf5bf0a4b340"
+        }
+      ],
+      "executionPlatform": "win32",
+      "executionArchitecture": "x64",
+      "scope": "Current eight managed-owner PostgreSQL/OS assertions on a genuine fresh empty ACTIVE root; ordinary workspace remains NOT_RUN."
+    },
+    "9be1b42d08c74ae8c2a547ef68c0e1b9312a13eadaa91d5a16a32468805a7672": {
+      "caseId": "9be1b42d08c74ae8c2a547ef68c0e1b9312a13eadaa91d5a16a32468805a7672",
+      "currentTestSha256": "1b0ca26edd6481220a92b49f6e9f491f2988d4f4b4d3d26dc12eec7264ede22f",
+      "currentInvocationPass": false,
+      "kind": "CURRENT_SCOPED_ASSERTION",
+      "actualExit": 0,
+      "caseStatus": "passed",
+      "joined": true,
+      "originalReportSha256": "1c0258762e49f2398d573ea8a8be082c8f2ab04df92db237d123cd9ab1f7b982",
+      "sourceExecutionWitnessSha256": "b05e710fa784826ba0ef3ff8abd7253addc050d3485f5f9a79c332d3540cf8c5",
+      "executedSourceInputs": [
+        {
+          "path": "packages/recovery/src/backend-owner-process.integration.test.ts",
+          "sha256": "1b0ca26edd6481220a92b49f6e9f491f2988d4f4b4d3d26dc12eec7264ede22f"
+        },
+        {
+          "path": "packages/recovery/src/backend-owner-process.ts",
+          "sha256": "174984aebc9165961462c71afd046cb68a1cc5444bffb3b5d37f4e9d976d96a2"
+        },
+        {
+          "path": "packages/recovery/src/docker-backend-cohort.ts",
+          "sha256": "6586c0e52c7dd298c954dfd71c37a54078adb27896a7a6503bafeff19e4237fe"
+        },
+        {
+          "path": "packages/database/src/index.ts",
+          "sha256": "3d5b740840d455b896b550501cd2a2a064030d86d0ce0b2b6589728fa4371fbd"
+        },
+        {
+          "path": "packages/database/src/migrate.ts",
+          "sha256": "586b1b5a766bf80c1016d5ccbb38d952c27af2bf84853546c226c4e3a052432b"
+        },
+        {
+          "path": "packages/contracts/src/test-support.ts",
+          "sha256": "d62d10e8819e7769d230646383b282e991c1b734c5da72b6a18bdf5bf0a4b340"
+        }
+      ],
+      "executionPlatform": "win32",
+      "executionArchitecture": "x64",
+      "scope": "Current eight managed-owner PostgreSQL/OS assertions on a genuine fresh empty ACTIVE root; ordinary workspace remains NOT_RUN."
+    },
+    "565b41869b47415cb97383327352e0bfbf2a6eeb1b5d3200ef9e593df4f921a7": {
+      "caseId": "565b41869b47415cb97383327352e0bfbf2a6eeb1b5d3200ef9e593df4f921a7",
+      "currentTestSha256": "1b0ca26edd6481220a92b49f6e9f491f2988d4f4b4d3d26dc12eec7264ede22f",
+      "currentInvocationPass": false,
+      "kind": "CURRENT_SCOPED_ASSERTION",
+      "actualExit": 0,
+      "caseStatus": "passed",
+      "joined": true,
+      "originalReportSha256": "1c0258762e49f2398d573ea8a8be082c8f2ab04df92db237d123cd9ab1f7b982",
+      "sourceExecutionWitnessSha256": "b05e710fa784826ba0ef3ff8abd7253addc050d3485f5f9a79c332d3540cf8c5",
+      "executedSourceInputs": [
+        {
+          "path": "packages/recovery/src/backend-owner-process.integration.test.ts",
+          "sha256": "1b0ca26edd6481220a92b49f6e9f491f2988d4f4b4d3d26dc12eec7264ede22f"
+        },
+        {
+          "path": "packages/recovery/src/backend-owner-process.ts",
+          "sha256": "174984aebc9165961462c71afd046cb68a1cc5444bffb3b5d37f4e9d976d96a2"
+        },
+        {
+          "path": "packages/recovery/src/docker-backend-cohort.ts",
+          "sha256": "6586c0e52c7dd298c954dfd71c37a54078adb27896a7a6503bafeff19e4237fe"
+        },
+        {
+          "path": "packages/database/src/index.ts",
+          "sha256": "3d5b740840d455b896b550501cd2a2a064030d86d0ce0b2b6589728fa4371fbd"
+        },
+        {
+          "path": "packages/database/src/migrate.ts",
+          "sha256": "586b1b5a766bf80c1016d5ccbb38d952c27af2bf84853546c226c4e3a052432b"
+        },
+        {
+          "path": "packages/contracts/src/test-support.ts",
+          "sha256": "d62d10e8819e7769d230646383b282e991c1b734c5da72b6a18bdf5bf0a4b340"
+        }
+      ],
+      "executionPlatform": "win32",
+      "executionArchitecture": "x64",
+      "scope": "Current eight managed-owner PostgreSQL/OS assertions on a genuine fresh empty ACTIVE root; ordinary workspace remains NOT_RUN."
+    },
+    "cf9b13bdcf00b37dd68fa42e3ec6345aa47c1fb537146f6eadd0cd8ca789f100": {
+      "caseId": "cf9b13bdcf00b37dd68fa42e3ec6345aa47c1fb537146f6eadd0cd8ca789f100",
+      "currentTestSha256": "1b0ca26edd6481220a92b49f6e9f491f2988d4f4b4d3d26dc12eec7264ede22f",
+      "currentInvocationPass": false,
+      "kind": "CURRENT_SCOPED_ASSERTION",
+      "actualExit": 0,
+      "caseStatus": "passed",
+      "joined": true,
+      "originalReportSha256": "1c0258762e49f2398d573ea8a8be082c8f2ab04df92db237d123cd9ab1f7b982",
+      "sourceExecutionWitnessSha256": "b05e710fa784826ba0ef3ff8abd7253addc050d3485f5f9a79c332d3540cf8c5",
+      "executedSourceInputs": [
+        {
+          "path": "packages/recovery/src/backend-owner-process.integration.test.ts",
+          "sha256": "1b0ca26edd6481220a92b49f6e9f491f2988d4f4b4d3d26dc12eec7264ede22f"
+        },
+        {
+          "path": "packages/recovery/src/backend-owner-process.ts",
+          "sha256": "174984aebc9165961462c71afd046cb68a1cc5444bffb3b5d37f4e9d976d96a2"
+        },
+        {
+          "path": "packages/recovery/src/docker-backend-cohort.ts",
+          "sha256": "6586c0e52c7dd298c954dfd71c37a54078adb27896a7a6503bafeff19e4237fe"
+        },
+        {
+          "path": "packages/database/src/index.ts",
+          "sha256": "3d5b740840d455b896b550501cd2a2a064030d86d0ce0b2b6589728fa4371fbd"
+        },
+        {
+          "path": "packages/database/src/migrate.ts",
+          "sha256": "586b1b5a766bf80c1016d5ccbb38d952c27af2bf84853546c226c4e3a052432b"
+        },
+        {
+          "path": "packages/contracts/src/test-support.ts",
+          "sha256": "d62d10e8819e7769d230646383b282e991c1b734c5da72b6a18bdf5bf0a4b340"
+        }
+      ],
+      "executionPlatform": "win32",
+      "executionArchitecture": "x64",
+      "scope": "Current eight managed-owner PostgreSQL/OS assertions on a genuine fresh empty ACTIVE root; ordinary workspace remains NOT_RUN."
+    },
+    "f1c871b83ad0c2b99e68468a4460bc6ea3ac70ee54c6e35ad7aba3eba8042394": {
+      "caseId": "f1c871b83ad0c2b99e68468a4460bc6ea3ac70ee54c6e35ad7aba3eba8042394",
+      "currentTestSha256": "1b0ca26edd6481220a92b49f6e9f491f2988d4f4b4d3d26dc12eec7264ede22f",
+      "currentInvocationPass": false,
+      "kind": "CURRENT_SCOPED_ASSERTION",
+      "actualExit": 0,
+      "caseStatus": "passed",
+      "joined": true,
+      "originalReportSha256": "1c0258762e49f2398d573ea8a8be082c8f2ab04df92db237d123cd9ab1f7b982",
+      "sourceExecutionWitnessSha256": "b05e710fa784826ba0ef3ff8abd7253addc050d3485f5f9a79c332d3540cf8c5",
+      "executedSourceInputs": [
+        {
+          "path": "packages/recovery/src/backend-owner-process.integration.test.ts",
+          "sha256": "1b0ca26edd6481220a92b49f6e9f491f2988d4f4b4d3d26dc12eec7264ede22f"
+        },
+        {
+          "path": "packages/recovery/src/backend-owner-process.ts",
+          "sha256": "174984aebc9165961462c71afd046cb68a1cc5444bffb3b5d37f4e9d976d96a2"
+        },
+        {
+          "path": "packages/recovery/src/docker-backend-cohort.ts",
+          "sha256": "6586c0e52c7dd298c954dfd71c37a54078adb27896a7a6503bafeff19e4237fe"
+        },
+        {
+          "path": "packages/database/src/index.ts",
+          "sha256": "3d5b740840d455b896b550501cd2a2a064030d86d0ce0b2b6589728fa4371fbd"
+        },
+        {
+          "path": "packages/database/src/migrate.ts",
+          "sha256": "586b1b5a766bf80c1016d5ccbb38d952c27af2bf84853546c226c4e3a052432b"
+        },
+        {
+          "path": "packages/contracts/src/test-support.ts",
+          "sha256": "d62d10e8819e7769d230646383b282e991c1b734c5da72b6a18bdf5bf0a4b340"
+        }
+      ],
+      "executionPlatform": "win32",
+      "executionArchitecture": "x64",
+      "scope": "Current eight managed-owner PostgreSQL/OS assertions on a genuine fresh empty ACTIVE root; ordinary workspace remains NOT_RUN."
+    },
+    "77e8f3fe0ca40338b96d53238ad7f8445563a23cc85d9b2ed5ff0ff5a4860ad1": {
+      "caseId": "77e8f3fe0ca40338b96d53238ad7f8445563a23cc85d9b2ed5ff0ff5a4860ad1",
+      "currentTestSha256": "625bd534fe8730d0ade3fd72005c06ff3906d7e0ecbcbcd5ee7c7cdb905e0b4d",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_ASSERTION_ATTESTATION",
+      "originalAssertionName": "qualifies coherent logical backup and guarded recovery on its own PostgreSQL container",
+      "originalAssertionStatus": "passed",
+      "originalReportSha256": "db82b8eaa85f10aafed73d21279cd502d3cb3a4e06c150073d45ae60ca3438af",
+      "originalWholeReportSuccess": true,
+      "originalReportCounts": {
+        "reportPassed": 1,
+        "reportFailed": 0,
+        "reportPending": 0
+      },
+      "sourceImpactReviewed": true,
+      "scope": "An actual historical passed assertion retained after current dependency/runtime impact review. This is not a current invocation PASS."
+    },
+    "241855cf3a3d0d4e33f25feca006fa5b93412cf4f911975ade5ec3fe8c965c0f": {
+      "caseId": "241855cf3a3d0d4e33f25feca006fa5b93412cf4f911975ade5ec3fe8c965c0f",
+      "currentTestSha256": "9daf9d23f31df25a88f3ff52f3c44afa624937cf39d300e7a9ac0013e5dbe667",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_ASSERTION_ATTESTATION",
+      "originalAssertionName": "qualifies inactive CJ01 sealed uploads as one catalog/receipt/event transaction through HTTP, PostgreSQL and actual local bytes",
+      "originalAssertionStatus": "passed",
+      "originalReportSha256": "068af46c0bba5cbc70add28a4f96222495dd57d77a0cf3bfb5fb67e96a27f962",
+      "originalWholeReportSuccess": true,
+      "originalReportCounts": {
+        "reportPassed": 2,
+        "reportFailed": 0,
+        "reportPending": 14
+      },
+      "sourceImpactReviewed": true,
+      "scope": "An actual historical passed assertion retained after current dependency/runtime impact review. This is not a current invocation PASS."
+    },
+    "4dd93df2201e485099d97a022c67aace637b5b81594c00ac538e10d69c4427f1": {
+      "caseId": "4dd93df2201e485099d97a022c67aace637b5b81594c00ac538e10d69c4427f1",
+      "currentTestSha256": "63641f1b9f7e949c6b882a9ef726d9b722ba6b649e2f2a840c4df27db8fbebad",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_ASSERTION_ATTESTATION",
+      "originalAssertionName": "qualifies the populated1024node successor with native custody, atomic rollback and durable downgrade refusal",
+      "originalAssertionStatus": "passed",
+      "originalReportSha256": "361d31d754725c898abcace51e62e0be7ef7c8823494629263407cc8c96bc8fc",
+      "originalWholeReportSuccess": true,
+      "originalReportCounts": {
+        "reportPassed": 1,
+        "reportFailed": 0,
+        "reportPending": 0
+      },
+      "sourceImpactReviewed": true,
+      "scope": "An actual historical passed assertion retained after current dependency/runtime impact review. This is not a current invocation PASS."
+    },
+    "b902f6a10affbe07b5da8b6f3c583062249f8543ccacc5978f1b4433b7bacc4c": {
+      "caseId": "b902f6a10affbe07b5da8b6f3c583062249f8543ccacc5978f1b4433b7bacc4c",
+      "currentTestSha256": "1a1b2e4df69c08c1f932c1a10be9872f557ad6ecf5136c58848254bb9f592342",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_ASSERTION_ATTESTATION",
+      "originalAssertionName": "runs the private operator in a new PID with pinned bootstrap/drain/coherent backup and replays its original",
+      "originalAssertionStatus": "passed",
+      "originalReportSha256": "eb85c6aca2664f5eca1d65afb032f39761cb7e23311229fb45e5ae6e4bec6d83",
+      "originalWholeReportSuccess": true,
+      "originalReportCounts": {
+        "reportPassed": 2,
+        "reportFailed": 0,
+        "reportPending": 0
+      },
+      "sourceImpactReviewed": true,
+      "scope": "An actual historical passed assertion retained after current dependency/runtime impact review. This is not a current invocation PASS."
+    },
+    "6a1a934d09bcaa6114573dae64fa7e77737b41cfe555ce6c818b4ad82583db9d": {
+      "caseId": "6a1a934d09bcaa6114573dae64fa7e77737b41cfe555ce6c818b4ad82583db9d",
+      "currentTestSha256": "1140e45a00ad73dbfa6e91d5a3978931337c20908be7f5bade072002de0b88d6",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_ASSERTION_ATTESTATION",
+      "originalAssertionName": "repairs the retained aggregate UNKNOWN defect atomically with original-key replay and strict offline refusals",
+      "originalAssertionStatus": "passed",
+      "originalReportSha256": "eb85c6aca2664f5eca1d65afb032f39761cb7e23311229fb45e5ae6e4bec6d83",
+      "originalWholeReportSuccess": true,
+      "originalReportCounts": {
+        "reportPassed": 2,
+        "reportFailed": 0,
+        "reportPending": 0
+      },
+      "sourceImpactReviewed": true,
+      "scope": "An actual historical passed assertion retained after current dependency/runtime impact review. This is not a current invocation PASS."
+    },
+    "b8dcd552e3fc21e9336ca29abfddf3d1c9effdbc35de118c035569f3fc79142b": {
+      "caseId": "b8dcd552e3fc21e9336ca29abfddf3d1c9effdbc35de118c035569f3fc79142b",
+      "currentTestSha256": "bc19c78b3038fb5f39c23ba673823c756e3bff89c20280523b8c70540a292c20",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_ASSERTION_ATTESTATION",
+      "originalAssertionName": "qualifies modern folder topology and preserves actual guarded file/CAS lifecycle on current56",
+      "originalAssertionStatus": "passed",
+      "originalReportSha256": "bf435dc12d36e326357899ff140314cfa485777776b97444c138b80ffbf08ea7",
+      "originalWholeReportSuccess": false,
+      "originalReportCounts": {
+        "reportPassed": 1,
+        "reportFailed": 1,
+        "reportPending": 0
+      },
+      "sourceImpactReviewed": true,
+      "scope": "An actual historical passed assertion retained after current dependency/runtime impact review. This is not a current invocation PASS."
+    },
+    "b340a9e0d58bcc7775ee28d97d7d00fb0b416d2871e1cbb545c41b9663a9d72e": {
+      "caseId": "b340a9e0d58bcc7775ee28d97d7d00fb0b416d2871e1cbb545c41b9663a9d72e",
+      "currentTestSha256": "8abbdd19c2fb6d010d2ce57e3cd4516e7f601222dbca1a8cc8882c631fce8b0a",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_ASSERTION_ATTESTATION",
+      "originalAssertionName": "qualifies inactive durable folder ensure with real PG, route authentication, HTTP, exclusive backend and failure outcomes",
+      "originalAssertionStatus": "passed",
+      "originalReportSha256": "e2da60b1cd6f92654cbbd917a1c2fbb0a76265dd3460086398998a44a9b32fd8",
+      "originalWholeReportSuccess": true,
+      "originalReportCounts": {
+        "reportPassed": 1,
+        "reportFailed": 0,
+        "reportPending": 0
+      },
+      "sourceImpactReviewed": true,
+      "scope": "An actual historical passed assertion retained after current dependency/runtime impact review. This is not a current invocation PASS."
+    },
+    "b58e5990c6a8bc7513db506c1ca4241af3dbfba7ec66d4a6cfd73345fefaa895": {
+      "caseId": "b58e5990c6a8bc7513db506c1ca4241af3dbfba7ec66d4a6cfd73345fefaa895",
+      "currentTestSha256": "e6b77e0d257562b57706ed69e244a8953f37ebc7dc46f752e4743fdbd7cc780f",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_ASSERTION_ATTESTATION",
+      "originalAssertionName": "enforces scoped restricted SQL writers and fixed durable device-folder lifecycle with actual PG/HTTP/backend",
+      "originalAssertionStatus": "passed",
+      "originalReportSha256": "8a838fc9a249d92b7805385a8e0380a38cfebf1be661b03464e6a9849dfba936",
+      "originalWholeReportSuccess": true,
+      "originalReportCounts": {
+        "reportPassed": 2,
+        "reportFailed": 0,
+        "reportPending": 0
+      },
+      "sourceImpactReviewed": true,
+      "scope": "An actual historical passed assertion retained after current dependency/runtime impact review. This is not a current invocation PASS."
+    },
+    "7120d9d569cdfb7726dddf39c9e2a834b48ca2f09148420261c67e24fb5d225f": {
+      "caseId": "7120d9d569cdfb7726dddf39c9e2a834b48ca2f09148420261c67e24fb5d225f",
+      "currentTestSha256": "fc33641c2877c90dd6bcf40016df3115ac99a21d61937f0ba67ca9e515b364ae",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_ASSERTION_ATTESTATION",
+      "originalAssertionName": "qualifies isolated catalogue role privileges and rejects escalation/definer changes on actual PostgreSQL",
+      "originalAssertionStatus": "passed",
+      "originalReportSha256": "909a36e7fa8aea03afbd7eef529b7e21e7e277ec7d34758c0d1e3a48ff1897b5",
+      "originalWholeReportSuccess": true,
+      "originalReportCounts": {
+        "reportPassed": 1,
+        "reportFailed": 0,
+        "reportPending": 0
+      },
+      "sourceImpactReviewed": true,
+      "scope": "An actual historical passed assertion retained after current dependency/runtime impact review. This is not a current invocation PASS."
+    },
+    "6fc43e54e68502090e4fe7f7b02e78fbcb5c1fb5c0061c4830a25d5646ef7cce": {
+      "caseId": "6fc43e54e68502090e4fe7f7b02e78fbcb5c1fb5c0061c4830a25d5646ef7cce",
+      "currentTestSha256": "df2a82da24a7d9eeec31d1b2b7869a616538cf1637969c6d76bd9eb7286423ac",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_ASSERTION_ATTESTATION",
+      "originalAssertionName": "qualifies bounded fair folder/file publication with original IDs and unchanged ACTIVE SQL guard",
+      "originalAssertionStatus": "passed",
+      "originalReportSha256": "a373c761d9923389b14de9807321b0a1bb0437f8bb6b53afaebc8e6da7f5fb9d",
+      "originalWholeReportSuccess": true,
+      "originalReportCounts": {
+        "reportPassed": 1,
+        "reportFailed": 0,
+        "reportPending": 0
+      },
+      "sourceImpactReviewed": true,
+      "scope": "An actual historical passed assertion retained after current dependency/runtime impact review. This is not a current invocation PASS."
+    },
+    "1bd200feaf8bd57ad10a57acfbd0fd75a72498c4f6f8f1685b01ebe15934b1f9": {
+      "caseId": "1bd200feaf8bd57ad10a57acfbd0fd75a72498c4f6f8f1685b01ebe15934b1f9",
+      "currentTestSha256": "58ebc73e2a03253d9dbfca7ade432ace6c121c6d964ad47098e99e4cdb36ba40",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_ASSERTION_ATTESTATION",
+      "originalAssertionName": "qualifies fixed guarded file/CAS lifecycle with actual PG, HTTP, bytes, concurrency and retained original outcomes",
+      "originalAssertionStatus": "passed",
+      "originalReportSha256": "8a838fc9a249d92b7805385a8e0380a38cfebf1be661b03464e6a9849dfba936",
+      "originalWholeReportSuccess": true,
+      "originalReportCounts": {
+        "reportPassed": 2,
+        "reportFailed": 0,
+        "reportPending": 0
+      },
+      "sourceImpactReviewed": true,
+      "scope": "An actual historical passed assertion retained after current dependency/runtime impact review. This is not a current invocation PASS."
+    },
+    "309e4fcef44a912fda720840d750b3e50c745a41c195d3f3edfbe82616534446": {
+      "caseId": "309e4fcef44a912fda720840d750b3e50c745a41c195d3f3edfbe82616534446",
+      "currentTestSha256": "85ab0f8e1e7cd9c3b836a3f2151ae142e226e8cc7b2a17568ae1be6dadc9f762",
+      "currentInvocationPass": false,
+      "kind": "EXTERNAL_CONTROL_PROVIDER",
+      "standaloneProductAssertion": false,
+      "nativeCompositionAccepted": true,
+      "package8CurrentArtifactJourneyStillRequired": true,
+      "nativeCompositionArtifacts": [
+        {
+          "id": "accepted-package7-composition",
+          "bytes": 21225,
+          "sha256": "10915af530f64d78c55214b429aa047ef18c7e7607e77e05197c0a897319515e"
+        },
+        {
+          "id": "P7-native-composition-0",
+          "bytes": 20571,
+          "sha256": "5c55c9c069ca5afd843b79586501d8053e667d2d24bd38062932af2ed3d9098f"
+        },
+        {
+          "id": "P7-native-composition-1",
+          "bytes": 9011,
+          "sha256": "80f1d344da64dbcd7022bae26c5e59ff2d7367f0fc09c4cc06e346f5b72319c5"
+        },
+        {
+          "id": "P7-native-composition-2",
+          "bytes": 3217,
+          "sha256": "0d0d50f99a1bfc2337bebf11ff46c3d310a36d00c5e90cdb61ae2888dfc32ee7"
+        }
+      ],
+      "scope": "Its real client/content/lifecycle claims retain P7 paired/native evidence, not an invented autonomous receiver PASS. Current exact-artifact joint journey remains an explicit P8 card.",
+      "note": "The original source explicitly declares a controller-driven receiver, not a standalone native test. No receiver execution PASS is claimed; the actual native client/data/lifecycle composition is retained, and the P8 current-artifact canary remains mandatory."
+    },
+    "5971e6f35836c368509de9da3e232d4e2bf352d39543129ea182bd5a785a208a": {
+      "caseId": "5971e6f35836c368509de9da3e232d4e2bf352d39543129ea182bd5a785a208a",
+      "currentTestSha256": "e0cdce02a110beb576c1604d000d2e5aa6ffb67d68e588a96827652c33805e39",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_ASSERTION_ATTESTATION",
+      "originalAssertionName": "compares aggregate observation with the full metadata query on a retained-size catalog",
+      "originalAssertionStatus": "passed",
+      "originalReportSha256": "5ef691d30c31b4ec4bd69dc2c197ff63ff971ca10931709b31c1ba9f5ba1a8e9",
+      "originalWholeReportSuccess": true,
+      "originalReportCounts": {
+        "reportPassed": 1,
+        "reportFailed": 0,
+        "reportPending": 0
+      },
+      "sourceImpactReviewed": true,
+      "scope": "An actual historical passed assertion retained after current dependency/runtime impact review. This is not a current invocation PASS."
+    },
+    "5a53b1d606e6896a0e239844587dedaae14f70fb327942db9a258b504499af2d": {
+      "caseId": "5a53b1d606e6896a0e239844587dedaae14f70fb327942db9a258b504499af2d",
+      "currentTestSha256": "b39a5d425b87ccb8894ec4077a223a13a735e01012811eab575714b9b5b13672",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_ASSERTION_ATTESTATION",
+      "originalAssertionName": "qualifies inactive metadata UUID, full namespace publication, atomic binding invalidation and coherent recovery on owned PostgreSQL and HTTP",
+      "originalAssertionStatus": "passed",
+      "originalReportSha256": "ba90b938dc1b715857caaaeda13a1c7591fb5ca7fff491bbdfeb4d7e3f06a2c3",
+      "originalWholeReportSuccess": true,
+      "originalReportCounts": {
+        "reportPassed": 2,
+        "reportFailed": 0,
+        "reportPending": 0
+      },
+      "sourceImpactReviewed": true,
+      "scope": "An actual historical passed assertion retained after current dependency/runtime impact review. This is not a current invocation PASS."
+    },
+    "b005cdb5d672ac533fd73954dfb6468f7e661a39cb8f8a26380da7a2d2bb89d5": {
+      "caseId": "b005cdb5d672ac533fd73954dfb6468f7e661a39cb8f8a26380da7a2d2bb89d5",
+      "currentTestSha256": "19841be209f6ba5e2c6f9c9ebf7c9aadeaccda99f2d3c039c550b10294b1cd17",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_ASSERTION_ATTESTATION",
+      "originalAssertionName": "bounded PostgreSQL buffered Drop retry bounds high-attempt retry to30s and retains original identity/SHA/buffer",
+      "originalAssertionStatus": "passed",
+      "originalReportSha256": "8a40a1c1eafd26ae43dba8ec0cf20c51277596717a349b06bdb13ed8b1b92999",
+      "originalWholeReportSuccess": true,
+      "originalReportCounts": {
+        "reportPassed": 9,
+        "reportFailed": 0,
+        "reportPending": 0
+      },
+      "sourceImpactReviewed": true,
+      "scope": "An actual historical passed assertion retained after current dependency/runtime impact review. This is not a current invocation PASS."
+    },
+    "698d9a059f3acac55871182e69e08f8762f9bce8f1ae2cb844a5aedb6e3f65ed": {
+      "caseId": "698d9a059f3acac55871182e69e08f8762f9bce8f1ae2cb844a5aedb6e3f65ed",
+      "currentTestSha256": "19841be209f6ba5e2c6f9c9ebf7c9aadeaccda99f2d3c039c550b10294b1cd17",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_ASSERTION_ATTESTATION",
+      "originalAssertionName": "bounded PostgreSQL buffered Drop retry recovers persisted42minute backoff through ordinary claim without rewriting rows first",
+      "originalAssertionStatus": "passed",
+      "originalReportSha256": "8a40a1c1eafd26ae43dba8ec0cf20c51277596717a349b06bdb13ed8b1b92999",
+      "originalWholeReportSuccess": true,
+      "originalReportCounts": {
+        "reportPassed": 9,
+        "reportFailed": 0,
+        "reportPending": 0
+      },
+      "sourceImpactReviewed": true,
+      "scope": "An actual historical passed assertion retained after current dependency/runtime impact review. This is not a current invocation PASS."
+    },
+    "f06b5555bdc51ab7dbf960c125647eebc6c818071af7ae49afac3fab32690fc5": {
+      "caseId": "f06b5555bdc51ab7dbf960c125647eebc6c818071af7ae49afac3fab32690fc5",
+      "currentTestSha256": "19841be209f6ba5e2c6f9c9ebf7c9aadeaccda99f2d3c039c550b10294b1cd17",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_ASSERTION_ATTESTATION",
+      "originalAssertionName": "bounded PostgreSQL buffered Drop retry keeps the initial10s backoff instead of creating a tight retry loop",
+      "originalAssertionStatus": "passed",
+      "originalReportSha256": "8a40a1c1eafd26ae43dba8ec0cf20c51277596717a349b06bdb13ed8b1b92999",
+      "originalWholeReportSuccess": true,
+      "originalReportCounts": {
+        "reportPassed": 9,
+        "reportFailed": 0,
+        "reportPending": 0
+      },
+      "sourceImpactReviewed": true,
+      "scope": "An actual historical passed assertion retained after current dependency/runtime impact review. This is not a current invocation PASS."
+    },
+    "d7ddd4dbac55cf87d38ad99c904884ccef7496085b428e6db7758dc52db46695": {
+      "caseId": "d7ddd4dbac55cf87d38ad99c904884ccef7496085b428e6db7758dc52db46695",
+      "currentTestSha256": "19841be209f6ba5e2c6f9c9ebf7c9aadeaccda99f2d3c039c550b10294b1cd17",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_ASSERTION_ATTESTATION",
+      "originalAssertionName": "bounded PostgreSQL buffered Drop retry allows only one concurrent claim of an old scheduled original",
+      "originalAssertionStatus": "passed",
+      "originalReportSha256": "8a40a1c1eafd26ae43dba8ec0cf20c51277596717a349b06bdb13ed8b1b92999",
+      "originalWholeReportSuccess": true,
+      "originalReportCounts": {
+        "reportPassed": 9,
+        "reportFailed": 0,
+        "reportPending": 0
+      },
+      "sourceImpactReviewed": true,
+      "scope": "An actual historical passed assertion retained after current dependency/runtime impact review. This is not a current invocation PASS."
+    },
+    "b60cca240d45e365faf7b74a7a04311ca33b9dd1620ffbdd71a8b8b01b454cdf": {
+      "caseId": "b60cca240d45e365faf7b74a7a04311ca33b9dd1620ffbdd71a8b8b01b454cdf",
+      "currentTestSha256": "19841be209f6ba5e2c6f9c9ebf7c9aadeaccda99f2d3c039c550b10294b1cd17",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_ASSERTION_ATTESTATION",
+      "originalAssertionName": "bounded PostgreSQL buffered Drop retry does not revive terminal failed originals",
+      "originalAssertionStatus": "passed",
+      "originalReportSha256": "8a40a1c1eafd26ae43dba8ec0cf20c51277596717a349b06bdb13ed8b1b92999",
+      "originalWholeReportSuccess": true,
+      "originalReportCounts": {
+        "reportPassed": 9,
+        "reportFailed": 0,
+        "reportPending": 0
+      },
+      "sourceImpactReviewed": true,
+      "scope": "An actual historical passed assertion retained after current dependency/runtime impact review. This is not a current invocation PASS."
+    },
+    "aa489b3417d46249eed117b6c4ac6d343b882d94f68cc9ceb0c2dae93d86a75f": {
+      "caseId": "aa489b3417d46249eed117b6c4ac6d343b882d94f68cc9ceb0c2dae93d86a75f",
+      "currentTestSha256": "19841be209f6ba5e2c6f9c9ebf7c9aadeaccda99f2d3c039c550b10294b1cd17",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_ASSERTION_ATTESTATION",
+      "originalAssertionName": "bounded PostgreSQL buffered Drop retry does not revive terminal cancelled originals",
+      "originalAssertionStatus": "passed",
+      "originalReportSha256": "8a40a1c1eafd26ae43dba8ec0cf20c51277596717a349b06bdb13ed8b1b92999",
+      "originalWholeReportSuccess": true,
+      "originalReportCounts": {
+        "reportPassed": 9,
+        "reportFailed": 0,
+        "reportPending": 0
+      },
+      "sourceImpactReviewed": true,
+      "scope": "An actual historical passed assertion retained after current dependency/runtime impact review. This is not a current invocation PASS."
+    },
+    "e7798b4c3daa79705e4e63e0a9bfbe71692f9f61889c50748aff8d7c5afa5b53": {
+      "caseId": "e7798b4c3daa79705e4e63e0a9bfbe71692f9f61889c50748aff8d7c5afa5b53",
+      "currentTestSha256": "19841be209f6ba5e2c6f9c9ebf7c9aadeaccda99f2d3c039c550b10294b1cd17",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_ASSERTION_ATTESTATION",
+      "originalAssertionName": "bounded PostgreSQL buffered Drop retry does not revive terminal stored originals",
+      "originalAssertionStatus": "passed",
+      "originalReportSha256": "8a40a1c1eafd26ae43dba8ec0cf20c51277596717a349b06bdb13ed8b1b92999",
+      "originalWholeReportSuccess": true,
+      "originalReportCounts": {
+        "reportPassed": 9,
+        "reportFailed": 0,
+        "reportPending": 0
+      },
+      "sourceImpactReviewed": true,
+      "scope": "An actual historical passed assertion retained after current dependency/runtime impact review. This is not a current invocation PASS."
+    },
+    "0fa5fa6007899c9f74d29dc59b18d12a49d35ab1b500e00dab9159885c6b8c73": {
+      "caseId": "0fa5fa6007899c9f74d29dc59b18d12a49d35ab1b500e00dab9159885c6b8c73",
+      "currentTestSha256": "19841be209f6ba5e2c6f9c9ebf7c9aadeaccda99f2d3c039c550b10294b1cd17",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_ASSERTION_ATTESTATION",
+      "originalAssertionName": "bounded PostgreSQL buffered Drop retry keeps the failure budget and original buffer at ten unsuccessful attempts",
+      "originalAssertionStatus": "passed",
+      "originalReportSha256": "8a40a1c1eafd26ae43dba8ec0cf20c51277596717a349b06bdb13ed8b1b92999",
+      "originalWholeReportSuccess": true,
+      "originalReportCounts": {
+        "reportPassed": 9,
+        "reportFailed": 0,
+        "reportPending": 0
+      },
+      "sourceImpactReviewed": true,
+      "scope": "An actual historical passed assertion retained after current dependency/runtime impact review. This is not a current invocation PASS."
+    },
+    "8ca98927760ac658e0546b239226ef7c57641b14cb369767cf82ad7f61e63d2e": {
+      "caseId": "8ca98927760ac658e0546b239226ef7c57641b14cb369767cf82ad7f61e63d2e",
+      "currentTestSha256": "19841be209f6ba5e2c6f9c9ebf7c9aadeaccda99f2d3c039c550b10294b1cd17",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_ASSERTION_ATTESTATION",
+      "originalAssertionName": "bounded PostgreSQL buffered Drop retry cannot shorten a live lease or let the former owner change a reclaimed original",
+      "originalAssertionStatus": "passed",
+      "originalReportSha256": "8a40a1c1eafd26ae43dba8ec0cf20c51277596717a349b06bdb13ed8b1b92999",
+      "originalWholeReportSuccess": true,
+      "originalReportCounts": {
+        "reportPassed": 9,
+        "reportFailed": 0,
+        "reportPending": 0
+      },
+      "sourceImpactReviewed": true,
+      "scope": "An actual historical passed assertion retained after current dependency/runtime impact review. This is not a current invocation PASS."
+    },
+    "6826d6d46a7553c606b4ed2d8ef39de5258d9f053430884e188a0f83d0d6c6dd": {
+      "caseId": "6826d6d46a7553c606b4ed2d8ef39de5258d9f053430884e188a0f83d0d6c6dd",
+      "currentTestSha256": "95a26a3ac51a0d04d654e77fb6415e68a07a09aa7a1238e30a2bf4d65598fefd",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_SCOPED_PREDICATES",
+      "predicatesVerified": true,
+      "numericExitInferred": false,
+      "independentlyRecordedOriginalNumericExit": null,
+      "artifacts": [
+        {
+          "id": "cycle9-accepted-retained-scope",
+          "bytes": 10204,
+          "sha256": "4a43ed6681a3c539f133e927b2ed64036790924db919f3927ec2acc47668dec2"
+        },
+        {
+          "id": "cycle9-testLog",
+          "bytes": 225,
+          "sha256": "431e3810a436c5d7fb018a0843e9ee903d66f1368c5500b395680b50e1b3064c"
+        },
+        {
+          "id": "cycle9-before",
+          "bytes": 5854,
+          "sha256": "47a7f9035383c9d0fdac4e9df3ea513da99da16fff29495b43f4054eb2d54e96"
+        },
+        {
+          "id": "cycle9-after",
+          "bytes": 7054,
+          "sha256": "34ebc25c0f8e3070b53298ee4fb24aaac3d801a26e459349e44212d1330951e8"
+        }
+      ],
+      "scope": "Original cycle9 retention identities/history and archived physical assertions only. No replay, replacement archival corpus, current native inode claim or numeric exit is invented."
+    },
+    "9fddbb57d07cf61d8b606714feca5df9204113cd0f457cba69de00585f5a5943": {
+      "caseId": "9fddbb57d07cf61d8b606714feca5df9204113cd0f457cba69de00585f5a5943",
+      "currentTestSha256": "53d2ec3a284c1e3e2a3efb2fecd7f70fe00064870f802bb56cce1ec47feaaf14",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_ASSERTION_ATTESTATION",
+      "originalAssertionName": "qualifies explicit empty ACTIVE roots through the ordinary factory, current capability and fixed physical/SQL fences",
+      "originalAssertionStatus": "passed",
+      "originalReportSha256": "a78bf05e46098d04d4cd91939cb7a424ceca233604cc9020903944a13c5c3658",
+      "originalWholeReportSuccess": true,
+      "originalReportCounts": {
+        "reportPassed": 1,
+        "reportFailed": 0,
+        "reportPending": 0
+      },
+      "sourceImpactReviewed": true,
+      "scope": "An actual historical passed assertion retained after current dependency/runtime impact review. This is not a current invocation PASS."
+    },
+    "6747dc1819dd1185afd0fdac682315cc6941068a87f4ffbe857377e27649de24": {
+      "caseId": "6747dc1819dd1185afd0fdac682315cc6941068a87f4ffbe857377e27649de24",
+      "currentTestSha256": "051238da8153d24a2c0c7ca11a86946b904e08627010b157d33ccca46a7708f1",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_ASSERTION_ATTESTATION",
+      "originalAssertionName": "admits exact current R during exclusive private uploads while fencing every public/unknown original",
+      "originalAssertionStatus": "passed",
+      "originalReportSha256": "ba90b938dc1b715857caaaeda13a1c7591fb5ca7fff491bbdfeb4d7e3f06a2c3",
+      "originalWholeReportSuccess": true,
+      "originalReportCounts": {
+        "reportPassed": 2,
+        "reportFailed": 0,
+        "reportPending": 0
+      },
+      "sourceImpactReviewed": true,
+      "scope": "An actual historical passed assertion retained after current dependency/runtime impact review. This is not a current invocation PASS."
+    },
+    "d9cc0bdedd79856891b68993efe2e602806164a31fda3cbb42b479ecf114a0d9": {
+      "caseId": "d9cc0bdedd79856891b68993efe2e602806164a31fda3cbb42b479ecf114a0d9",
+      "currentTestSha256": "e7a5a1323857bdadcdba4fbb20d5a6cf1022d72cc614089e107d0b788a0da154",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_ASSERTION_ATTESTATION",
+      "originalAssertionName": "enrolls, publishes, downloads, decrypts and restores with the actual Go Updater client",
+      "originalAssertionStatus": "passed",
+      "originalReportSha256": "c5afa43feba982bb896eb69f24b5176b79ef870d85faf04393bae47032ecd1ad",
+      "originalWholeReportSuccess": true,
+      "originalReportCounts": {
+        "reportPassed": 1,
+        "reportFailed": 0,
+        "reportPending": 2
+      },
+      "sourceImpactReviewed": true,
+      "scope": "An actual historical passed assertion retained after current dependency/runtime impact review. This is not a current invocation PASS."
+    },
+    "2d990505ced7bba6365f3bad354994e9aa868397b9340058f888a71c4e341ebd": {
+      "caseId": "2d990505ced7bba6365f3bad354994e9aa868397b9340058f888a71c4e341ebd",
+      "currentTestSha256": "98a550717715e95ea172a708feb7fa1b259f2f99e3b9b3b16438000086607f34",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_ASSERTION_ATTESTATION",
+      "originalAssertionName": "upgrades existing sealed uploads and device identity through every current migration without changing publication semantics",
+      "originalAssertionStatus": "passed",
+      "originalReportSha256": "eef07fd9465bdb4c2b9b696f461864b1d1ccce83b19346486766ae7eafbc2e7c",
+      "originalWholeReportSuccess": true,
+      "originalReportCounts": {
+        "reportPassed": 1,
+        "reportFailed": 0,
+        "reportPending": 0
+      },
+      "sourceImpactReviewed": true,
+      "scope": "An actual historical passed assertion retained after current dependency/runtime impact review. This is not a current invocation PASS."
+    },
+    "94c4dc648e5b383e31f3a57b259ccc2bd0164644c470333bb3ee358814519778": {
+      "caseId": "94c4dc648e5b383e31f3a57b259ccc2bd0164644c470333bb3ee358814519778",
+      "currentTestSha256": "923e72d4abc8f2ea9292ed06ff7d758590790064e678a3b619c96a7dc791b62b",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_ASSERTION_ATTESTATION",
+      "originalAssertionName": "durable small-batch transport declarations on owned PostgreSQL unused migration down/up is additive and preserves original catalog",
+      "originalAssertionStatus": "passed",
+      "originalReportSha256": "068af46c0bba5cbc70add28a4f96222495dd57d77a0cf3bfb5fb67e96a27f962",
+      "originalWholeReportSuccess": true,
+      "originalReportCounts": {
+        "reportPassed": 2,
+        "reportFailed": 0,
+        "reportPending": 14
+      },
+      "sourceImpactReviewed": true,
+      "scope": "An actual historical passed assertion retained after current dependency/runtime impact review. This is not a current invocation PASS."
+    },
+    "f5960ccbe3a2f66b3bb9d0d3d8d6a27cff1b51b675d3cc656b9f1a40aa87d104": {
+      "caseId": "f5960ccbe3a2f66b3bb9d0d3d8d6a27cff1b51b675d3cc656b9f1a40aa87d104",
+      "currentTestSha256": "923e72d4abc8f2ea9292ed06ff7d758590790064e678a3b619c96a7dc791b62b",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_ASSERTION_ATTESTATION",
+      "originalAssertionName": "durable small-batch transport declarations on owned PostgreSQL registers 500 declarations without any upload/session/catalog effect; replay preserves counters",
+      "originalAssertionStatus": "passed",
+      "originalReportSha256": "4f9426a36d4bd3d8bbff52caab58fbdeb937c2a36e3980b4591277696eb5e681",
+      "originalWholeReportSuccess": false,
+      "originalReportCounts": {
+        "reportPassed": 12,
+        "reportFailed": 1,
+        "reportPending": 1
+      },
+      "sourceImpactReviewed": true,
+      "scope": "An actual historical passed assertion retained after current dependency/runtime impact review. This is not a current invocation PASS."
+    },
+    "b169ef9d9ceb5195645a9279ea901c589c2939ac5b360d5b90192014f5fef4c4": {
+      "caseId": "b169ef9d9ceb5195645a9279ea901c589c2939ac5b360d5b90192014f5fef4c4",
+      "currentTestSha256": "923e72d4abc8f2ea9292ed06ff7d758590790064e678a3b619c96a7dc791b62b",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_ASSERTION_ATTESTATION",
+      "originalAssertionName": "durable small-batch transport declarations on owned PostgreSQL rejects changed batch identity and isolates a changed operation declaration",
+      "originalAssertionStatus": "passed",
+      "originalReportSha256": "4f9426a36d4bd3d8bbff52caab58fbdeb937c2a36e3980b4591277696eb5e681",
+      "originalWholeReportSuccess": false,
+      "originalReportCounts": {
+        "reportPassed": 12,
+        "reportFailed": 1,
+        "reportPending": 1
+      },
+      "sourceImpactReviewed": true,
+      "scope": "An actual historical passed assertion retained after current dependency/runtime impact review. This is not a current invocation PASS."
+    },
+    "0f5b5a9675e4d8d5d4de21d42c2744c3cb0f40eb4212b75e2347549622617d30": {
+      "caseId": "0f5b5a9675e4d8d5d4de21d42c2744c3cb0f40eb4212b75e2347549622617d30",
+      "currentTestSha256": "923e72d4abc8f2ea9292ed06ff7d758590790064e678a3b619c96a7dc791b62b",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_ASSERTION_ATTESTATION",
+      "originalAssertionName": "durable small-batch transport declarations on owned PostgreSQL finds the original upload after a lost prepare response and after publication",
+      "originalAssertionStatus": "passed",
+      "originalReportSha256": "4f9426a36d4bd3d8bbff52caab58fbdeb937c2a36e3980b4591277696eb5e681",
+      "originalWholeReportSuccess": false,
+      "originalReportCounts": {
+        "reportPassed": 12,
+        "reportFailed": 1,
+        "reportPending": 1
+      },
+      "sourceImpactReviewed": true,
+      "scope": "An actual historical passed assertion retained after current dependency/runtime impact review. This is not a current invocation PASS."
+    },
+    "3190935ccd0f8048772d1ce2309bca59412b67eb652ea4ac9afb8413b269154a": {
+      "caseId": "3190935ccd0f8048772d1ce2309bca59412b67eb652ea4ac9afb8413b269154a",
+      "currentTestSha256": "923e72d4abc8f2ea9292ed06ff7d758590790064e678a3b619c96a7dc791b62b",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_ASSERTION_ATTESTATION",
+      "originalAssertionName": "durable small-batch transport declarations on owned PostgreSQL refuses used downgrade and direct runtime/writer mutations",
+      "originalAssertionStatus": "passed",
+      "originalReportSha256": "4f9426a36d4bd3d8bbff52caab58fbdeb937c2a36e3980b4591277696eb5e681",
+      "originalWholeReportSuccess": false,
+      "originalReportCounts": {
+        "reportPassed": 12,
+        "reportFailed": 1,
+        "reportPending": 1
+      },
+      "sourceImpactReviewed": true,
+      "scope": "An actual historical passed assertion retained after current dependency/runtime impact review. This is not a current invocation PASS."
+    },
+    "eb1cf4b8f226eb2458f526c84e9765f0cfd7654db2ffcc0137608d87013200eb": {
+      "caseId": "eb1cf4b8f226eb2458f526c84e9765f0cfd7654db2ffcc0137608d87013200eb",
+      "currentTestSha256": "923e72d4abc8f2ea9292ed06ff7d758590790064e678a3b619c96a7dc791b62b",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_ASSERTION_ATTESTATION",
+      "originalAssertionName": "durable small-batch transport declarations on owned PostgreSQL checks current binding and authorization before a missing-id lookup",
+      "originalAssertionStatus": "passed",
+      "originalReportSha256": "4f9426a36d4bd3d8bbff52caab58fbdeb937c2a36e3980b4591277696eb5e681",
+      "originalWholeReportSuccess": false,
+      "originalReportCounts": {
+        "reportPassed": 12,
+        "reportFailed": 1,
+        "reportPending": 1
+      },
+      "sourceImpactReviewed": true,
+      "scope": "An actual historical passed assertion retained after current dependency/runtime impact review. This is not a current invocation PASS."
+    },
+    "211a509b987a6ebe7b5d57b06be7463bd5d04222581666d010772a39a660707c": {
+      "caseId": "211a509b987a6ebe7b5d57b06be7463bd5d04222581666d010772a39a660707c",
+      "currentTestSha256": "923e72d4abc8f2ea9292ed06ff7d758590790064e678a3b619c96a7dc791b62b",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_ASSERTION_ATTESTATION",
+      "originalAssertionName": "durable small-batch transport declarations on owned PostgreSQL publishes a multi-file HTTP batch past the four-temp limit and recovers a lost 202 without rewriting",
+      "originalAssertionStatus": "passed",
+      "originalReportSha256": "4f9426a36d4bd3d8bbff52caab58fbdeb937c2a36e3980b4591277696eb5e681",
+      "originalWholeReportSuccess": false,
+      "originalReportCounts": {
+        "reportPassed": 12,
+        "reportFailed": 1,
+        "reportPending": 1
+      },
+      "sourceImpactReviewed": true,
+      "scope": "An actual historical passed assertion retained after current dependency/runtime impact review. This is not a current invocation PASS."
+    },
+    "2a11e50027b89a2ee06d858d441d1d189c49be61f6c3268f593eedd2711c04ea": {
+      "caseId": "2a11e50027b89a2ee06d858d441d1d189c49be61f6c3268f593eedd2711c04ea",
+      "currentTestSha256": "923e72d4abc8f2ea9292ed06ff7d758590790064e678a3b619c96a7dc791b62b",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_ASSERTION_ATTESTATION",
+      "originalAssertionName": "durable small-batch transport declarations on owned PostgreSQL retains completed items after a truncated later part and retries only missing originals",
+      "originalAssertionStatus": "passed",
+      "originalReportSha256": "4f9426a36d4bd3d8bbff52caab58fbdeb937c2a36e3980b4591277696eb5e681",
+      "originalWholeReportSuccess": false,
+      "originalReportCounts": {
+        "reportPassed": 12,
+        "reportFailed": 1,
+        "reportPending": 1
+      },
+      "sourceImpactReviewed": true,
+      "scope": "An actual historical passed assertion retained after current dependency/runtime impact review. This is not a current invocation PASS."
+    },
+    "b4c764d0f7a839fee1fd16e221b6d3df996f0994fe9759924cc342e7171cfa81": {
+      "caseId": "b4c764d0f7a839fee1fd16e221b6d3df996f0994fe9759924cc342e7171cfa81",
+      "currentTestSha256": "923e72d4abc8f2ea9292ed06ff7d758590790064e678a3b619c96a7dc791b62b",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_ASSERTION_ATTESTATION",
+      "originalAssertionName": "durable small-batch transport declarations on owned PostgreSQL rejects corrupt or trailing transport bytes before allocating the affected upload",
+      "originalAssertionStatus": "passed",
+      "originalReportSha256": "4f9426a36d4bd3d8bbff52caab58fbdeb937c2a36e3980b4591277696eb5e681",
+      "originalWholeReportSuccess": false,
+      "originalReportCounts": {
+        "reportPassed": 12,
+        "reportFailed": 1,
+        "reportPending": 1
+      },
+      "sourceImpactReviewed": true,
+      "scope": "An actual historical passed assertion retained after current dependency/runtime impact review. This is not a current invocation PASS."
+    },
+    "47f0406b7d77098a10ac0f1dbddac5455fd61f720637a646e1cdf92a3b1a148b": {
+      "caseId": "47f0406b7d77098a10ac0f1dbddac5455fd61f720637a646e1cdf92a3b1a148b",
+      "currentTestSha256": "923e72d4abc8f2ea9292ed06ff7d758590790064e678a3b619c96a7dc791b62b",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_ASSERTION_ATTESTATION",
+      "originalAssertionName": "durable small-batch transport declarations on owned PostgreSQL publishes a zero-byte file and isolates one valid member's namespace conflict",
+      "originalAssertionStatus": "passed",
+      "originalReportSha256": "4f9426a36d4bd3d8bbff52caab58fbdeb937c2a36e3980b4591277696eb5e681",
+      "originalWholeReportSuccess": false,
+      "originalReportCounts": {
+        "reportPassed": 12,
+        "reportFailed": 1,
+        "reportPending": 1
+      },
+      "sourceImpactReviewed": true,
+      "scope": "An actual historical passed assertion retained after current dependency/runtime impact review. This is not a current invocation PASS."
+    },
+    "a2abcf2f82e7750d50f448d2d3bf5d6ffbd78a1bcf604ff1920f7fc8c491ba86": {
+      "caseId": "a2abcf2f82e7750d50f448d2d3bf5d6ffbd78a1bcf604ff1920f7fc8c491ba86",
+      "currentTestSha256": "923e72d4abc8f2ea9292ed06ff7d758590790064e678a3b619c96a7dc791b62b",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_ASSERTION_ATTESTATION",
+      "originalAssertionName": "durable small-batch transport declarations on owned PostgreSQL authenticates before a partial JSON body and releases all four stalled request slots",
+      "originalAssertionStatus": "passed",
+      "originalReportSha256": "4f9426a36d4bd3d8bbff52caab58fbdeb937c2a36e3980b4591277696eb5e681",
+      "originalWholeReportSuccess": false,
+      "originalReportCounts": {
+        "reportPassed": 12,
+        "reportFailed": 1,
+        "reportPending": 1
+      },
+      "sourceImpactReviewed": true,
+      "scope": "An actual historical passed assertion retained after current dependency/runtime impact review. This is not a current invocation PASS."
+    },
+    "f9e52e4aaf49df95be5a064b2b6f619ebf1ad2dd3878fb297d4b0b7974196d62": {
+      "caseId": "f9e52e4aaf49df95be5a064b2b6f619ebf1ad2dd3878fb297d4b0b7974196d62",
+      "currentTestSha256": "923e72d4abc8f2ea9292ed06ff7d758590790064e678a3b619c96a7dc791b62b",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_ASSERTION_ATTESTATION",
+      "originalAssertionName": "durable small-batch transport declarations on owned PostgreSQL cancels a stalled binary input without allocating an incomplete file",
+      "originalAssertionStatus": "passed",
+      "originalReportSha256": "4f9426a36d4bd3d8bbff52caab58fbdeb937c2a36e3980b4591277696eb5e681",
+      "originalWholeReportSuccess": false,
+      "originalReportCounts": {
+        "reportPassed": 12,
+        "reportFailed": 1,
+        "reportPending": 1
+      },
+      "sourceImpactReviewed": true,
+      "scope": "An actual historical passed assertion retained after current dependency/runtime impact review. This is not a current invocation PASS."
+    },
+    "e4da63928c6fd1538d5b6d000d1e04318f70a64de8fa254b1146e49a87293406": {
+      "caseId": "e4da63928c6fd1538d5b6d000d1e04318f70a64de8fa254b1146e49a87293406",
+      "currentTestSha256": "923e72d4abc8f2ea9292ed06ff7d758590790064e678a3b619c96a7dc791b62b",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_ASSERTION_ATTESTATION",
+      "originalAssertionName": "durable small-batch transport declarations on owned PostgreSQL turns bounded SQL lock contention into retryable HTTP admission without registering partial metadata",
+      "originalAssertionStatus": "passed",
+      "originalReportSha256": "4f9426a36d4bd3d8bbff52caab58fbdeb937c2a36e3980b4591277696eb5e681",
+      "originalWholeReportSuccess": false,
+      "originalReportCounts": {
+        "reportPassed": 12,
+        "reportFailed": 1,
+        "reportPending": 1
+      },
+      "sourceImpactReviewed": true,
+      "scope": "An actual historical passed assertion retained after current dependency/runtime impact review. This is not a current invocation PASS."
+    },
+    "3f2f5de9ecb1f5e8990ab74befaa96e27c162ca3c8eef753801bbe1306df9fe5": {
+      "caseId": "3f2f5de9ecb1f5e8990ab74befaa96e27c162ca3c8eef753801bbe1306df9fe5",
+      "currentTestSha256": "923e72d4abc8f2ea9292ed06ff7d758590790064e678a3b619c96a7dc791b62b",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_SCOPED_PREDICATES",
+      "predicatesVerified": true,
+      "numericExitInferred": false,
+      "artifacts": [
+        {
+          "id": "registry-closure",
+          "bytes": 4815,
+          "sha256": "950425bdb21ca2083fc58102817e41d8f520d4ce9f90dcbfd926f985edd2116c"
+        },
+        {
+          "id": "registry-guard",
+          "bytes": 1453,
+          "sha256": "464184cf5ac1c8718adb1de6b06e0e6247d443d40668365cffe69e816fddea26"
+        },
+        {
+          "id": "registry-restore",
+          "bytes": 1498,
+          "sha256": "9f100a800df857b6cc84a2641ed48a0e6011ea8398f697fa752433d066229b2f"
+        },
+        {
+          "id": "registry-sameCut",
+          "bytes": 5885,
+          "sha256": "5e773420122f9a640c26b7378846407c259a77e1973a354adb30680cd7230b95"
+        },
+        {
+          "id": "registry-processClosure",
+          "bytes": 2950,
+          "sha256": "2c4cfbe415889e1fac5ec222834e600c3558922086a06b3b7f3837297b8c1419"
+        }
+      ],
+      "originalWholeCommandSuccess": false,
+      "scope": "Two original predicates independently exercised with current product APIs on exact retained originals and its logical restore, without rerunning the full Vitest registry suite. Test-only corruption was transaction-local on the restored copy. No runtime owner reactivation or backend automatic recovery claim.",
+      "predicate": "exact25metadataAndGuardRefusals"
+    },
+    "862659a21bcf492d9e7df3c1bc5185c27d3864fb4db5ba3ed3484221a7795812": {
+      "caseId": "862659a21bcf492d9e7df3c1bc5185c27d3864fb4db5ba3ed3484221a7795812",
+      "currentTestSha256": "923e72d4abc8f2ea9292ed06ff7d758590790064e678a3b619c96a7dc791b62b",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_SCOPED_PREDICATES",
+      "predicatesVerified": true,
+      "numericExitInferred": false,
+      "artifacts": [
+        {
+          "id": "registry-closure",
+          "bytes": 4815,
+          "sha256": "950425bdb21ca2083fc58102817e41d8f520d4ce9f90dcbfd926f985edd2116c"
+        },
+        {
+          "id": "registry-guard",
+          "bytes": 1453,
+          "sha256": "464184cf5ac1c8718adb1de6b06e0e6247d443d40668365cffe69e816fddea26"
+        },
+        {
+          "id": "registry-restore",
+          "bytes": 1498,
+          "sha256": "9f100a800df857b6cc84a2641ed48a0e6011ea8398f697fa752433d066229b2f"
+        },
+        {
+          "id": "registry-sameCut",
+          "bytes": 5885,
+          "sha256": "5e773420122f9a640c26b7378846407c259a77e1973a354adb30680cd7230b95"
+        },
+        {
+          "id": "registry-processClosure",
+          "bytes": 2950,
+          "sha256": "2c4cfbe415889e1fac5ec222834e600c3558922086a06b3b7f3837297b8c1419"
+        }
+      ],
+      "originalWholeCommandSuccess": false,
+      "scope": "Two original predicates independently exercised with current product APIs on exact retained originals and its logical restore, without rerunning the full Vitest registry suite. Test-only corruption was transaction-local on the restored copy. No runtime owner reactivation or backend automatic recovery claim.",
+      "predicate": "sameCutDumpRestoreOriginal25MetadataAndReceipts"
+    },
+    "63f4fe6ca7886180bf0565416f89062b74d440a3b51a5d23368f88f011a89548": {
+      "caseId": "63f4fe6ca7886180bf0565416f89062b74d440a3b51a5d23368f88f011a89548",
+      "currentTestSha256": "fc77c2e93fed0e93f9fba167066fb83de3bdf03d03739751269888da9c4c1539",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_ASSERTION_ATTESTATION",
+      "originalAssertionName": "qualified receiver for isolated native throughput and restart",
+      "originalAssertionStatus": "passed",
+      "originalReportSha256": "2b106292fe93d995ce60de18d7ed18eb26584debec66189f0ba71123314e970d",
+      "originalWholeReportSuccess": true,
+      "originalReportCounts": {
+        "reportPassed": 1,
+        "reportFailed": 0,
+        "reportPending": 0
+      },
+      "sourceImpactReviewed": true,
+      "scope": "An actual historical passed assertion retained after current dependency/runtime impact review. This is not a current invocation PASS."
+    },
+    "30356fbb9dde97e09c43c3a789bf16fbbdb7e23ad2a5d42164c921035f694884": {
+      "caseId": "30356fbb9dde97e09c43c3a789bf16fbbdb7e23ad2a5d42164c921035f694884",
+      "currentTestSha256": "d7910b08b6ae65aa77d113973e51af24476d3723c537da037246a2accd78167a",
+      "currentInvocationPass": false,
+      "kind": "WAIVED_BY_OWNER",
+      "reason": "PERFORMANCE_TARGET_DEFERRED",
+      "onlySustained50FilesPerSecond": true,
+      "performancePass": false,
+      "dataIntegrityWaived": false,
+      "scope": "Owner deferred only sustained50files/s for this release. Content/identity/history preservation, retry, resources and lifecycle requirements remain."
+    },
+    "683bf07349d6c25e6301f19d1af6687cf0fd25200f0ffa9fd552f14ecc7ac94f": {
+      "caseId": "683bf07349d6c25e6301f19d1af6687cf0fd25200f0ffa9fd552f14ecc7ac94f",
+      "currentTestSha256": "7dd6d95b2202fa693bdcfe1656ba2263080e7b1a4a879552fbc86bb0a3a0fd62",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_ASSERTION_ATTESTATION",
+      "originalAssertionName": "startup maintenance allows existing cross-process work to drain does not queue startup cleanup ahead of the backend needed by an admitted request",
+      "originalAssertionStatus": "passed",
+      "originalReportSha256": "ba0bbf0ea9dc33b82df245c6eaa60a403b87817f9d9973897626b285a3a5e5d4",
+      "originalWholeReportSuccess": true,
+      "originalReportCounts": {
+        "reportPassed": 8,
+        "reportFailed": 0,
+        "reportPending": 0
+      },
+      "sourceImpactReviewed": true,
+      "scope": "An actual historical passed assertion retained after current dependency/runtime impact review. This is not a current invocation PASS."
+    },
+    "2fc860af7f67a17555579ddcd520e40a39741a62a37260ac12f64055c55f8eb5": {
+      "caseId": "2fc860af7f67a17555579ddcd520e40a39741a62a37260ac12f64055c55f8eb5",
+      "currentTestSha256": "7dd6d95b2202fa693bdcfe1656ba2263080e7b1a4a879552fbc86bb0a3a0fd62",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_ASSERTION_ATTESTATION",
+      "originalAssertionName": "startup maintenance allows existing cross-process work to drain cleans interrupted metadata only after genuine exclusive ownership and preserves original IDs",
+      "originalAssertionStatus": "passed",
+      "originalReportSha256": "ba0bbf0ea9dc33b82df245c6eaa60a403b87817f9d9973897626b285a3a5e5d4",
+      "originalWholeReportSuccess": true,
+      "originalReportCounts": {
+        "reportPassed": 8,
+        "reportFailed": 0,
+        "reportPending": 0
+      },
+      "sourceImpactReviewed": true,
+      "scope": "An actual historical passed assertion retained after current dependency/runtime impact review. This is not a current invocation PASS."
+    },
+    "0ef3ed0d2d3bd241e5e1fee11fc0f34414add520aa57d17cb5d783d94e6ffde1": {
+      "caseId": "0ef3ed0d2d3bd241e5e1fee11fc0f34414add520aa57d17cb5d783d94e6ffde1",
+      "currentTestSha256": "7dd6d95b2202fa693bdcfe1656ba2263080e7b1a4a879552fbc86bb0a3a0fd62",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_ASSERTION_ATTESTATION",
+      "originalAssertionName": "startup maintenance allows existing cross-process work to drain bounds nonqueued exclusive admission without entering callback or clearing another lease",
+      "originalAssertionStatus": "passed",
+      "originalReportSha256": "ba0bbf0ea9dc33b82df245c6eaa60a403b87817f9d9973897626b285a3a5e5d4",
+      "originalWholeReportSuccess": true,
+      "originalReportCounts": {
+        "reportPassed": 8,
+        "reportFailed": 0,
+        "reportPending": 0
+      },
+      "sourceImpactReviewed": true,
+      "scope": "An actual historical passed assertion retained after current dependency/runtime impact review. This is not a current invocation PASS."
+    },
+    "9d0aaf2572a6c353105a36896ceeaecb7309666a423c2693e6986a18bade8d87": {
+      "caseId": "9d0aaf2572a6c353105a36896ceeaecb7309666a423c2693e6986a18bade8d87",
+      "currentTestSha256": "7dd6d95b2202fa693bdcfe1656ba2263080e7b1a4a879552fbc86bb0a3a0fd62",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_ASSERTION_ATTESTATION",
+      "originalAssertionName": "startup maintenance allows existing cross-process work to drain preserves exclusive exclusion, rollback and release on callback failure",
+      "originalAssertionStatus": "passed",
+      "originalReportSha256": "ba0bbf0ea9dc33b82df245c6eaa60a403b87817f9d9973897626b285a3a5e5d4",
+      "originalWholeReportSuccess": true,
+      "originalReportCounts": {
+        "reportPassed": 8,
+        "reportFailed": 0,
+        "reportPending": 0
+      },
+      "sourceImpactReviewed": true,
+      "scope": "An actual historical passed assertion retained after current dependency/runtime impact review. This is not a current invocation PASS."
+    },
+    "0a333b6d285fbdd16b43ab809f55c6bb985d9d8ae37750a9afa8d817bc8c7a48": {
+      "caseId": "0a333b6d285fbdd16b43ab809f55c6bb985d9d8ae37750a9afa8d817bc8c7a48",
+      "currentTestSha256": "7dd6d95b2202fa693bdcfe1656ba2263080e7b1a4a879552fbc86bb0a3a0fd62",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_ASSERTION_ATTESTATION",
+      "originalAssertionName": "startup maintenance allows existing cross-process work to drain refuses invalid admission bound 0 without invoking callback",
+      "originalAssertionStatus": "passed",
+      "originalReportSha256": "ba0bbf0ea9dc33b82df245c6eaa60a403b87817f9d9973897626b285a3a5e5d4",
+      "originalWholeReportSuccess": true,
+      "originalReportCounts": {
+        "reportPassed": 8,
+        "reportFailed": 0,
+        "reportPending": 0
+      },
+      "sourceImpactReviewed": true,
+      "scope": "An actual historical passed assertion retained after current dependency/runtime impact review. This is not a current invocation PASS."
+    },
+    "96bcbe4b18ec55eff1cb1b844eba67c3326cdd182b9042adc6c8d365e782cf02": {
+      "caseId": "96bcbe4b18ec55eff1cb1b844eba67c3326cdd182b9042adc6c8d365e782cf02",
+      "currentTestSha256": "7dd6d95b2202fa693bdcfe1656ba2263080e7b1a4a879552fbc86bb0a3a0fd62",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_ASSERTION_ATTESTATION",
+      "originalAssertionName": "startup maintenance allows existing cross-process work to drain refuses invalid admission bound -1 without invoking callback",
+      "originalAssertionStatus": "passed",
+      "originalReportSha256": "ba0bbf0ea9dc33b82df245c6eaa60a403b87817f9d9973897626b285a3a5e5d4",
+      "originalWholeReportSuccess": true,
+      "originalReportCounts": {
+        "reportPassed": 8,
+        "reportFailed": 0,
+        "reportPending": 0
+      },
+      "sourceImpactReviewed": true,
+      "scope": "An actual historical passed assertion retained after current dependency/runtime impact review. This is not a current invocation PASS."
+    },
+    "da63f5502668482c965115a47127d685f73ec3a391629d3c3300f04d86980ab1": {
+      "caseId": "da63f5502668482c965115a47127d685f73ec3a391629d3c3300f04d86980ab1",
+      "currentTestSha256": "7dd6d95b2202fa693bdcfe1656ba2263080e7b1a4a879552fbc86bb0a3a0fd62",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_ASSERTION_ATTESTATION",
+      "originalAssertionName": "startup maintenance allows existing cross-process work to drain refuses invalid admission bound 120001 without invoking callback",
+      "originalAssertionStatus": "passed",
+      "originalReportSha256": "ba0bbf0ea9dc33b82df245c6eaa60a403b87817f9d9973897626b285a3a5e5d4",
+      "originalWholeReportSuccess": true,
+      "originalReportCounts": {
+        "reportPassed": 8,
+        "reportFailed": 0,
+        "reportPending": 0
+      },
+      "sourceImpactReviewed": true,
+      "scope": "An actual historical passed assertion retained after current dependency/runtime impact review. This is not a current invocation PASS."
+    },
+    "ea5bc515c50c90c61c81fad91b29a6e64256e3fd0ffe0a2fa7078b18fd64ea23": {
+      "caseId": "ea5bc515c50c90c61c81fad91b29a6e64256e3fd0ffe0a2fa7078b18fd64ea23",
+      "currentTestSha256": "7dd6d95b2202fa693bdcfe1656ba2263080e7b1a4a879552fbc86bb0a3a0fd62",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_ASSERTION_ATTESTATION",
+      "originalAssertionName": "startup maintenance allows existing cross-process work to drain refuses invalid admission bound NaN without invoking callback",
+      "originalAssertionStatus": "passed",
+      "originalReportSha256": "ba0bbf0ea9dc33b82df245c6eaa60a403b87817f9d9973897626b285a3a5e5d4",
+      "originalWholeReportSuccess": true,
+      "originalReportCounts": {
+        "reportPassed": 8,
+        "reportFailed": 0,
+        "reportPending": 0
+      },
+      "sourceImpactReviewed": true,
+      "scope": "An actual historical passed assertion retained after current dependency/runtime impact review. This is not a current invocation PASS."
+    },
+    "6eb69f20a2231561ed54a63afb161349a7966956b933e1d0dabaf07cba7bca21": {
+      "caseId": "6eb69f20a2231561ed54a63afb161349a7966956b933e1d0dabaf07cba7bca21",
+      "currentTestSha256": "4551e471b469ba12e6aa074e09a712dbcc4d5f73f5ee3ee965d032ec25c9ef89",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_ASSERTION_ATTESTATION",
+      "originalAssertionName": "proves bounded ID metadata over HTTP and a wide PostgreSQL catalog",
+      "originalAssertionStatus": "passed",
+      "originalReportSha256": "8e8e518517a6e046115e8899730ba18dc080e317104513da9b818a1dd1c67202",
+      "originalWholeReportSuccess": true,
+      "originalReportCounts": {
+        "reportPassed": 1,
+        "reportFailed": 0,
+        "reportPending": 0
+      },
+      "sourceImpactReviewed": true,
+      "scope": "An actual historical passed assertion retained after current dependency/runtime impact review. This is not a current invocation PASS."
+    },
+    "85e44e668a5ae0594c16946804463edb5db0c89f6a31f133e544d6e55984f1bd": {
+      "caseId": "85e44e668a5ae0594c16946804463edb5db0c89f6a31f133e544d6e55984f1bd",
+      "currentTestSha256": "ab6ffc2e47a9e017bac695f480e370a896b7dde02bfcb77bb9cb7287f2e59352",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_ASSERTION_ATTESTATION",
+      "originalAssertionName": "runs real Neptune Core and Pluto Copy together through Saturn HTTP and PostgreSQL",
+      "originalAssertionStatus": "passed",
+      "originalReportSha256": "6ecd4ecb4b58decc7e502ff9fe9a8afafaf2d7fd9569d21c0473310eb838abb6",
+      "originalWholeReportSuccess": true,
+      "originalReportCounts": {
+        "reportPassed": 1,
+        "reportFailed": 0,
+        "reportPending": 0
+      },
+      "sourceImpactReviewed": true,
+      "scope": "An actual historical passed assertion retained after current dependency/runtime impact review. This is not a current invocation PASS."
+    },
+    "0f22ed8c189720f647c85123c673fc6d8cf2f817dfaf855ceca24b2b7044b288": {
+      "caseId": "0f22ed8c189720f647c85123c673fc6d8cf2f817dfaf855ceca24b2b7044b288",
+      "currentTestSha256": "b513fe105eeb1470ceadbfb812447b6da60899c538da571d0a2acac7689e214b",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_ASSERTION_ATTESTATION",
+      "originalAssertionName": "serves bounded durable snapshot/feed sessions with exact replay on actual PostgreSQL at seed 0",
+      "originalAssertionStatus": "passed",
+      "originalReportSha256": "0fa68e7a9b9b58b6cfdc4c7d83f6b26f05735bb88f98655bc3058a07b2408b3c",
+      "originalWholeReportSuccess": true,
+      "originalReportCounts": {
+        "reportPassed": 2,
+        "reportFailed": 0,
+        "reportPending": 0
+      },
+      "sourceImpactReviewed": true,
+      "scope": "An actual historical passed assertion retained after current dependency/runtime impact review. This is not a current invocation PASS."
+    },
+    "b02fb1561c7dbccb4c2545fc0ab287f4846262baa2455f3ae79aaac4bc5bd637": {
+      "caseId": "b02fb1561c7dbccb4c2545fc0ab287f4846262baa2455f3ae79aaac4bc5bd637",
+      "currentTestSha256": "b513fe105eeb1470ceadbfb812447b6da60899c538da571d0a2acac7689e214b",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_ASSERTION_ATTESTATION",
+      "originalAssertionName": "serves bounded durable snapshot/feed sessions with exact replay on actual PostgreSQL at seed 9007199254740993",
+      "originalAssertionStatus": "passed",
+      "originalReportSha256": "0fa68e7a9b9b58b6cfdc4c7d83f6b26f05735bb88f98655bc3058a07b2408b3c",
+      "originalWholeReportSuccess": true,
+      "originalReportCounts": {
+        "reportPassed": 2,
+        "reportFailed": 0,
+        "reportPending": 0
+      },
+      "sourceImpactReviewed": true,
+      "scope": "An actual historical passed assertion retained after current dependency/runtime impact review. This is not a current invocation PASS."
+    },
+    "56d10a5c3a7939fddc73f3c88e18b4009b328b8f9333041852497d0763812d1f": {
+      "caseId": "56d10a5c3a7939fddc73f3c88e18b4009b328b8f9333041852497d0763812d1f",
+      "currentTestSha256": "d85281aa166176f56de88b7633aa28a878c8f11c9f8e52573e3de65d552c1360",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_ASSERTION_ATTESTATION",
+      "originalAssertionName": "builds one durable guarded namespace cut from bounded base pages plus complete overlay on actual PostgreSQL",
+      "originalAssertionStatus": "passed",
+      "originalReportSha256": "1f23284f0922e831c4608a6c0c6d1ce6842e014775e327bc6875f71f5ccf2c23",
+      "originalWholeReportSuccess": true,
+      "originalReportCounts": {
+        "reportPassed": 1,
+        "reportFailed": 0,
+        "reportPending": 0
+      },
+      "sourceImpactReviewed": true,
+      "scope": "An actual historical passed assertion retained after current dependency/runtime impact review. This is not a current invocation PASS."
+    },
+    "3b101f86d1c9d81d4a4c8afef275d7f311f69b5c3951d779b4c1e22677ef1743": {
+      "caseId": "3b101f86d1c9d81d4a4c8afef275d7f311f69b5c3951d779b4c1e22677ef1743",
+      "currentTestSha256": "e176d6b25722e2a8b23df0a6da171280c8fdb6600da94c09aa59c141271984fa",
+      "currentInvocationPass": false,
+      "kind": "RETAINED_ASSERTION_ATTESTATION",
+      "originalAssertionName": "qualifies immutable Windows upload publication through actual HTTP, PostgreSQL, lifecycle and backup guards",
+      "originalAssertionStatus": "passed",
+      "originalReportSha256": "ff1ec51e1787d04c1f322aa1750c440434c89dfd3c1c2d78b6b00849f45b1fe3",
+      "originalWholeReportSuccess": true,
+      "originalReportCounts": {
+        "reportPassed": 2,
+        "reportFailed": 0,
+        "reportPending": 0
+      },
+      "sourceImpactReviewed": true,
+      "scope": "An actual historical passed assertion retained after current dependency/runtime impact review. This is not a current invocation PASS."
+    }
+  },
+  "ordinaryReference": {
+    "repository": "psewdon1m-exocortex/saturn",
+    "run": 46144290111,
+    "sourceCommit": "9438176b757a94a213b66d8a0769ce8774514e34",
+    "passed": 2063,
+    "failed": 0,
+    "notRun": 98,
+    "fullCiAccepted": false
+  },
+  "limitations": [
+    "Ordinary NOT_RUN is unchanged.",
+    "Original whole registry command FAIL is preserved; only actually passed assertions and independently continued predicates receive their exact credit.",
+    "No original cycle9 numeric exit is inferred.",
+    "The receiver entry is not labeled PASS.",
+    "The50files/s waiver is not performance PASS.",
+    "Current artifact joint journey/complete readback/compatible rollback/normal drain and package8 handoff remain required; no production approval."
+  ]
+}

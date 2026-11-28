@@ -72,4 +72,3 @@ describe("bounded original tree job runner",()=>{
   await expect(f.runner.run(proof,j.treeId,j.jobId)).rejects.toThrow("authorization_changed");expect(f.events).toEqual(["parent"]);
  });
 });
-

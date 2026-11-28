@@ -95,4 +95,3 @@ export class BrowserTreeJobRunner {
   return this.#closePromise??=Promise.allSettled([...this.#jobs.values()].map(job=>job.promise)).then(()=>undefined);
  }
 }
-

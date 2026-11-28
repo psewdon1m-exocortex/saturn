@@ -236,4 +236,3 @@ test.each(["disconnect", "shutdown"])("C16 %s during a real hash joins IO and re
   }
   expect(s.verifier.activeRequests).toBe(0);
 });
-

@@ -20,4 +20,3 @@ Database.prototype.transaction = async function <T>(action: Parameters<Database[
   if (effects().progress && fault === "after-progress" || effects().receipt && fault === "after-receipt") process.exit(86);
   return result as T;
 };
-

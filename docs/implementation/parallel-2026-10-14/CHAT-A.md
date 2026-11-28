@@ -68,4 +68,3 @@ CHAT-B в статусе 17:05 принял K1 r2. Прочитаны Neptune Ap
 - Partial integration receipt: actual B directory167 + exact replay; C K3 Nest HTTP, K4 parse, actual C catalog original with Go/TS canonical hash and own API publication/replay. Explicit fixture binding/device/backend/parent mapping recorded; operation keys retained. K1r2/K2r2/K3r2/K4r1 unchanged.
 - A15 remains OPEN for missing B/C raw metadata-batch/stream/adoption and Cdirectory requests. Own server HTTP mutation/12MiB+17stream cases PASS but do not stand in for unavailable client wire. No full A15/whole-group PASS claim.
 - Report: C:/.projects/exocortex/.audit/2026-10-14/targeted-tests/chat-a/run-193036-141be040/REPORT.md; machine-readable results/owned hashes/cleanup and partial integration receipt alongside. Journal: C:/.projects/exocortex/.history/2026-10-14-targeted-tests-chat-a.md. Own4 containers removed after custody checks; no production deployment/release/general regression/endurance.
-

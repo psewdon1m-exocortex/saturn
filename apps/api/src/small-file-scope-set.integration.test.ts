@@ -59,4 +59,3 @@ it('retains the exact depth and non-folder ancestor bounds and restores the orig
     expect(await f.admin.withSql(sql=>sql`SELECT catalog_guard_scope(${f.rootId}::uuid) AS roots`)).toEqual([{roots:[f.rootId]}]);
   }finally{await f.close();}
 },60000);
-

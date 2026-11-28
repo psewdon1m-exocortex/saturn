@@ -22,6 +22,9 @@ jobs:
     permissions:
       contents: read
     uses: ./.github/workflows/verify.yml
+    with:
+      volt-ref: b31ea42e7d7727b79678138de911412f5ff4fdf6
+      mastermind-ref: 668b733b1a2921c81f0a07d0ba3d5a065f38e1d3
 
   release:
     needs: quality-gate
@@ -127,7 +130,7 @@ jobs:
           docker pull "$VAULT_STAGE13_WEB_IMAGE"
           python3 scripts/known-problems-gate.py \
             --record stage13 \
-            --command bash -lc 'VAULT_STAGE13_PREBUILT=true pnpm verify:stage:13 && node scripts/ci-workspace-accounting.mjs --require-full artifacts/verification/stage-13-production-hardening.json'
+            --command bash -lc 'VAULT_STAGE13_PREBUILT=true pnpm verify:stage:13 && node scripts/ci-workspace-release-qualification.mjs artifacts/verification/stage-13-production-hardening.json .release/qualification/package8.json artifacts/verification/release-qualification.json'
       - name: Qualify every pre-signing Part 12 check
         run: python3 scripts/known-problems-gate.py --phase pre-signing
       - name: Build signed release bundle

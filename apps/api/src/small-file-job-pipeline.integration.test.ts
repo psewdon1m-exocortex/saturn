@@ -136,4 +136,3 @@ it('never turns an acceptance/status result or a cloned handle into a materializ
     await expect(c.database.prepareExecutionJob(input.wire,f.wireBinding,f.proof,true)).rejects.toThrow('authorization_changed');
   }finally{vi.restoreAllMocks();await f.close();}
 },60000);
-

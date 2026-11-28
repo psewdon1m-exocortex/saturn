@@ -216,4 +216,3 @@ it('rechecks current authorization and prevents direct runtime job writes',async
     await expect(accept(f,request.wire)).rejects.toThrow('authorization_changed');expect(await originals(f)).toEqual(saved);
   }finally{await f.close();}
 },60000);
-

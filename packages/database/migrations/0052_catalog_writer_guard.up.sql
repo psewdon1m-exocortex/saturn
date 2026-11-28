@@ -258,4 +258,3 @@ END $$;
 REVOKE ALL ON FUNCTION catalog_folder_command(text,jsonb,jsonb) FROM PUBLIC;
 $catalog_guard_ddl$,'public.',quote_ident(current_schema())||'.');
 END $catalog_guard_install$;
-

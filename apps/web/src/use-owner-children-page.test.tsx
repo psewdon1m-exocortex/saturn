@@ -42,4 +42,3 @@ describe("bounded owner catalog page",()=>{
   await act(async()=>{expect(await result.current.load("old",0,cancelled.signal)).toBe(false);});expect(result.current.parentId).toBe("folder");
  });
 });
-

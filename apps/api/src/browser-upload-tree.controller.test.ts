@@ -100,4 +100,3 @@ describe("browser tree HTTP boundaries",()=>{
   expect(browserTreeHttpError(Error(code))).toEqual({status:409,code:"browser_tree_reconciliation_required"});
  });
 });
-

@@ -146,5 +146,3 @@ it('preserves a slow buffered tail after CLOSE with multiple high-water marks',a
  for(let n=0;verified<length&&n<2000;n++){await tick();consume(512);await vi.advanceTimersByTimeAsync(100);expect(streamError).toBeUndefined();}
  expect(verified).toBe(length);opened.resume();await tick();expect(fixture.release).toHaveBeenCalledExactlyOnceWith(false);
 });
-
-

@@ -78,4 +78,3 @@ export function composeBrowserTreeHttpService(input:Parameters<typeof createBrow
  const runner=new BrowserTreeJobRunner({database,directories,files});
  return new BrowserTreeHttpService({authority,database,runner});
 }
-

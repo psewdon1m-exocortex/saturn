@@ -14,6 +14,8 @@ export default tseslint.config(
       "scripts/**/*.mjs",
       "!scripts/supervise-docker-cohort.mjs",
       "!scripts/registered-worker-parent.mjs",
+      "!scripts/ci-workspace-release-qualification.mjs",
+      "!scripts/ci-workspace-release-qualification.test.mjs",
       "infra/production/*.mjs",
       "**/.tmp/**",
     ],
@@ -57,7 +59,7 @@ export default tseslint.config(
     },
   },
   {
-    files: ["scripts/supervise-docker-cohort.mjs", "scripts/registered-worker-parent.mjs"],
+    files: ["scripts/supervise-docker-cohort.mjs", "scripts/registered-worker-parent.mjs", "scripts/ci-workspace-release-qualification.mjs", "scripts/ci-workspace-release-qualification.test.mjs"],
     extends: [tseslint.configs.disableTypeChecked],
     languageOptions: { parserOptions: { projectService: false } },
   },
