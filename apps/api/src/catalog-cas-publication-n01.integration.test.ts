@@ -1,3 +1,4 @@
+import { readySmallPublications } from './publication-ready.fixture.js';
 import { fixtureChunks, fixtureValue } from './test-values.fixture.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -164,14 +165,21 @@ it('resolves a lost CAS publication acknowledgement by the same durable receipts
 },90000);
 
 it('does not bypass a rejected CAS set through per-member publication when its last version is stale',async()=>{
- const id='n01-cas-stale-no-fallback',f=await activeFixture(id,'windows',migration),{files}=composition(f);
+ const id='n01-cas-stale-no-fallback',f=await activeFixture(id,'windows',migration),{database,files}=composition(f);
  try{
   const seed=await seeded(f,2),bytes=Buffer.alloc(49152,169),prepared=[];
   for(const [n,old]of seed.old.entries())prepared.push(await files.prepareCatalogUpload(f.uploadInput('cas-'+String(n)+'.bin',bytes,previous(old)),f.proof));
   const competing=Buffer.alloc(49152,170);
   await f.upload(f.uploadInput('cas-1.bin',competing,previous(fixtureValue(seed.old[1]))),competing);
   const effects=vi.spyOn(f.raw,'rename');
-  const outcomes=await Promise.allSettled(prepared.map(p=>files.completeSmallCatalogUpload(p,f.proof,bytes)));
+  const commands=vi.spyOn(f.writer,'catalogUploadBatch');
+  // The premise is one two-member ready set. Independent fsync arrivals may
+  // legitimately form separate publications under the real tail deadline.
+  // Hold only post-verification admission; all real writes/SQL/timers remain.
+  const outcomes=await readySmallPublications(f,{database,files},prepared.map(p=>({prepared:p,bytes})));
+  const claims=commands.mock.calls.filter(([command])=>command==='claim-cas-set');
+  expect(claims).toHaveLength(1);expect(fixtureValue(claims[0])[2]).toHaveLength(2);
+  expect(commands.mock.calls.filter(([command])=>command==='publish-cas-set')).toHaveLength(0);
   expect(outcomes.every(x=>x.status==='rejected'&&String(x.reason).includes('precondition_failed'))).toBe(true);
   expect(effects).not.toHaveBeenCalled();
   expect(sha(await physical(f,fixtureValue(prepared[0]).execution.targetPath))).toBe(sha(fixtureValue(seed.bytes[0])));
@@ -179,7 +187,7 @@ it('does not bypass a rejected CAS set through per-member publication when its l
   for(const p of prepared)expect(sha(await physical(f,p.execution.tempPath))).toBe(sha(bytes));
   expect(await f.admin.withSql(sql=>sql`SELECT id FROM file_versions`)).toHaveLength(3);
   expect(await f.admin.withSql(sql=>sql`SELECT id FROM catalog_upload_publication_groups`)).toHaveLength(0);
-  await evidence(id,'result',{actualCompetingWriter:true,staleLastVersion:true,noPerMemberFallback:true,noNewPhysicalEffects:true,originalBytesRetained:true});
+  await evidence(id,'result',{actualCompetingWriter:true,staleLastVersion:true,noPerMemberFallback:true,noNewPhysicalEffects:true,originalBytesRetained:true,oneActualTwoMemberCasClaim:true});
  }finally{vi.restoreAllMocks();await f.close();}
 },90000);
 
@@ -241,4 +249,39 @@ it('keeps a small replacement of a large predecessor on the ordinary bounded pat
   for(const [n,p]of result.entries()){expect(sha(await physical(f,p.execution.targetPath))).toBe(sha(bytes));expect(sha(await physical(f,fixtureValue(p.execution.archivePath)))).toBe(sha(fixtureValue(seed.bytes[n])));}
   await evidence(id,'result',{oldSize:262145,newSize:4096,ordinaryFallback:true,files:4,fullShaAndArchives:true});
  }finally{vi.restoreAllMocks();await f.close();}
+},90000);
+
+it('preserves an independent fresh CAS completion while a later stale original is rejected',async()=>{
+ const id='n01-cas-independent-ready-members',f=await activeFixture(id,'windows',migration),{files}=composition(f);
+ let releaseSecond=()=>{},timer:ReturnType<typeof setTimeout>|undefined,completionJoin:Promise<PromiseSettledResult<PreparedCatalogUpload>[]>|undefined;
+ try{
+  const seed=await seeded(f,2),bytes=Buffer.alloc(49152,169),prepared:PreparedCatalogUpload[]=[];
+  for(const [n,old]of seed.old.entries())prepared.push(await files.prepareCatalogUpload(f.uploadInput('cas-'+String(n)+'.bin',bytes,previous(old)),f.proof));
+  const competing=Buffer.alloc(49152,170);
+  await f.upload(f.uploadInput('cas-1.bin',competing,previous(fixtureValue(seed.old[1]))),competing);
+  const existing=await f.admin.withSql(sql=>sql<{id:string}[]>`SELECT id FROM file_versions ORDER BY id`);
+  const write=f.executor.writeVerifiedOnce.bind(f.executor),gate=new Promise<void>(resolve=>{releaseSecond=resolve;});let verified=0,expired=false;
+  timer=setTimeout(()=>{expired=true;releaseSecond();},5000);
+  vi.spyOn(f.executor,'writeVerifiedOnce').mockImplementation(async(...args)=>{
+   const proof=await write(...args);verified++;
+   if(args[1]===fixtureValue(prepared[1]).execution.tempPath)await gate;
+   return proof;
+  });
+  const completing=prepared.map(p=>files.completeSmallCatalogUpload(p,f.proof,bytes));completionJoin=Promise.allSettled(completing);
+  void fixtureValue(completing[0]).then(()=>{clearTimeout(timer);releaseSecond();},()=>{clearTimeout(timer);releaseSecond();});
+  const outcomes=await completionJoin;expect(expired).toBe(false);expect(verified).toBe(2);
+  const first=fixtureValue(outcomes[0]),last=fixtureValue(outcomes[1]);
+  expect(first.status).toBe('fulfilled');expect(last.status).toBe('rejected');
+  if(first.status!=='fulfilled'||last.status!=='rejected')throw Error('Independent CAS fixture did not reach declared outcomes');
+  expect(first.value.status.result?.status).toBe('PUBLISHED');expect(previous(first.value).nodeId).toBe(previous(fixtureValue(seed.old[0])).nodeId);
+  expect(String(last.reason)).toContain('precondition_failed');
+  expect(sha(await physical(f,fixtureValue(prepared[0]).execution.targetPath))).toBe(sha(bytes));
+  expect(sha(await physical(f,fixtureValue(fixtureValue(prepared[0]).execution.archivePath)))).toBe(sha(fixtureValue(seed.bytes[0])));
+  expect(sha(await physical(f,fixtureValue(prepared[1]).execution.targetPath))).toBe(sha(competing));
+  expect(sha(await physical(f,fixtureValue(prepared[1]).execution.tempPath))).toBe(sha(bytes));
+  const after=await f.admin.withSql(sql=>sql<{id:string}[]>`SELECT id FROM file_versions ORDER BY id`);
+  expect(after).toHaveLength(4);expect(existing.every(row=>after.some(next=>next.id===row.id))).toBe(true);
+  expect(await f.admin.withSql(sql=>sql`SELECT id FROM catalog_upload_publication_groups`)).toHaveLength(0);
+  await evidence(id,'result',{separateRealPostVerificationArrivals:true,productTailTimerUnchanged:true,freshOriginalPublished:true,staleOriginalRetained:true,competingBytesPreserved:true,fullPhysicalSha:true,allPriorVersionIdsPreserved:true,versions:4});
+ }finally{releaseSecond();clearTimeout(timer);await completionJoin;vi.restoreAllMocks();await f.close();}
 },90000);
